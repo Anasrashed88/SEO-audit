@@ -258,14 +258,13 @@ def audit_single_page(url_item):
     }
 
 def generate_client_pdf(domain, score, summary_stats):
-    # 1. تحميل خط Cairo الأصلي وتجاوز ملفات Git-LFS التالفة
-    font_path = "Cairo-Regular.ttf"
-    # إذا كان الملف غير موجود أو حجمه تالف (أقل من 30 كيلوبايت) نعيد تحميله فوراً
+    # 1. تحميل خط Amiri المتكامل بنسبة 100% مع الحروف العربية
+    font_path = "Amiri-Regular.ttf"
     if not os.path.exists(font_path) or os.path.getsize(font_path) < 30000:
-        font_url = "https://cdn.jsdelivr.net/npm/pdfmake-rtl/fonts/Cairo/Cairo-Regular.ttf"
+        font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
         try:
             r = requests.get(font_url, timeout=15)
-            if r.status_code == 200 and len(r.content) > 30000:
+            if r.status_code == 200:
                 with open(font_path, "wb") as f:
                     f.write(r.content)
         except:
@@ -291,44 +290,42 @@ def generate_client_pdf(domain, score, summary_stats):
 
     class PDFReport(FPDF):
         def header(self):
-            # إدراج الشعار في الزاوية اليسرى بحماية كاملة
             if os.path.exists(logo_path):
                 try:
                     self.image(logo_path, x=15, y=10, w=22)
                 except:
                     pass
             
-            self.set_font("Cairo", "", 13)
+            self.set_font("Amiri", "", 14)
             self.set_text_color(15, 23, 42)
-            self.cell(0, 6, ar("أنس راشد"), ln=True, align="R")
-            self.set_font("Cairo", "", 9)
+            self.cell(0, 7, ar("أنس راشد"), ln=True, align="R")
+            self.set_font("Amiri", "", 10)
             self.set_text_color(100, 116, 139)
             self.cell(0, 5, ar("خبير تحسين محركات البحث"), ln=True, align="R")
             self.set_draw_color(226, 232, 240)
-            self.line(15, 26, 195, 26)
+            self.line(15, 27, 195, 27)
             self.ln(6)
 
         def footer(self):
             self.set_y(-15)
             self.set_draw_color(226, 232, 240)
             self.line(15, 282, 195, 282)
-            self.set_font("Cairo", "", 8)
+            self.set_font("Amiri", "", 9)
             self.set_text_color(148, 163, 184)
             self.cell(0, 10, "anasrashed.com   |   anas@anasrashed.com", align="C")
 
     pdf = PDFReport()
-    # تسجيل الخط قبل فتح الصفحة لتفادي أخطاء الـ Header
-    pdf.add_font("Cairo", "", font_path)
+    pdf.add_font("Amiri", "", font_path)
     pdf.add_page()
     
     # عنوان التقرير
-    pdf.set_font("Cairo", "", 15)
+    pdf.set_font("Amiri", "", 16)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, ar("تقرير الفحص الفني الشامل لمحركات البحث"), ln=True, align="C")
     
-    pdf.set_font("Cairo", "", 10)
+    pdf.set_font("Amiri", "", 11)
     pdf.set_text_color(71, 85, 105)
-    pdf.cell(0, 5, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
+    pdf.cell(0, 6, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
     pdf.ln(4)
 
     # مربع السكور
@@ -336,7 +333,7 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.set_draw_color(203, 213, 225)
     pdf.rect(15, 46, 180, 16, 'DF')
     pdf.set_xy(15, 49)
-    pdf.set_font("Cairo", "", 13)
+    pdf.set_font("Amiri", "", 15)
     if score < 60:
         pdf.set_text_color(225, 29, 72)
     elif score < 80:
@@ -352,7 +349,7 @@ def generate_client_pdf(domain, score, summary_stats):
         start_x = (210 - table_width) / 2
         
         pdf.set_x(start_x)
-        pdf.set_font("Cairo", "", 11)
+        pdf.set_font("Amiri", "", 12)
         pdf.set_text_color(15, 23, 42)
         pdf.cell(table_width, 7, ar(title), ln=True, align="R")
         pdf.ln(1)
@@ -360,12 +357,12 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.set_x(start_x)
         pdf.set_fill_color(241, 245, 249)
         pdf.set_draw_color(203, 213, 225)
-        pdf.set_font("Cairo", "", 9)
+        pdf.set_font("Amiri", "", 10)
         pdf.set_text_color(30, 41, 59)
         pdf.cell(col_widths[1], 7, ar("الحالة / العدد"), 1, 0, 'C', fill=True)
         pdf.cell(col_widths[0], 7, ar("عنصر الفحص والتدقيق"), 1, 1, 'C', fill=True)
 
-        pdf.set_font("Cairo", "", 8)
+        pdf.set_font("Amiri", "", 9)
         for label, val in rows:
             pdf.set_x(start_x)
             pdf.set_text_color(71, 85, 105)
@@ -373,15 +370,15 @@ def generate_client_pdf(domain, score, summary_stats):
             pdf.cell(col_widths[0], 6, ar(label), 1, 1, 'R')
         pdf.ln(5)
 
-    # 1. جدول بنية الصفحات والميتا
+    # 1. جدول بنية الصفحات والميتا (تعريب نقي لمنع انقلاب الأقواس)
     pages_rows = [
         ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{summary_stats['total_pages']} صفحة"),
         ("صفحات المنتجات المكتشفة", f"{summary_stats['products']} منتج"),
         ("صفحات الأقسام والكولكشنات", f"{summary_stats['categories']} تصنيف"),
         ("مقالات وصفحات المدونة", f"{summary_stats.get('blog_pages', 0)} مقال"),
         ("الصفحات التعريفية والسياسات", f"{summary_stats['info_pages']} صفحة"),
-        ("عناوين ميتا (Title) مفقودة أو غير متوافقة", f"{summary_stats['bad_titles']} عنوان"),
-        ("أوصاف ميتا (Description) مفقودة أو غير مهيأة", f"{summary_stats['bad_descs']} وصف")
+        ("عناوين الميتا الرئيسية المفقودة أو غير المتوافقة", f"{summary_stats['bad_titles']} عنوان"),
+        ("أوصاف الميتا التسويقية المفقودة أو غير المهيأة", f"{summary_stats['bad_descs']} وصف")
     ]
     draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", pages_rows)
 
@@ -392,17 +389,17 @@ def generate_client_pdf(domain, score, summary_stats):
 
     image_rows = [
         ("إجمالي الصور المفحوصة بالمتجر", f"{total_imgs} صورة"),
-        ("صور تفتقر لوسم النص البديل (Alt Tag)", f"{missing_alts} صورة"),
+        ("صور تفتقر لوسم النص البديل لمحركات البحث", f"{missing_alts} صورة"),
         ("نسبة الصور غير المهيأة لمحركات البحث", f"{alt_ratio}%"),
-        ("حالة ظهور الصور في بحث صور جوجل (Google Images)", "ضعيف جداً ومفقود" if missing_alts > 0 else "ممتاز ومكتمل")
+        ("حالة ظهور الصور في بحث صور جوجل المجاني", "ضعيف جداً ومفقود" if missing_alts > 0 else "ممتاز ومكتمل")
     ]
-    draw_table("2. جدول تدقيق وسوم وصور المتجر (Image SEO):", image_rows)
+    draw_table("2. جدول تدقيق وسوم وصور المتجر:", image_rows)
 
     # 3. صندوق التشخيص والتوصيات في المنتصف
     box_width = 180
     box_x = (210 - box_width) / 2
     pdf.set_x(box_x)
-    pdf.set_font("Cairo", "", 11)
+    pdf.set_font("Amiri", "", 12)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(box_width, 6, ar("3. التشخيص الاستشاري وخطة العمل:"), ln=True, align="R")
     pdf.ln(1)
@@ -413,22 +410,21 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.rect(box_x, box_y, box_width, 24, 'DF')
     
     pdf.set_xy(box_x + 5, box_y + 3)
-    pdf.set_font("Cairo", "", 8)
+    pdf.set_font("Amiri", "", 9)
     pdf.set_text_color(71, 85, 105)
     
     diag_text = (
-        "يعاني المتجر من ضعف كبير في تهيئة وسوم الصور (Alt Tags) مما يحرمه من آلاف الزيارات عبر بحث الصور المجاني، "
-        "بالإضافة لوجود فجوة في صياغة أوصاف الميتا التسويقية. يوصى فوراً بإعادة كتابة البيانات الوصفية وفق معايير جوجل، "
-        "وإسناد نصوص بديلة لجميع الصور لرفع التوافق فوق 95% ومضاعفة المبيعات."
+        "يعاني المتجر من ضعف كبير في تهيئة وسوم الصور مما يحرمه من آلاف الزيارات عبر بحث الصور المجاني، "
+        "بالإضافة لوجود فجوة في صياغة أوصاف الميتا التسويقية. يوصى فوراً بإعادة كتابة البيانات الوصفية وفق معايير محركات البحث، "
+        "وإسناد نصوص بديلة لجميع الصور لرفع التوافق فوق 95% ومضاعفة المبيعات المجانية."
     )
     
-    wrapped_lines = textwrap.wrap(diag_text, width=95)
+    wrapped_lines = textwrap.wrap(diag_text, width=85)
     for line in wrapped_lines:
         pdf.set_x(box_x + 5)
-        pdf.cell(box_width - 10, 4.5, ar(line), ln=True, align="R")
+        pdf.cell(box_width - 10, 4.8, ar(line), ln=True, align="R")
 
-    return bytes(pdf.output())
-st.sidebar.title("🧭 القائمة الرئيسية")
+    return bytes(pdf.output())st.sidebar.title("🧭 القائمة الرئيسية")
 nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
 
 if nav == "🔍 فحص متجر جديد":
