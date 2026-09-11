@@ -11,7 +11,7 @@ import zipfile
 import sqlite3
 import textwrap
 from datetime import datetime
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, unquote
 from concurrent.futures import ThreadPoolExecutor
 from fpdf import FPDF
 import arabic_reshaper
@@ -47,6 +47,8 @@ init_db()
 
 if 'audit_df' not in st.session_state:
     st.session_state.audit_df = None
+if 'images_df' not in st.session_state:
+    st.session_state.images_df = None
 if 'summary' not in st.session_state:
     st.session_state.summary = None
 if 'current_url' not in st.session_state:
@@ -93,32 +95,28 @@ def extract_footer_and_menu_urls(base_url):
         pass
     return found
 
+# تصنيف الصفحات الذكي والمصحح (الأولوية القصوى للسياسات)
 def detect_page_type_advanced(url, base_url, soup):
     base_clean = base_url.rstrip('/')
     url_clean = url.rstrip('/')
     if url_clean == base_clean:
         return 'صفحة رئيسية'
     
-    path = urlparse(url).path.lower()
+    # فك تشفير الرابط العربي لفحصه بدقة (مثل فك %D8%B3...)
+    path = unquote(urlparse(url).path.lower())
+    
+    # 1. الأولوية الأولى المطلقة: الصفحات التعريفية والسياسات
+    policy_keywords = ['سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى', 'أسئلة', 'من-نحن', 'اتصل', 'pages', 'policies', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']
+    if any(k in path for k in policy_keywords):
+        return 'صفحة تعريفية'
+
     og_type = ""
     if soup:
         og_tag = soup.find('meta', attrs={'property': 'og:type'})
         if og_tag and og_tag.get('content'):
             og_type = og_tag['content'].lower()
-    
-    # 1. فحص المدونة والمقالات
-    if any(k in path for k in ['/blog', '/blogs', '/articles', '/article', '/post', '/posts']):
-        return 'صفحة مدونة'
-    if 'article' in og_type:
-        return 'صفحة مدونة'
-    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
-        return 'صفحة مدونة'
 
-    # 2. فحص الصفحات التعريفية والسياسات
-    if any(k in path for k in ['/pages/', '/policies/', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']):
-        return 'صفحة تعريفية'
-
-    # 3. فحص المنتجات
+    # 2. المنتجات (أولوية ثانية)
     if 'product' in og_type:
         return 'صفحة منتج'
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
@@ -130,7 +128,15 @@ def detect_page_type_advanced(url, base_url, soup):
     if any(re.match(r'^p\d+', s) for s in segments):
         return 'صفحة منتج'
 
-    # 4. فحص التصنيفات والكولكشنات
+    # 3. المدونة والمقالات (أولوية ثالثة)
+    if any(k in path for k in ['/blog', '/blogs', '/articles', '/article', '/post', '/posts']):
+        return 'صفحة مدونة'
+    if 'article' in og_type:
+        return 'صفحة مدونة'
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
+        return 'صفحة مدونة'
+
+    # 4. التصنيفات والكولكشنات
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
         return 'صفحة تصنيف'
             
@@ -182,7 +188,7 @@ def audit_single_page(url_item):
     res = None
     for attempt in range(3):
         try:
-            res = requests.get(url, headers=HEADERS, timeout=12)
+            res = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
             if res.status_code == 429:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -190,24 +196,30 @@ def audit_single_page(url_item):
         except:
             time.sleep(1)
 
+    # اعتماد الرابط النهائي الفعلي بعد التحويلات (Redirect Resolution)
+    final_url = res.url if res else url
+
     if res is None or res.status_code != 200:
         status_code = res.status_code if res else 'فشل اتصال'
         return {
-            'نوع الصفحة': 'صفحة عامة',
-            'الرابط': url,
-            'درجة السيو': 0,
-            'عنوان الميتا': 'تعذر الفحص',
-            'حالة العنوان': f'خطأ {status_code}',
-            'وصف الميتا': 'تعذر الفحص',
-            'حالة الوصف': f'خطأ {status_code}',
-            'إجمالي الصور': 0,
-            'صور بدون Alt': 0,
-            'عدد الكلمات': 0,
-            'حالة المحتوى': 'غير متاح'
+            'page_data': {
+                'نوع الصفحة': 'صفحة عامة',
+                'الرابط': final_url,
+                'درجة السيو': 0,
+                'عنوان الميتا': 'تعذر الفحص',
+                'حالة العنوان': f'خطأ {status_code}',
+                'وصف الميتا': 'تعذر الفحص',
+                'حالة الوصف': f'خطأ {status_code}',
+                'إجمالي الصور': 0,
+                'صور بدون Alt': 0,
+                'عدد الكلمات': 0,
+                'حالة المحتوى': 'غير متاح'
+            },
+            'images_data': []
         }
 
     soup = BeautifulSoup(res.text, 'html.parser')
-    page_type = detect_page_type_advanced(url, base_url, soup)
+    page_type = detect_page_type_advanced(final_url, base_url, soup)
 
     # Title
     title_tag = soup.find('title')
@@ -225,10 +237,28 @@ def audit_single_page(url_item):
     elif len(meta_desc) < 70: desc_status = 'قصير جداً'
     elif len(meta_desc) > 165: desc_status = 'طويل جداً'
 
-    # Images & Alt
+    # فحص مفصل لجميع صور الصفحة وجلب بياناتها
     images = soup.find_all('img')
     total_img = len(images)
-    missing_alt = sum(1 for img in images if not img.get('alt', '').strip())
+    missing_alt = 0
+    page_images = []
+
+    for img in images:
+        src = img.get('src') or img.get('data-src') or ''
+        if src:
+            full_img_url = urljoin(final_url, src)
+            alt_text = img.get('alt', '').strip()
+            is_missing = (alt_text == '')
+            if is_missing:
+                missing_alt += 1
+            
+            page_images.append({
+                'رابط الصفحة': final_url,
+                'نوع الصفحة': page_type,
+                'رابط الصورة': full_img_url,
+                'النص البديل الحالي (Alt)': alt_text if alt_text else 'لا يوجد (فارغ)',
+                'حالة النص البديل': 'مفقود' if is_missing else 'سليم ومكتمل'
+            })
 
     # Words
     for s in soup(['script', 'style', 'nav', 'footer']): s.decompose()
@@ -243,17 +273,20 @@ def audit_single_page(url_item):
     score = max(0, score)
 
     return {
-        'نوع الصفحة': page_type,
-        'الرابط': url,
-        'درجة السيو': score,
-        'عنوان الميتا': title,
-        'حالة العنوان': title_status,
-        'وصف الميتا': meta_desc,
-        'حالة الوصف': desc_status,
-        'إجمالي الصور': total_img,
-        'صور بدون Alt': missing_alt,
-        'عدد الكلمات': words,
-        'حالة المحتوى': content_status
+        'page_data': {
+            'نوع الصفحة': page_type,
+            'الرابط': final_url,
+            'درجة السيو': score,
+            'عنوان الميتا': title,
+            'حالة العنوان': title_status,
+            'وصف الميتا': meta_desc,
+            'حالة الوصف': desc_status,
+            'إجمالي الصور': total_img,
+            'صور بدون Alt': missing_alt,
+            'عدد الكلمات': words,
+            'حالة المحتوى': content_status
+        },
+        'images_data': page_images
     }
 
 def generate_client_pdf(domain, score, summary_stats):
@@ -422,7 +455,7 @@ nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد
 
 if nav == "🔍 فحص متجر جديد":
     st.title("🚀 مركز عمليات السيو الشامل للمتاجر")
-    st.write("أداة الفحص والتدقيق الكامل لجميع أقسام ومنتجات ومدونات وسياسات المتجر الإلكتروني.")
+    st.write("أداة الفحص والتدقيق الكامل لجميع أقسام ومنتجات ومدونات وسياسات وصور المتجر الإلكتروني.")
 
     c_url, c_btn = st.columns([4, 1])
     with c_url:
@@ -435,32 +468,38 @@ if nav == "🔍 فحص متجر جديد":
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 فحص متجر جديد (تفريغ الشاشة)"):
             st.session_state.audit_df = None
+            st.session_state.images_df = None
             st.session_state.summary = None
             st.session_state.current_url = ""
             st.rerun()
 
     if start_btn and input_url:
         st.session_state.current_url = input_url
-        with st.spinner("جاري استخراج كافة الصفحات (منتجات، أقسام، مدونة، وسياسات)..."):
+        with st.spinner("جاري استخراج كافة الصفحات وقوائم المتجر والسياسات..."):
             urls = get_all_store_urls(input_url)
 
-        st.info(f"تم العثور على {len(urls)} صفحة شاملة. جاري الفحص والتصنيف الدقيق...")
+        st.info(f"تم العثور على {len(urls)} صفحة شاملة. جاري الفحص وتدقيق الصفحات والصور بدقة...")
 
         progress_bar = st.progress(0)
-        results = []
+        page_results = []
+        all_images_results = []
         url_tuples = [(u, input_url) for u in urls]
         total_urls = len(urls)
         completed = 0
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             for res in executor.map(audit_single_page, url_tuples):
-                results.append(res)
+                page_results.append(res['page_data'])
+                all_images_results.extend(res['images_data'])
                 completed += 1
                 progress_bar.progress(completed / total_urls)
                 time.sleep(0.04)
 
-        df = pd.DataFrame(results)
+        df = pd.DataFrame(page_results)
+        images_df = pd.DataFrame(all_images_results)
+        
         st.session_state.audit_df = df
+        st.session_state.images_df = images_df
         
         avg_score = round(df['درجة السيو'].mean(), 1)
         summary = {
@@ -488,6 +527,7 @@ if nav == "🔍 فحص متجر جديد":
 
     if st.session_state.audit_df is not None:
         df = st.session_state.audit_df
+        images_df = st.session_state.images_df
         summary = st.session_state.summary
 
         st.success(f" اكتمل فحص وتصنيف المتجر بنجاح: {st.session_state.current_url}")
@@ -506,17 +546,40 @@ if nav == "🔍 فحص متجر جديد":
         with k6:
             st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["info_pages"]}</div><div class="metric-label">التعريفية</div></div>', unsafe_allow_html=True)
 
-        st.subheader("📋 تصفية وعرض النتائج")
-        selected_type = st.selectbox("اختر نوع الصفحة للعرض:", ["جميع الصفحات", "صفحة منتج", "صفحة تصنيف", "صفحة مدونة", "صفحة تعريفية", "صفحة رئيسية"])
-        
-        if selected_type == "جميع الصفحات":
-            display_df = df.copy().reset_index(drop=True)
-        else:
-            display_df = df[df['نوع الصفحة'] == selected_type].copy().reset_index(drop=True)
+        tab1, tab2 = st.tabs(["📄 جدول فحص الصفحات", "🖼️ جدول تدقيق صور المتجر (Alt Tags)"])
 
-        display_df.index = display_df.index + 1
-        st.dataframe(display_df, use_container_width=True)
+        with tab1:
+            st.subheader("📋 تصفية وعرض الصفحات")
+            selected_type = st.selectbox("اختر نوع الصفحة للعرض:", ["جميع الصفحات", "صفحة منتج", "صفحة تصنيف", "صفحة مدونة", "صفحة تعريفية", "صفحة رئيسية"])
+            
+            if selected_type == "جميع الصفحات":
+                display_df = df.copy().reset_index(drop=True)
+            else:
+                display_df = df[df['نوع الصفحة'] == selected_type].copy().reset_index(drop=True)
 
+            display_df.index = display_df.index + 1
+            st.dataframe(display_df, use_container_width=True)
+
+        with tab2:
+            st.subheader("🖼️ التقرير المفصل لكل صور المتجر ونصوصها البديلة")
+            if images_df is not None and not images_df.empty:
+                col_img1, col_img2 = st.columns(2)
+                with col_img1:
+                    filter_img = st.selectbox("تصفية الصور:", ["جميع الصور", "صور تفتقر لوسم Alt فقط", "صور سليمة"])
+                
+                if filter_img == "صور تفتقر لوسم Alt فقط":
+                    view_images_df = images_df[images_df['حالة النص البديل'] == 'مفقود'].copy().reset_index(drop=True)
+                elif filter_img == "صور سليمة":
+                    view_images_df = images_df[images_df['حالة النص البديل'] == 'سليم ومكتمل'].copy().reset_index(drop=True)
+                else:
+                    view_images_df = images_df.copy().reset_index(drop=True)
+
+                view_images_df.index = view_images_df.index + 1
+                st.dataframe(view_images_df, use_container_width=True)
+            else:
+                st.info("لا توجد بيانات صور متاحة للعرض.")
+
+        # تجهيز الحزمة المصنفة ZIP (تشمل ملف الصور الجديد)
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             df_p = df[df['نوع الصفحة'] == 'صفحة منتج']
@@ -530,10 +593,16 @@ if nav == "🔍 فحص متجر جديد":
             df_h = df[df['نوع الصفحة'] == 'صفحة رئيسية']
             if not df_h.empty: zip_file.writestr("5_الصفحة_الرئيسية_homepage.csv", df_h.to_csv(index=False, encoding='utf-8-sig'))
             
+            # 6. ملف تدقيق الصور التفصيلي الجديد
+            if images_df is not None and not images_df.empty:
+                zip_file.writestr("6_تفاصيل_صور_المتجر_images_audit.csv", images_df.to_csv(index=False, encoding='utf-8-sig'))
+
             excel_buf = io.BytesIO()
             with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='SEO Audit')
-            zip_file.writestr("التقرير_الشامل_all_pages.xlsx", excel_buf.getvalue())
+                df.to_excel(writer, index=False, sheet_name='SEO Pages Audit')
+                if images_df is not None and not images_df.empty:
+                    images_df.to_excel(writer, index=False, sheet_name='Images Alt Audit')
+            zip_file.writestr("التقرير_الشامل_all_pages_and_images.xlsx", excel_buf.getvalue())
 
         pdf_bytes = generate_client_pdf(st.session_state.current_url, summary['score'], summary)
 
@@ -548,7 +617,7 @@ if nav == "🔍 فحص متجر جديد":
             )
         with d_col2:
             st.download_button(
-                label="📦 تحميل حزمة البيانات المصنفة (ملف ZIP)",
+                label="📦 تحميل حزمة البيانات والملفات المصنفة مع الصور (ملف ZIP)",
                 data=zip_buffer.getvalue(),
                 file_name=f"Data_Package_{urlparse(st.session_state.current_url).netloc}.zip",
                 mime="application/zip"
@@ -579,6 +648,7 @@ elif nav == "📁 سجل المتاجر السابقة":
             if row:
                 st.session_state.current_url = row[0]
                 st.session_state.audit_df = pd.read_json(row[1])
+                st.session_state.images_df = None
                 st.session_state.summary = {
                     'total_pages': row[3],
                     'score': row[2],
