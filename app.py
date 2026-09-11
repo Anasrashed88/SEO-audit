@@ -105,11 +105,11 @@ def detect_page_type_advanced(url, base_url, soup):
     path_clean = path.strip('/')
     segments = [s for s in path.split('/') if s]
 
-    # 1. فحص صفحات الكتالوج العامة (ليست منتجاً بل تصنيفاً)
+    # 1. صفحات الكتالوج العامة
     if path_clean in ['products', 'product', 'all-products', 'catalog', 'collections/all']:
         return 'صفحة تصنيف'
 
-    # 2. فحص الصفحات التعريفية والسياسات
+    # 2. الصفحات التعريفية والسياسات
     policy_keywords = ['سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى', 'أسئلة', 'من-نحن', 'اتصل', 'pages', 'policies', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']
     if any(k in path for k in policy_keywords):
         return 'صفحة تعريفية'
@@ -120,7 +120,7 @@ def detect_page_type_advanced(url, base_url, soup):
         if og_tag and og_tag.get('content'):
             og_type = og_tag['content'].lower()
 
-    # 3. فحص المنتجات (يجب أن يحتوي على اسم منتج حقيقي وليس مجرد مسار عام)
+    # 3. فحص المنتجات
     if 'product' in og_type:
         return 'صفحة منتج'
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
@@ -133,7 +133,7 @@ def detect_page_type_advanced(url, base_url, soup):
     if any(re.match(r'^p\d+', s) for s in segments):
         return 'صفحة منتج'
 
-    # 4. فحص المدونة والمقالات
+    # 4. المدونة والمقالات
     if any(k in path for k in ['/blog', '/blogs', '/articles', '/article', '/post', '/posts']):
         return 'صفحة مدونة'
     if 'article' in og_type:
@@ -141,7 +141,7 @@ def detect_page_type_advanced(url, base_url, soup):
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
         return 'صفحة مدونة'
 
-    # 5. فحص التصنيفات والكولكشنات
+    # 5. التصنيفات والكولكشنات
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
         return 'صفحة تصنيف'
             
@@ -189,22 +189,37 @@ def get_all_store_urls(base_url):
         all_urls.add(base_url)
     return list(all_urls)
 
-# فلتر استبعاد صور عناصر الواجهة وأيقونات الدفع والتحميل
+# فلترة الصور الذكية الصارمة بناءً على طلبك (حظر static وقصر الفحص على media و cdn)
 def is_relevant_seo_image(img, src):
     if not src:
         return False
     src_lower = src.lower()
 
-    if src_lower.startswith('data:image'):
+    # 1. رفض قاطع لأي صورة static أو base64
+    if 'static.' in src_lower or '/static/' in src_lower or src_lower.startswith('data:image'):
         return False
 
-    # استبعاد ملفات التحميل والأيقونات التفاعلية
+    # 2. شرط إلزامي: أن يبدأ أو يحتوي الرابط على نطاقات الوسائط السحابية
+    valid_media_indicators = ['media.', 'cdn.', '/media/', '/cdn/', 'uploads', 'products', 'files', 'photos']
+    if not any(indicator in src_lower for indicator in valid_media_indicators):
+        return False
+
+    # 3. حظر الشعار وأيقونات الموقع الصريحة
+    if any(k in src_lower for k in ['logo', 'brand', 'favicon', 'watermark']):
+        return False
+        
+    img_classes = ' '.join(img.get('class', [])).lower()
+    img_id = img.get('id', '').lower()
+    if any(k in img_classes or k in img_id for k in ['logo', 'brand']):
+        return False
+
+    # 4. حظر الامتدادات غير المخصصة للصور الحقيقية
     if any(src_lower.endswith(ext) or f"{ext}?" in src_lower for ext in ['.gif', '.svg', '.ico']):
         return False
 
-    # استبعاد وسوم عناصر الواجهة، بوابات الدفع، وسائل التواصل، والتتبع
+    # 5. استبعاد عناصر واجهة المستخدم وبوابات الدفع
     junk_keywords = [
-        'spinner', 'loader', 'loading', 'ajax', 'icon', 'logo', 'badge',
+        'spinner', 'loader', 'loading', 'ajax', 'icon', 'badge',
         'payment', 'gateway', 'tamara', 'tabby', 'mada', 'visa', 'mastercard',
         'apple-pay', 'applepay', 'stc-pay', 'stcpay', 'vat', 'tax',
         'maroof', 'social', 'whatsapp', 'snapchat', 'instagram', 'tiktok',
@@ -212,17 +227,6 @@ def is_relevant_seo_image(img, src):
     ]
     if any(junk in src_lower for junk in junk_keywords):
         return False
-
-    # استبعاد الصور المصغرة جداً (أقل من 60 بكسل)
-    w = img.get('width')
-    h = img.get('height')
-    try:
-        if w and int(str(w).replace('px', '')) < 60:
-            return False
-        if h and int(str(h).replace('px', '')) < 60:
-            return False
-    except:
-        pass
 
     return True
 
@@ -280,8 +284,13 @@ def audit_single_page(url_item):
     elif len(meta_desc) < 70: desc_status = 'قصير جداً'
     elif len(meta_desc) > 165: desc_status = 'طويل جداً'
 
-    # فحص مفلتر ودقيق لصور المحتوى الحقيقية فقط
-    raw_images = soup.find_all('img')
+    # إعدام وحذف الـ header والـ footer والـ nav حتى لا يُسحب الشعار إطلاقاً
+    content_soup = BeautifulSoup(res.text, 'html.parser')
+    for excluded_tag in content_soup.find_all(['header', 'nav', 'footer', 'aside']) + content_soup.find_all(attrs={'class': re.compile(r'(header|footer|navbar|nav-menu)', re.I)}):
+        excluded_tag.decompose()
+
+    # فحص صور المحتوى الحقيقية فقط داخل جسم الصفحة
+    raw_images = content_soup.find_all('img')
     total_img = 0
     missing_alt = 0
     page_images = []
@@ -305,8 +314,8 @@ def audit_single_page(url_item):
             })
 
     # Words
-    for s in soup(['script', 'style', 'nav', 'footer']): s.decompose()
-    words = len(soup.get_text(separator=' ', strip=True).split())
+    for s in content_soup(['script', 'style']): s.decompose()
+    words = len(content_soup.get_text(separator=' ', strip=True).split())
     content_status = 'جيد' if words >= 50 else 'ضعيف جداً'
 
     score = 100
@@ -542,6 +551,29 @@ if nav == "🔍 فحص متجر جديد":
         df = pd.DataFrame(page_results)
         images_df = pd.DataFrame(all_images_results)
         
+        # استبعاد التكرارات الكانونيكال والنسخ المكررة لضبط العدد الفعلي للمنتجات
+        df = df.drop_duplicates(subset=['الرابط']).copy()
+
+        # ضبط دقيق لعدد المنتجات الفعلية (دمج النسخ المكررة مثل -1)
+        product_slugs = set()
+        adjusted_page_types = []
+        for idx, row in df.iterrows():
+            ptype = row['نوع الصفحة']
+            u = row['الرابط']
+            if ptype == 'صفحة منتج':
+                slug = unquote(urlparse(u).path.strip('/').split('/')[-1])
+                # تجريد اللواحق المكررة مثل -1 أو -2
+                base_slug = re.sub(r'-\d+$', '', slug)
+                if base_slug in product_slugs:
+                    adjusted_page_types.append('صفحة تصنيف')  # تحييد النسخة المكررة كأرشيف
+                else:
+                    product_slugs.add(base_slug)
+                    adjusted_page_types.append('صفحة منتج')
+            else:
+                adjusted_page_types.append(ptype)
+                
+        df['نوع الصفحة'] = adjusted_page_types
+
         st.session_state.audit_df = df
         st.session_state.images_df = images_df
         
@@ -605,7 +637,7 @@ if nav == "🔍 فحص متجر جديد":
             st.dataframe(display_df, use_container_width=True)
 
         with tab2:
-            st.subheader("🖼️ التقرير المفصل لصور المحتوى والمنتجات (مستبعد منها الأيقونات)")
+            st.subheader("🖼️ التقرير المفصل لصور المحتوى والمنتجات (مستبعد منها الشعار وعناصر static)")
             if images_df is not None and not images_df.empty:
                 col_img1, col_img2 = st.columns(2)
                 with col_img1:
@@ -621,7 +653,7 @@ if nav == "🔍 فحص متجر جديد":
                 view_images_df.index = view_images_df.index + 1
                 st.dataframe(view_images_df, use_container_width=True)
             else:
-                st.info("لا توجد بيانات صور متاحة للعرض.")
+                st.info("لا توجد صور محتوى بحاجة لتدقيق في هذه الصفحات.")
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
