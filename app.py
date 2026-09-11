@@ -6,9 +6,10 @@ import pandas as pd
 import time
 import io
 import os
+import re
 import zipfile
 import sqlite3
-import json
+import textwrap
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor
@@ -16,10 +17,8 @@ from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# ضبط الصفحة
 st.set_page_config(page_title="مركز عمليات السيو | أنس راشد", layout="wide", page_icon="🚀")
 
-# قاعدة البيانات المدمجة
 DB_FILE = "store_history.db"
 
 def init_db():
@@ -41,7 +40,6 @@ def init_db():
 
 init_db()
 
-# تهيئة الذاكرة المؤقتة (Session State)
 if 'audit_df' not in st.session_state:
     st.session_state.audit_df = None
 if 'summary' not in st.session_state:
@@ -49,7 +47,6 @@ if 'summary' not in st.session_state:
 if 'current_url' not in st.session_state:
     st.session_state.current_url = ""
 
-# التصميم الموحد CSS
 st.markdown("""
     <style>
     .main { direction: rtl; text-align: right; }
@@ -73,7 +70,6 @@ HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 }
 
-# صياد روابط الفوتر والصفحات التعريفية
 def extract_footer_and_menu_urls(base_url):
     found = set()
     try:
@@ -81,12 +77,9 @@ def extract_footer_and_menu_urls(base_url):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             target_keywords = ['سياسة', 'الشروط', 'الخصوصية', 'الاستبدال', 'الاسترجاع', 'الشحن', 'الشكاوى', 'الأسئلة', 'من نحن', 'اتصل', 'توصيل', 'ضمان', 'faq', 'terms', 'privacy', 'return', 'shipping', 'about', 'contact']
-            
             for a in soup.find_all('a', href=True):
                 href = a['href'].strip()
                 text = a.get_text(strip=True).lower()
-                
-                # التحقق من النص أو الرابط
                 if any(k in text for k in target_keywords) or any(k in href.lower() for k in target_keywords):
                     full_url = urljoin(base_url, href).split('#')[0].rstrip('/')
                     if urlparse(full_url).netloc == urlparse(base_url).netloc:
@@ -95,7 +88,8 @@ def extract_footer_and_menu_urls(base_url):
         pass
     return found
 
-def detect_page_type(url, base_url):
+# تصنيف الصفحات الذكي بنسبة 100% عبر فحص الـ HTML وهيكل الرابط معاً
+def detect_page_type_advanced(url, base_url, soup):
     base_clean = base_url.rstrip('/')
     url_clean = url.rstrip('/')
     if url_clean == base_clean:
@@ -103,27 +97,40 @@ def detect_page_type(url, base_url):
     
     path = urlparse(url).path.lower()
     
+    # 1. فحص الصفحات التعريفية أولاً
     if any(k in path for k in ['/pages/', '/policies/', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']):
         return 'صفحة تعريفية'
 
-    if '/products/' in path or '/product/' in path or '/p/' in path:
+    # 2. فحص المنتجات عبر الـ HTML والـ Tags والروابط
+    if soup:
+        og_type = soup.find('meta', attrs={'property': 'og:type'})
+        if og_type and 'product' in og_type.get('content', '').lower():
+            return 'صفحة منتج'
+        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
+            return 'صفحة منتج'
+
+    # فحص الروابط للمنتجات (سلة، زد، شوبيفاي)
+    if '/products/' in path or '/product/' in path or re.search(r'/p\d+', path) or path.endswith('/p') or '-p-' in path:
         return 'صفحة منتج'
     segments = [s for s in path.split('/') if s]
-    if segments and segments[0].startswith('p') and any(char.isdigit() for char in segments[0][:5]):
+    if any(re.match(r'^p\d+', s) for s in segments):
         return 'صفحة منتج'
 
-    if any(k in path for k in ['/category/', '/categories/', '/collection/', '/collections/', '/c/']):
+    # 3. فحص التصنيفات والكولكشنات
+    if soup:
+        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
+            return 'صفحة تصنيف'
+            
+    if any(k in path for k in ['/category/', '/categories/', '/collection/', '/collections/']) or re.search(r'/c\d+', path):
         return 'صفحة تصنيف'
-    if segments and (segments[0] in ['c', 'categories', 'collections', 'category']):
+    if any(re.match(r'^c\d+', s) for s in segments):
         return 'صفحة تصنيف'
 
-    return 'صفحة عامة'
+    return 'صفحة تعريفية' if len(segments) == 1 and not re.search(r'\d', segments[0]) else 'صفحة تصنيف'
 
 def get_all_store_urls(base_url):
     base_url = base_url.rstrip('/')
     all_urls = set()
-    
-    # 1. روابط الـ Sitemap
     sitemap_candidates = [
         f"{base_url}/sitemap.xml",
         f"{base_url}/sitemap_products_1.xml",
@@ -149,7 +156,6 @@ def get_all_store_urls(base_url):
         except:
             continue
             
-    # 2. صياد الفوتر لضمان جلب كل السياسات
     footer_urls = extract_footer_and_menu_urls(base_url)
     all_urls.update(footer_urls)
     
@@ -159,7 +165,6 @@ def get_all_store_urls(base_url):
 
 def audit_single_page(url_item):
     url, base_url = url_item
-    page_type = detect_page_type(url, base_url)
     
     res = None
     for attempt in range(3):
@@ -175,7 +180,7 @@ def audit_single_page(url_item):
     if res is None or res.status_code != 200:
         status_code = res.status_code if res else 'فشل اتصال'
         return {
-            'نوع الصفحة': page_type,
+            'نوع الصفحة': 'صفحة عامة',
             'الرابط': url,
             'درجة السيو': 0,
             'عنوان الميتا': 'تعذر الفحص',
@@ -189,6 +194,7 @@ def audit_single_page(url_item):
         }
 
     soup = BeautifulSoup(res.text, 'html.parser')
+    page_type = detect_page_type_advanced(url, base_url, soup)
 
     # Title
     title_tag = soup.find('title')
@@ -237,9 +243,8 @@ def audit_single_page(url_item):
         'حالة المحتوى': content_status
     }
 
-# محرك إنشاء تقرير الـ PDF للعميل
+# محرك الـ PDF الاحترافي الخالي من الأخطاء
 def generate_client_pdf(domain, score, summary_stats):
-    # تحميل خط عربي نظيف تلقائياً
     font_path = "Amiri-Regular.ttf"
     if not os.path.exists(font_path):
         font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
@@ -254,50 +259,59 @@ def generate_client_pdf(domain, score, summary_stats):
     class PDFReport(FPDF):
         def header(self):
             self.add_font("Amiri", "", font_path)
-            self.set_font("Amiri", "", 14)
-            self.set_text_color(30, 41, 59)
+            self.set_font("Amiri", "", 15)
+            self.set_text_color(15, 23, 42)
             self.cell(0, 7, ar("أنس راشد"), ln=True, align="R")
             self.set_font("Amiri", "", 10)
             self.set_text_color(100, 116, 139)
             self.cell(0, 6, ar("خبير تحسين محركات البحث"), ln=True, align="R")
-            self.line(10, 25, 200, 25)
-            self.ln(10)
+            self.set_draw_color(226, 232, 240)
+            self.line(10, 24, 200, 24)
+            self.ln(8)
 
         def footer(self):
             self.set_y(-15)
+            self.set_draw_color(226, 232, 240)
             self.line(10, 282, 200, 282)
             self.set_font("Amiri", "", 9)
-            self.set_text_color(100, 116, 139)
-            self.cell(0, 10, "anasrashed.com  |  anas@anasrashed.com", align="C")
+            self.set_text_color(148, 163, 184)
+            self.cell(0, 10, "anasrashed.com   |   anas@anasrashed.com", align="C")
 
     pdf = PDFReport()
     pdf.add_page()
     pdf.add_font("Amiri", "", font_path)
-    pdf.set_font("Amiri", "", 16)
     
     # عنوان التقرير
-    pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 10, ar(f"تقرير الفحص الفني والتدقيق الشامل لمحركات البحث"), ln=True, align="C")
-    pdf.set_font("Amiri", "", 12)
-    pdf.set_text_color(71, 85, 105)
-    pdf.cell(0, 8, ar(f"المتجر المستهدف: {domain}"), ln=True, align="C")
-    pdf.cell(0, 8, ar(f"تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
-    pdf.ln(8)
-
-    # مؤشر التوافق
-    pdf.set_fill_color(241, 245, 249)
-    pdf.rect(15, 60, 180, 25, 'F')
     pdf.set_font("Amiri", "", 18)
-    pdf.set_text_color(225, 29, 72) if score < 60 else pdf.set_text_color(16, 185, 129)
-    pdf.set_xy(15, 65)
-    pdf.cell(180, 8, ar(f"درجة التوافق العامة مع محركات البحث: {score}%"), align="C")
-    pdf.ln(20)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 10, ar("تقرير الفحص الفني والتدقيق الشامل لمحركات البحث"), ln=True, align="C")
+    
+    pdf.set_font("Amiri", "", 11)
+    pdf.set_text_color(71, 85, 105)
+    pdf.cell(0, 6, ar(f"المتجر المستهدف: {domain}"), ln=True, align="C")
+    pdf.cell(0, 6, ar(f"تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
+    pdf.ln(6)
 
-    # ملخص الأخطاء
+    # مربع السكور
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(203, 213, 225)
+    pdf.rect(15, 54, 180, 22, 'DF')
+    pdf.set_xy(15, 59)
+    pdf.set_font("Amiri", "", 16)
+    if score < 60:
+        pdf.set_text_color(225, 29, 72)
+    elif score < 80:
+        pdf.set_text_color(217, 119, 6)
+    else:
+        pdf.set_text_color(16, 185, 129)
+    pdf.cell(180, 10, ar(f"درجة التوافق العامة مع محركات البحث: {score}%"), align="C")
+    pdf.ln(22)
+
+    # ملخص الفحص بالأرقام
     pdf.set_font("Amiri", "", 13)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, ar("ملخص نتائج الفحص الشامل لكافة صفحات المتجر:"), ln=True, align="R")
-    pdf.ln(3)
+    pdf.ln(2)
 
     stats = [
         f"• إجمالي عدد الصفحات المفحوصة في المتجر: {summary_stats['total_pages']} صفحة.",
@@ -315,18 +329,31 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.cell(0, 7, ar(stat), ln=True, align="R")
         
     pdf.ln(6)
-    # التوصية الاستشارية
-    pdf.set_font("Amiri", "", 12)
+    
+    # التشخيص الاستشاري مع حل مشكلة انعكاس الأسطر بالكامل
+    pdf.set_font("Amiri", "", 13)
     pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 8, ar("التشخيص الاستشاري المبدئي:"), ln=True, align="R")
+    pdf.cell(0, 8, ar("التشخيص الاستشاري والتوصيات:"), ln=True, align="R")
+    pdf.ln(2)
+
+    diag_text = (
+        "يعاني المتجر من فجوة واضحة في تهيئة البيانات الوصفية (Metadata) وخلو الصور من نصوص "
+        "التعرف لمحركات البحث، مما يؤدي إلى فقدان تصدر نتائج البحث وظهور المنافسين في مراتب متقدمة. "
+        "يوصى بإعادة هيكلة العناوين والأوصاف واستهداف نية الشراء بدقة لرفع نسبة التوافق إلى ما فوق "
+        "95% ومضاعفة المبيعات المجانية عبر جوجل."
+    )
+    
     pdf.set_font("Amiri", "", 10)
     pdf.set_text_color(71, 85, 105)
-    recommendation = "يعاني المتجر من فجوة واضحة في تهيئة البيانات الوصفية (Metadata) وخلو الصور من نصوص التعرف لمحركات البحث، مما يؤدي لفقدان تصدر نتائج البحث وظهور المنافسين في مراتب متقدمة. يوصى بإعادة هيكلة العناوين والأوصاف واستهداف نية الشراء بدقة لرفع نسبة التوافق إلى ما فوق 95% ومضاعفة المبيعات المجانية."
-    pdf.multi_cell(0, 6, ar(recommendation), align="R")
+    
+    # تفكيك النص لأسطر منتظمة لتفادي قلب السطور في الـ PDF
+    wrapped_lines = textwrap.wrap(diag_text, width=85)
+    for line in wrapped_lines:
+        pdf.cell(0, 6, ar(line), ln=True, align="R")
 
     return bytes(pdf.output())
 
-# القائمة الجانبية للتنقل
+# القائمة والتنقل
 st.sidebar.title("🧭 القائمة الرئيسية")
 nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
 
@@ -334,16 +361,14 @@ if nav == "🔍 فحص متجر جديد":
     st.title("🚀 مركز عمليات السيو الشامل للمتاجر")
     st.write("أداة الفحص والتدقيق الكامل لجميع أقسام ومنتجات وسياسات المتجر الإلكتروني.")
 
-    # حقل الإدخال وزر البدء
     c_url, c_btn = st.columns([4, 1])
     with c_url:
-        input_url = st.text_input("أدخل رابط المتجر الإلكتروني:", value=st.session_state.current_url, placeholder="https://example.com")
+        input_url = st.text_input("أدخل رابط المتجر الإلكتروني:", value=st.session_state.current_url, placeholder="https://pinkit.sa")
     with c_btn:
         st.write("")
         st.write("")
         start_btn = st.button("🔍 بدء الفحص")
 
-    # زر إعادة التعيين
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 فحص متجر جديد (تفريغ الشاشة)"):
             st.session_state.audit_df = None
@@ -353,10 +378,10 @@ if nav == "🔍 فحص متجر جديد":
 
     if start_btn and input_url:
         st.session_state.current_url = input_url
-        with st.spinner("جاري استخراج كافة الصفحات (منتجات، أقسام، وسياسات الفوتر)..."):
+        with st.spinner("جاري استخراج كافة الصفحات عبر الـ Sitemap وقوائم المتجر..."):
             urls = get_all_store_urls(input_url)
 
-        st.info(f"تم العثور على {len(urls)} صفحة شاملة. جاري الفحص الدقيق والآمن...")
+        st.info(f"تم العثور على {len(urls)} صفحة شاملة. جاري الفحص والتصنيف الدقيق...")
 
         progress_bar = st.progress(0)
         results = []
@@ -374,7 +399,6 @@ if nav == "🔍 فحص متجر جديد":
         df = pd.DataFrame(results)
         st.session_state.audit_df = df
         
-        # حساب الإحصائيات
         avg_score = round(df['درجة السيو'].mean(), 1)
         summary = {
             'total_pages': len(df),
@@ -388,7 +412,6 @@ if nav == "🔍 فحص متجر جديد":
         }
         st.session_state.summary = summary
 
-        # الحفظ في قاعدة البيانات
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('''INSERT INTO audits (domain, scan_date, score, total_pages, products_count, categories_count, info_pages_count, data_json)
@@ -398,14 +421,12 @@ if nav == "🔍 فحص متجر جديد":
         conn.commit()
         conn.close()
 
-    # عرض النتائج في حال كانت موجودة في الذاكرة
     if st.session_state.audit_df is not None:
         df = st.session_state.audit_df
         summary = st.session_state.summary
 
-        st.success(f" اكتمل فحص المتجر بنجاح: {st.session_state.current_url}")
+        st.success(f" اكتمل فحص وتصنيف المتجر بنجاح: {st.session_state.current_url}")
 
-        # كروت الإحصائيات المرتبة (RTL Layout)
         k1, k2, k3, k4, k5 = st.columns(5)
         with k1:
             st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["total_pages"]}</div><div class="metric-label">إجمالي الصفحات</div></div>', unsafe_allow_html=True)
@@ -426,7 +447,6 @@ if nav == "🔍 فحص متجر جديد":
         else:
             st.dataframe(df[df['نوع الصفحة'] == selected_type], use_container_width=True)
 
-        # تجهيز حزمة ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             df_p = df[df['نوع الصفحة'] == 'صفحة منتج']
@@ -443,7 +463,6 @@ if nav == "🔍 فحص متجر جديد":
                 df.to_excel(writer, index=False, sheet_name='SEO Audit')
             zip_file.writestr("التقرير_الشامل_all_pages.xlsx", excel_buf.getvalue())
 
-        # توليد الـ PDF
         pdf_bytes = generate_client_pdf(st.session_state.current_url, summary['score'], summary)
 
         st.subheader("📥 منطقة التحميل والتصدير")
