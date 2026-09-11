@@ -36,6 +36,11 @@ def init_db():
         blog_pages_count INTEGER,
         data_json TEXT
     )''')
+    # تحديث تلقائي للجدول القديم لإضافة عمود المدونة دون أخطاء
+    try:
+        c.execute("ALTER TABLE audits ADD COLUMN blog_pages_count INTEGER DEFAULT 0")
+    except:
+        pass
     conn.commit()
     conn.close()
 
