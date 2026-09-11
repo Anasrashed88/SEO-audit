@@ -33,6 +33,7 @@ def init_db():
         products_count INTEGER,
         categories_count INTEGER,
         info_pages_count INTEGER,
+        blog_pages_count INTEGER,
         data_json TEXT
     )''')
     conn.commit()
@@ -55,12 +56,12 @@ st.markdown("""
         background-color: #1e293b;
         border: 1px solid #334155;
         border-radius: 10px;
-        padding: 15px;
+        padding: 12px;
         text-align: center;
         margin-bottom: 10px;
     }
-    .metric-value { font-size: 26px; font-weight: bold; color: #38bdf8; }
-    .metric-label { font-size: 14px; color: #94a3b8; }
+    .metric-value { font-size: 24px; font-weight: bold; color: #38bdf8; }
+    .metric-label { font-size: 13px; color: #94a3b8; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -76,7 +77,7 @@ def extract_footer_and_menu_urls(base_url):
         res = requests.get(base_url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            target_keywords = ['سياسة', 'الشروط', 'الخصوصية', 'الاستبدال', 'الاسترجاع', 'الشحن', 'الشكاوى', 'الأسئلة', 'من نحن', 'اتصل', 'توصيل', 'ضمان', 'faq', 'terms', 'privacy', 'return', 'shipping', 'about', 'contact']
+            target_keywords = ['سياسة', 'الشروط', 'الخصوصية', 'الاستبدال', 'الاسترجاع', 'الشحن', 'الشكاوى', 'الأسئلة', 'من نحن', 'اتصل', 'توصيل', 'ضمان', 'مدونة', 'faq', 'terms', 'privacy', 'return', 'shipping', 'about', 'contact', 'blog']
             for a in soup.find_all('a', href=True):
                 href = a['href'].strip()
                 text = a.get_text(strip=True).lower()
@@ -88,7 +89,7 @@ def extract_footer_and_menu_urls(base_url):
         pass
     return found
 
-# تصنيف الصفحات الذكي بنسبة 100% عبر فحص الـ HTML وهيكل الرابط معاً
+# تصنيف الصفحات الذكي والمحدث (يشمل المدونة بشكل منفصل)
 def detect_page_type_advanced(url, base_url, soup):
     base_clean = base_url.rstrip('/')
     url_clean = url.rstrip('/')
@@ -97,29 +98,36 @@ def detect_page_type_advanced(url, base_url, soup):
     
     path = urlparse(url).path.lower()
     
-    # 1. فحص الصفحات التعريفية أولاً
+    # 1. فحص المدونة والمقالات (أولوية لتفادي دمجها مع التصنيفات)
+    if any(k in path for k in ['/blog', '/blogs', '/articles', '/article', '/post', '/posts']):
+        return 'صفحة مدونة'
+    if soup:
+        og_type = soup.find('meta', attrs={'property': 'og:type'})
+        if og_type and 'article' in og_type.get('content', '').lower():
+            return 'صفحة مدونة'
+        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
+            return 'صفحة مدونة'
+
+    # 2. فحص الصفحات التعريفية والسياسات
     if any(k in path for k in ['/pages/', '/policies/', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']):
         return 'صفحة تعريفية'
 
-    # 2. فحص المنتجات عبر الـ HTML والـ Tags والروابط
+    # 3. فحص المنتجات
     if soup:
-        og_type = soup.find('meta', attrs={'property': 'og:type'})
         if og_type and 'product' in og_type.get('content', '').lower():
             return 'صفحة منتج'
         if soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
             return 'صفحة منتج'
 
-    # فحص الروابط للمنتجات (سلة، زد، شوبيفاي)
     if '/products/' in path or '/product/' in path or re.search(r'/p\d+', path) or path.endswith('/p') or '-p-' in path:
         return 'صفحة منتج'
     segments = [s for s in path.split('/') if s]
     if any(re.match(r'^p\d+', s) for s in segments):
         return 'صفحة منتج'
 
-    # 3. فحص التصنيفات والكولكشنات
-    if soup:
-        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
-            return 'صفحة تصنيف'
+    # 4. فحص التصنيفات والكولكشنات
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
+        return 'صفحة تصنيف'
             
     if any(k in path for k in ['/category/', '/categories/', '/collection/', '/collections/']) or re.search(r'/c\d+', path):
         return 'صفحة تصنيف'
@@ -243,61 +251,79 @@ def audit_single_page(url_item):
         'حالة المحتوى': content_status
     }
 
-# محرك الـ PDF الاحترافي الخالي من الأخطاء
+# محرك الـ PDF المحسن
+# محرك الـ PDF المحسن بالكامل (شعار + خط Cairo + جداول مخصصة)
 def generate_client_pdf(domain, score, summary_stats):
-    font_path = "Amiri-Regular.ttf"
+    # 1. تحميل خط Cairo وتثبيته
+    font_path = "Cairo-Regular.ttf"
     if not os.path.exists(font_path):
-        font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
+        font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/static/Cairo-Regular.ttf"
         r = requests.get(font_url)
         with open(font_path, "wb") as f:
             f.write(r.content)
+
+    # 2. تحميل الشعار الخاص بك
+    logo_path = "brand_logo.png"
+    if not os.path.exists(logo_path):
+        try:
+            r = requests.get("https://imgur.com/zGoNASG.png", headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            if r.status_code == 200:
+                with open(logo_path, "wb") as f:
+                    f.write(r.content)
+        except:
+            pass
 
     def ar(text):
         reshaped = arabic_reshaper.reshape(str(text))
         return get_display(reshaped)
 
+    clean_domain = urlparse(domain).netloc if urlparse(domain).netloc else domain
+
     class PDFReport(FPDF):
         def header(self):
-            self.add_font("Amiri", "", font_path)
-            self.set_font("Amiri", "", 15)
+            # إدراج الشعار في الزاوية اليسرى
+            if os.path.exists(logo_path):
+                self.image(logo_path, x=15, y=10, w=22)
+            
+            self.add_font("Cairo", "", font_path)
+            self.set_font("Cairo", "", 13)
             self.set_text_color(15, 23, 42)
-            self.cell(0, 7, ar("أنس راشد"), ln=True, align="R")
-            self.set_font("Amiri", "", 10)
+            self.cell(0, 6, ar("أنس راشد"), ln=True, align="R")
+            self.set_font("Cairo", "", 9)
             self.set_text_color(100, 116, 139)
-            self.cell(0, 6, ar("خبير تحسين محركات البحث"), ln=True, align="R")
+            self.cell(0, 5, ar("خبير تحسين محركات البحث"), ln=True, align="R")
             self.set_draw_color(226, 232, 240)
-            self.line(10, 24, 200, 24)
-            self.ln(8)
+            self.line(15, 26, 195, 26)
+            self.ln(6)
 
         def footer(self):
             self.set_y(-15)
             self.set_draw_color(226, 232, 240)
-            self.line(10, 282, 200, 282)
-            self.set_font("Amiri", "", 9)
+            self.line(15, 282, 195, 282)
+            self.set_font("Cairo", "", 8)
             self.set_text_color(148, 163, 184)
             self.cell(0, 10, "anasrashed.com   |   anas@anasrashed.com", align="C")
 
     pdf = PDFReport()
     pdf.add_page()
-    pdf.add_font("Amiri", "", font_path)
+    pdf.add_font("Cairo", "", font_path)
     
     # عنوان التقرير
-    pdf.set_font("Amiri", "", 18)
+    pdf.set_font("Cairo", "", 15)
     pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 10, ar("تقرير الفحص الفني والتدقيق الشامل لمحركات البحث"), ln=True, align="C")
+    pdf.cell(0, 8, ar("تقرير الفحص الفني الشامل لمحركات البحث"), ln=True, align="C")
     
-    pdf.set_font("Amiri", "", 11)
+    pdf.set_font("Cairo", "", 10)
     pdf.set_text_color(71, 85, 105)
-    pdf.cell(0, 6, ar(f"المتجر المستهدف: {domain}"), ln=True, align="C")
-    pdf.cell(0, 6, ar(f"تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
-    pdf.ln(6)
+    pdf.cell(0, 5, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
+    pdf.ln(4)
 
-    # مربع السكور
+    # مربع السكور (متوسط)
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(203, 213, 225)
-    pdf.rect(15, 54, 180, 22, 'DF')
-    pdf.set_xy(15, 59)
-    pdf.set_font("Amiri", "", 16)
+    pdf.rect(15, 46, 180, 16, 'DF')
+    pdf.set_xy(15, 49)
+    pdf.set_font("Cairo", "", 13)
     if score < 60:
         pdf.set_text_color(225, 29, 72)
     elif score < 80:
@@ -305,65 +331,102 @@ def generate_client_pdf(domain, score, summary_stats):
     else:
         pdf.set_text_color(16, 185, 129)
     pdf.cell(180, 10, ar(f"درجة التوافق العامة مع محركات البحث: {score}%"), align="C")
-    pdf.ln(22)
+    pdf.ln(18)
 
-    # ملخص الفحص بالأرقام
-    pdf.set_font("Amiri", "", 13)
-    pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 8, ar("ملخص نتائج الفحص الشامل لكافة صفحات المتجر:"), ln=True, align="R")
-    pdf.ln(2)
-
-    stats = [
-        f"• إجمالي عدد الصفحات المفحوصة في المتجر: {summary_stats['total_pages']} صفحة.",
-        f"• عدد صفحات المنتجات المكتشفة: {summary_stats['products']} منتجاً.",
-        f"• عدد صفحات الأقسام والتصنيفات: {summary_stats['categories']} تصنيفاً.",
-        f"• عدد الصفحات التعريفية والسياسات: {summary_stats['info_pages']} صفحة.",
-        f"• عناوين ميتا مفقودة أو غير متوافقة: {summary_stats['bad_titles']} عنواناً.",
-        f"• أوصاف ميتا مفقودة تحرم المتجر من النقرات: {summary_stats['bad_descs']} وصفاً.",
-        f"• إجمالي الصور المفقود منها وسم النص البديل (Alt Tag): {summary_stats['missing_alts']} صورة.",
-    ]
-    
-    pdf.set_font("Amiri", "", 11)
-    pdf.set_text_color(51, 65, 85)
-    for stat in stats:
-        pdf.cell(0, 7, ar(stat), ln=True, align="R")
+    # دالة مساعدة لرسم الجداول في المنتصف
+    def draw_table(title, rows, col_widths=[120, 60]):
+        table_width = sum(col_widths)
+        start_x = (210 - table_width) / 2  # توسيط الجدول تماماً في منتصف الصفحة
         
-    pdf.ln(6)
-    
-    # التشخيص الاستشاري مع حل مشكلة انعكاس الأسطر بالكامل
-    pdf.set_font("Amiri", "", 13)
-    pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 8, ar("التشخيص الاستشاري والتوصيات:"), ln=True, align="R")
-    pdf.ln(2)
+        pdf.set_x(start_x)
+        pdf.set_font("Cairo", "", 11)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(table_width, 7, ar(title), ln=True, align="R")
+        pdf.ln(1)
 
-    diag_text = (
-        "يعاني المتجر من فجوة واضحة في تهيئة البيانات الوصفية (Metadata) وخلو الصور من نصوص "
-        "التعرف لمحركات البحث، مما يؤدي إلى فقدان تصدر نتائج البحث وظهور المنافسين في مراتب متقدمة. "
-        "يوصى بإعادة هيكلة العناوين والأوصاف واستهداف نية الشراء بدقة لرفع نسبة التوافق إلى ما فوق "
-        "95% ومضاعفة المبيعات المجانية عبر جوجل."
-    )
+        # رأس الجدول
+        pdf.set_x(start_x)
+        pdf.set_fill_color(241, 245, 249)
+        pdf.set_draw_color(203, 213, 225)
+        pdf.set_font("Cairo", "", 9)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(col_widths[1], 7, ar("الحالة / العدد"), 1, 0, 'C', fill=True)
+        pdf.cell(col_widths[0], 7, ar("عنصر الفحص والتدقيق"), 1, 1, 'C', fill=True)
+
+        # صفوف الجدول
+        pdf.set_font("Cairo", "", 8)
+        for label, val in rows:
+            pdf.set_x(start_x)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(col_widths[1], 6, ar(val), 1, 0, 'C')
+            pdf.cell(col_widths[0], 6, ar(label), 1, 1, 'R')
+        pdf.ln(5)
+
+    # 1. جدول بنية الصفحات والميتا
+    pages_rows = [
+        ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{summary_stats['total_pages']} صفحة"),
+        ("صفحات المنتجات المكتشفة", f"{summary_stats['products']} منتج"),
+        ("صفحات الأقسام والكولكشنات", f"{summary_stats['categories']} تصنيف"),
+        ("مقالات وصفحات المدونة", f"{summary_stats.get('blog_pages', 0)} مقال"),
+        ("الصفحات التعريفية والسياسات", f"{summary_stats['info_pages']} صفحة"),
+        ("عناوين ميتا (Title) مفقودة أو غير متوافقة", f"{summary_stats['bad_titles']} عنوان"),
+        ("أوصاف ميتا (Description) مفقودة أو غير مهيأة", f"{summary_stats['bad_descs']} وصف")
+    ]
+    draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", pages_rows)
+
+    # 2. جدول تدقيق الصور ووسوم الـ Alt
+    total_imgs = summary_stats.get('total_images', 0)
+    missing_alts = summary_stats.get('missing_alts', 0)
+    alt_ratio = round((missing_alts / total_imgs * 100), 1) if total_imgs > 0 else 0
+
+    image_rows = [
+        ("إجمالي الصور المفحوصة بالمتجر", f"{total_imgs} صورة"),
+        ("صور تفتقر لوسم النص البديل (Alt Tag)", f"{missing_alts} صورة"),
+        ("نسبة الصور غير المهيأة لمحركات البحث", f"{alt_ratio}%"),
+        ("حالة ظهور الصور في بحث صور جوجل (Google Images)", "ضعيف جداً ومفقود" if missing_alts > 0 else "ممتاز ومكتمل")
+    ]
+    draw_table("2. جدول تدقيق وسوم وصور المتجر (Image SEO):", image_rows)
+
+    # 3. صندوق التشخيص والتوصيات في المنتصف
+    box_width = 180
+    box_x = (210 - box_width) / 2
+    pdf.set_x(box_x)
+    pdf.set_font("Cairo", "", 11)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(box_width, 6, ar("3. التشخيص الاستشاري وخطة العمل:"), ln=True, align="R")
+    pdf.ln(1)
+
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(226, 232, 240)
+    pdf.rect(box_x, pdf.get_y(), box_width, 24, 'DF')
     
-    pdf.set_font("Amiri", "", 10)
+    pdf.set_xy(box_x + 5, pdf.get_y() + 3)
+    pdf.set_font("Cairo", "", 8)
     pdf.set_text_color(71, 85, 105)
     
-    # تفكيك النص لأسطر منتظمة لتفادي قلب السطور في الـ PDF
-    wrapped_lines = textwrap.wrap(diag_text, width=85)
+    diag_text = (
+        "يعاني المتجر من ضعف كبير في تهيئة وسوم الصور (Alt Tags) مما يحرمه من آلاف الزيارات عبر بحث الصور المجاني، "
+        "بالإضافة لوجود فجوة في صياغة أوصاف الميتا التسويقية. يوصى فوراً بإعادة كتابة البيانات الوصفية وفق معايير جوجل، "
+        "وإسناد نصوص بديلة لجميع الصور لرفع التوافق فوق 95% ومضاعفة المبيعات."
+    )
+    
+    wrapped_lines = textwrap.wrap(diag_text, width=95)
     for line in wrapped_lines:
-        pdf.cell(0, 6, ar(line), ln=True, align="R")
+        pdf.set_x(box_x + 5)
+        pdf.cell(box_width - 10, 4.5, ar(line), ln=True, align="R")
 
     return bytes(pdf.output())
-
-# القائمة والتنقل
+# واجهة المستخدم
 st.sidebar.title("🧭 القائمة الرئيسية")
 nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
 
 if nav == "🔍 فحص متجر جديد":
     st.title("🚀 مركز عمليات السيو الشامل للمتاجر")
-    st.write("أداة الفحص والتدقيق الكامل لجميع أقسام ومنتجات وسياسات المتجر الإلكتروني.")
+    st.write("أداة الفحص والتدقيق الكامل لجميع أقسام ومنتجات ومدونات وسياسات المتجر الإلكتروني.")
 
     c_url, c_btn = st.columns([4, 1])
     with c_url:
-        input_url = st.text_input("أدخل رابط المتجر الإلكتروني:", value=st.session_state.current_url, placeholder="https://pinkit.sa")
+        input_url = st.text_input("أدخل رابط المتجر الإلكتروني:", value=st.session_state.current_url, placeholder="https://midhal-oud.store")
     with c_btn:
         st.write("")
         st.write("")
@@ -378,7 +441,7 @@ if nav == "🔍 فحص متجر جديد":
 
     if start_btn and input_url:
         st.session_state.current_url = input_url
-        with st.spinner("جاري استخراج كافة الصفحات عبر الـ Sitemap وقوائم المتجر..."):
+        with st.spinner("جاري استخراج كافة الصفحات (منتجات، أقسام، مدونة، وسياسات)..."):
             urls = get_all_store_urls(input_url)
 
         st.info(f"تم العثور على {len(urls)} صفحة شاملة. جاري الفحص والتصنيف الدقيق...")
@@ -400,24 +463,26 @@ if nav == "🔍 فحص متجر جديد":
         st.session_state.audit_df = df
         
         avg_score = round(df['درجة السيو'].mean(), 1)
-        summary = {
+    summary = {
             'total_pages': len(df),
             'score': avg_score,
             'products': len(df[df['نوع الصفحة'] == 'صفحة منتج']),
             'categories': len(df[df['نوع الصفحة'] == 'صفحة تصنيف']),
             'info_pages': len(df[df['نوع الصفحة'] == 'صفحة تعريفية']),
+            'blog_pages': len(df[df['نوع الصفحة'] == 'صفحة مدونة']),
             'bad_titles': len(df[df['حالة العنوان'] != 'سليم']),
             'bad_descs': len(df[df['حالة الوصف'] != 'سليم']),
-            'missing_alts': int(df['صور بدون Alt'].sum())
+            'missing_alts': int(df['صور بدون Alt'].sum()),
+            'total_images': int(df['إجمالي الصور'].sum())
         }
         st.session_state.summary = summary
 
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('''INSERT INTO audits (domain, scan_date, score, total_pages, products_count, categories_count, info_pages_count, data_json)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        c.execute('''INSERT INTO audits (domain, scan_date, score, total_pages, products_count, categories_count, info_pages_count, blog_pages_count, data_json)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                   (input_url, datetime.now().strftime("%Y-%m-%d %H:%M"), avg_score, summary['total_pages'],
-                   summary['products'], summary['categories'], summary['info_pages'], df.to_json(orient='records')))
+                   summary['products'], summary['categories'], summary['info_pages'], summary['blog_pages'], df.to_json(orient='records')))
         conn.commit()
         conn.close()
 
@@ -427,36 +492,46 @@ if nav == "🔍 فحص متجر جديد":
 
         st.success(f" اكتمل فحص وتصنيف المتجر بنجاح: {st.session_state.current_url}")
 
-        k1, k2, k3, k4, k5 = st.columns(5)
+        # كروت الإحصائيات الستة المرتبة
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
         with k1:
             st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["total_pages"]}</div><div class="metric-label">إجمالي الصفحات</div></div>', unsafe_allow_html=True)
         with k2:
-            st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["score"]}%</div><div class="metric-label">نسبة توافق السيو</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["score"]}%</div><div class="metric-label">نسبة التوافق</div></div>', unsafe_allow_html=True)
         with k3:
             st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["products"]}</div><div class="metric-label">المنتجات</div></div>', unsafe_allow_html=True)
         with k4:
             st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["categories"]}</div><div class="metric-label">الأقسام</div></div>', unsafe_allow_html=True)
         with k5:
-            st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["info_pages"]}</div><div class="metric-label">الصفحات التعريفية</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["blog_pages"]}</div><div class="metric-label">المدونة</div></div>', unsafe_allow_html=True)
+        with k6:
+            st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["info_pages"]}</div><div class="metric-label">التعريفية</div></div>', unsafe_allow_html=True)
 
         st.subheader("📋 تصفية وعرض النتائج")
-        selected_type = st.selectbox("اختر نوع الصفحة للعرض:", ["جميع الصفحات", "صفحة منتج", "صفحة تصنيف", "صفحة تعريفية", "صفحة رئيسية"])
+        selected_type = st.selectbox("اختر نوع الصفحة للعرض:", ["جميع الصفحات", "صفحة منتج", "صفحة تصنيف", "صفحة مدونة", "صفحة تعريفية", "صفحة رئيسية"])
         
+        # تصفية مع إعادة ضبط الترقيم ليصبح 1، 2، 3...
         if selected_type == "جميع الصفحات":
-            st.dataframe(df, use_container_width=True)
+            display_df = df.copy().reset_index(drop=True)
         else:
-            st.dataframe(df[df['نوع الصفحة'] == selected_type], use_container_width=True)
+            display_df = df[df['نوع الصفحة'] == selected_type].copy().reset_index(drop=True)
 
+        display_df.index = display_df.index + 1  # ليبدأ الترقيم من 1 بدلاً من 0
+        st.dataframe(display_df, use_container_width=True)
+
+        # الحزمة المصنفة ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             df_p = df[df['نوع الصفحة'] == 'صفحة منتج']
             if not df_p.empty: zip_file.writestr("1_المنتجات_products.csv", df_p.to_csv(index=False, encoding='utf-8-sig'))
             df_c = df[df['نوع الصفحة'] == 'صفحة تصنيف']
             if not df_c.empty: zip_file.writestr("2_التصنيفات_categories.csv", df_c.to_csv(index=False, encoding='utf-8-sig'))
+            df_b = df[df['نوع الصفحة'] == 'صفحة مدونة']
+            if not df_b.empty: zip_file.writestr("3_المدونة_blog.csv", df_b.to_csv(index=False, encoding='utf-8-sig'))
             df_i = df[df['نوع الصفحة'] == 'صفحة تعريفية']
-            if not df_i.empty: zip_file.writestr("3_الصفحات_التعريفية_pages.csv", df_i.to_csv(index=False, encoding='utf-8-sig'))
+            if not df_i.empty: zip_file.writestr("4_الصفحات_التعريفية_pages.csv", df_i.to_csv(index=False, encoding='utf-8-sig'))
             df_h = df[df['نوع الصفحة'] == 'صفحة رئيسية']
-            if not df_h.empty: zip_file.writestr("4_الصفحة_الرئيسية_homepage.csv", df_h.to_csv(index=False, encoding='utf-8-sig'))
+            if not df_h.empty: zip_file.writestr("5_الصفحة_الرئيسية_homepage.csv", df_h.to_csv(index=False, encoding='utf-8-sig'))
             
             excel_buf = io.BytesIO()
             with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
@@ -487,7 +562,7 @@ elif nav == "📁 سجل المتاجر السابقة":
     st.write("يمكنك استعراض أي متجر قمت بفتحه مسبقاً وإعادة تحميل تقاريره فوراً دون إعادة الفحص.")
 
     conn = sqlite3.connect(DB_FILE)
-    history_df = pd.read_sql_query("SELECT id, domain as 'المتجر', scan_date as 'تاريخ الفحص', score as 'النسبة', total_pages as 'الصفحات', products_count as 'المنتجات', categories_count as 'الأقسام', info_pages_count as 'الصفحات التعريفية' FROM audits ORDER BY id DESC", conn)
+    history_df = pd.read_sql_query("SELECT id, domain as 'المتجر', scan_date as 'تاريخ الفحص', score as 'النسبة', total_pages as 'الصفحات', products_count as 'المنتجات', categories_count as 'الأقسام', blog_pages_count as 'المدونة', info_pages_count as 'التعريفية' FROM audits ORDER BY id DESC", conn)
     conn.close()
 
     if history_df.empty:
@@ -500,7 +575,7 @@ elif nav == "📁 سجل المتاجر السابقة":
         if st.button("📥 استرجاع بيانات هذا المتجر للشاشة"):
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("SELECT domain, data_json, score, total_pages, products_count, categories_count, info_pages_count FROM audits WHERE id = ?", (selected_id,))
+            c.execute("SELECT domain, data_json, score, total_pages, products_count, categories_count, info_pages_count, blog_pages_count FROM audits WHERE id = ?", (selected_id,))
             row = c.fetchone()
             conn.close()
 
@@ -513,6 +588,7 @@ elif nav == "📁 سجل المتاجر السابقة":
                     'products': row[4],
                     'categories': row[5],
                     'info_pages': row[6],
+                    'blog_pages': row[7] if row[7] is not None else 0,
                     'bad_titles': len(st.session_state.audit_df[st.session_state.audit_df['حالة العنوان'] != 'سليم']),
                     'bad_descs': len(st.session_state.audit_df[st.session_state.audit_df['حالة الوصف'] != 'سليم']),
                     'missing_alts': int(st.session_state.audit_df['صور بدون Alt'].sum())
