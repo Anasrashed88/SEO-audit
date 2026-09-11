@@ -129,6 +129,27 @@ def clean_url(url):
     return url.split('#')[0].split('?')[0].rstrip('/')
 
 
+def url_key(url):
+    """مفتاح موحّد للمقارنة بين الروابط.
+
+    خرائط المواقع تكتب المسارات العربية مُرمَّزة (percent-encoding) بينما
+    الروابط المستخرجة من وسوم <a> تأتي مفكوكة. بدون توحيد الصيغتين تفشل
+    المقارنة ويظهر نفس المنتج كأنه رابطان مختلفان.
+    """
+    if not url:
+        return ""
+    p = urlparse(clean_url(url))
+    return f"{p.netloc.lower()}{unquote(p.path).rstrip('/')}"
+
+
+def readable_url(url):
+    """صيغة مقروءة من الرابط لعرضها في الجداول العربية."""
+    try:
+        return unquote(url)
+    except Exception:
+        return url
+
+
 def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
@@ -390,17 +411,28 @@ def crawl_catalog_for_products(base_url, category_urls, progress_cb=None,
 
 
 def build_coverage_report(sitemap_products, catalog_products):
-    """مقارنة ثنائية الاتجاه بين ما تعلنه خريطة الموقع وما يُعرض فعلياً."""
-    sm = set(sitemap_products)
-    cat = set(catalog_products)
-    missing_from_sitemap = sorted(cat - sm)
-    not_in_catalog = sorted(sm - cat)
-    total_real = len(sm | cat)
-    coverage_pct = round(len(sm) / total_real * 100, 1) if total_real else 100.0
+    """مقارنة ثنائية الاتجاه بين ما تعلنه خريطة الموقع وما يُعرض فعلياً.
+
+    المقارنة تتم على المفاتيح الموحّدة (url_key) لا على النص الخام،
+    وإلا ظهر نفس المنتج مرتين بسبب اختلاف ترميز المسارات العربية.
+    """
+    sm_map, cat_map = {}, {}
+    for u in sitemap_products:
+        sm_map.setdefault(url_key(u), u)
+    for u in catalog_products:
+        cat_map.setdefault(url_key(u), u)
+
+    sm_keys, cat_keys = set(sm_map), set(cat_map)
+    missing_from_sitemap = sorted(cat_map[k] for k in (cat_keys - sm_keys))
+    not_in_catalog = sorted(sm_map[k] for k in (sm_keys - cat_keys))
+
+    total_real = len(sm_keys | cat_keys)
+    coverage_pct = round(len(sm_keys) / total_real * 100, 1) if total_real else 100.0
+
     return {
-        'sitemap_count': len(sm),
-        'catalog_count': len(cat),
-        'matched_count': len(sm & cat),
+        'sitemap_count': len(sm_keys),
+        'catalog_count': len(cat_keys),
+        'matched_count': len(sm_keys & cat_keys),
         'missing_from_sitemap': missing_from_sitemap,
         'not_in_catalog': not_in_catalog,
         'total_real': total_real,
@@ -606,6 +638,25 @@ def _audit_single_page(url, base_url):
         },
         'images_data': page_images
     }
+
+
+def dedupe_pages(df):
+    """إزالة التكرار على مستويين: الرابط نفسه، ثم الرابط الكانوني.
+
+    المقارنة على المفتاح الموحّد حتى لا يمر نفس المنتج مرتين بصيغتي ترميز.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    df['_key'] = df['الرابط'].map(url_key)
+    df['_canon_key'] = df['الرابط الكانوني'].map(url_key)
+    df = df.drop_duplicates(subset=['_key'])
+
+    avail = df[df['متاحة'] == True]  # noqa: E712
+    dup_keys = set(avail[avail.duplicated(subset=['_canon_key'], keep='first')]['_key'])
+    df = df[~df['_key'].isin(dup_keys)]
+
+    return df.drop(columns=['_key', '_canon_key']).reset_index(drop=True)
 
 
 def run_audit(urls_with_source, base_url, workers, progress_bar=None):
@@ -961,10 +1012,7 @@ if nav == "🔍 فحص متجر جديد":
         df = pd.DataFrame(pages)
         images_df = pd.DataFrame(imgs)
 
-        df = df.drop_duplicates(subset=['الرابط']).copy()
-        avail = df[df['متاحة'] == True]  # noqa: E712
-        dups = set(avail[avail.duplicated(subset=['الرابط الكانوني'], keep='first')]['الرابط'])
-        df = df[~df['الرابط'].isin(dups)].copy().reset_index(drop=True)
+        df = dedupe_pages(df)
 
         coverage = None
         if do_coverage:
@@ -981,8 +1029,9 @@ if nav == "🔍 فحص متجر جديد":
             sitemap_products = set(df[df['نوع الصفحة'] == 'صفحة منتج']['الرابط'])
             coverage = build_coverage_report(sitemap_products, catalog_products)
 
-            known = set(df['الرابط'])
-            new_products = [u for u in coverage['missing_from_sitemap'] if u not in known]
+            known = set(df['الرابط'].map(url_key))
+            new_products = [u for u in coverage['missing_from_sitemap']
+                            if url_key(u) not in known]
             if audit_missing and new_products:
                 st.info(f"المرحلة 3: فحص {len(new_products)} منتج مكتشف خارج خريطة الموقع...")
                 bar3 = st.progress(0)
@@ -991,7 +1040,7 @@ if nav == "🔍 فحص متجر جديد":
                 df = pd.concat([df, pd.DataFrame(extra_pages)], ignore_index=True)
                 if extra_imgs:
                     images_df = pd.concat([images_df, pd.DataFrame(extra_imgs)], ignore_index=True)
-                df = df.drop_duplicates(subset=['الرابط']).reset_index(drop=True)
+                df = dedupe_pages(df)
 
         if not images_df.empty:
             images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
@@ -1085,8 +1134,9 @@ if nav == "🔍 فحص متجر جديد":
                 if coverage['missing_from_sitemap']:
                     st.error(f"{len(coverage['missing_from_sitemap'])} منتج معروض في المتجر "
                              "ولا يظهر في خريطة الموقع — محركات البحث قد لا تعلم بوجوده.")
-                    st.dataframe(pd.DataFrame({'رابط المنتج': coverage['missing_from_sitemap']}),
-                                 use_container_width=True)
+                    st.dataframe(pd.DataFrame({
+                        'رابط المنتج': [readable_url(u) for u in coverage['missing_from_sitemap']]
+                    }), use_container_width=True)
                 else:
                     st.success("جميع المنتجات المعروضة مدرجة في خريطة الموقع.")
 
@@ -1094,8 +1144,9 @@ if nav == "🔍 فحص متجر جديد":
                     st.warning(f"{len(coverage['not_in_catalog'])} رابط موجود في خريطة الموقع "
                                "ولم يظهر في أي صفحة قسم — قد تكون منتجات مخفية أو محذوفة أو "
                                "غير مرتبطة بأي تصنيف.")
-                    st.dataframe(pd.DataFrame({'الرابط': coverage['not_in_catalog']}),
-                                 use_container_width=True)
+                    st.dataframe(pd.DataFrame({
+                        'الرابط': [readable_url(u) for u in coverage['not_in_catalog']]
+                    }), use_container_width=True)
 
                 st.caption("ملاحظة: الزحف يعتمد على ترقيم الصفحات بصيغة ?page=N. "
                            "المتاجر التي تحمّل المنتجات بالتمرير اللانهائي قد لا تُغطى بالكامل.")
