@@ -88,24 +88,28 @@ def extract_footer_and_menu_urls(base_url):
                 href = a['href'].strip()
                 text = a.get_text(strip=True).lower()
                 if any(k in text for k in target_keywords) or any(k in href.lower() for k in target_keywords):
-                    full_url = urljoin(base_url, href).split('#')[0].rstrip('/')
+                    full_url = urljoin(base_url, href).split('#')[0].split('?')[0].rstrip('/')
                     if urlparse(full_url).netloc == urlparse(base_url).netloc:
                         found.add(full_url)
     except:
         pass
     return found
 
-# تصنيف الصفحات الذكي والمصحح (الأولوية القصوى للسياسات)
 def detect_page_type_advanced(url, base_url, soup):
     base_clean = base_url.rstrip('/')
     url_clean = url.rstrip('/')
     if url_clean == base_clean:
         return 'صفحة رئيسية'
     
-    # فك تشفير الرابط العربي لفحصه بدقة (مثل فك %D8%B3...)
     path = unquote(urlparse(url).path.lower())
-    
-    # 1. الأولوية الأولى المطلقة: الصفحات التعريفية والسياسات
+    path_clean = path.strip('/')
+    segments = [s for s in path.split('/') if s]
+
+    # 1. فحص صفحات الكتالوج العامة (ليست منتجاً بل تصنيفاً)
+    if path_clean in ['products', 'product', 'all-products', 'catalog', 'collections/all']:
+        return 'صفحة تصنيف'
+
+    # 2. فحص الصفحات التعريفية والسياسات
     policy_keywords = ['سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى', 'أسئلة', 'من-نحن', 'اتصل', 'pages', 'policies', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']
     if any(k in path for k in policy_keywords):
         return 'صفحة تعريفية'
@@ -116,19 +120,20 @@ def detect_page_type_advanced(url, base_url, soup):
         if og_tag and og_tag.get('content'):
             og_type = og_tag['content'].lower()
 
-    # 2. المنتجات (أولوية ثانية)
+    # 3. فحص المنتجات (يجب أن يحتوي على اسم منتج حقيقي وليس مجرد مسار عام)
     if 'product' in og_type:
         return 'صفحة منتج'
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
         return 'صفحة منتج'
 
-    if '/products/' in path or '/product/' in path or re.search(r'/p\d+', path) or path.endswith('/p') or '-p-' in path:
+    if ('/products/' in path or '/product/' in path) and len(segments) >= 2:
         return 'صفحة منتج'
-    segments = [s for s in path.split('/') if s]
+    if re.search(r'/p\d+', path) or path.endswith('/p') or '-p-' in path:
+        return 'صفحة منتج'
     if any(re.match(r'^p\d+', s) for s in segments):
         return 'صفحة منتج'
 
-    # 3. المدونة والمقالات (أولوية ثالثة)
+    # 4. فحص المدونة والمقالات
     if any(k in path for k in ['/blog', '/blogs', '/articles', '/article', '/post', '/posts']):
         return 'صفحة مدونة'
     if 'article' in og_type:
@@ -136,7 +141,7 @@ def detect_page_type_advanced(url, base_url, soup):
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
         return 'صفحة مدونة'
 
-    # 4. التصنيفات والكولكشنات
+    # 5. فحص التصنيفات والكولكشنات
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
         return 'صفحة تصنيف'
             
@@ -169,9 +174,11 @@ def get_all_store_urls(base_url):
                         if sub_res.status_code == 200:
                             sub_root = ET.fromstring(sub_res.content)
                             for sub_loc in sub_root.findall('.//ns:loc', namespaces):
-                                all_urls.add(sub_loc.text.strip())
+                                clean_u = sub_loc.text.strip().split('?')[0].rstrip('/')
+                                all_urls.add(clean_u)
                     else:
-                        all_urls.add(u)
+                        clean_u = u.split('?')[0].rstrip('/')
+                        all_urls.add(clean_u)
         except:
             continue
             
@@ -181,6 +188,43 @@ def get_all_store_urls(base_url):
     if not all_urls:
         all_urls.add(base_url)
     return list(all_urls)
+
+# فلتر استبعاد صور عناصر الواجهة وأيقونات الدفع والتحميل
+def is_relevant_seo_image(img, src):
+    if not src:
+        return False
+    src_lower = src.lower()
+
+    if src_lower.startswith('data:image'):
+        return False
+
+    # استبعاد ملفات التحميل والأيقونات التفاعلية
+    if any(src_lower.endswith(ext) or f"{ext}?" in src_lower for ext in ['.gif', '.svg', '.ico']):
+        return False
+
+    # استبعاد وسوم عناصر الواجهة، بوابات الدفع، وسائل التواصل، والتتبع
+    junk_keywords = [
+        'spinner', 'loader', 'loading', 'ajax', 'icon', 'logo', 'badge',
+        'payment', 'gateway', 'tamara', 'tabby', 'mada', 'visa', 'mastercard',
+        'apple-pay', 'applepay', 'stc-pay', 'stcpay', 'vat', 'tax',
+        'maroof', 'social', 'whatsapp', 'snapchat', 'instagram', 'tiktok',
+        'twitter', 'pixel', 'spacer', 'avatar', 'arrow', 'placeholder'
+    ]
+    if any(junk in src_lower for junk in junk_keywords):
+        return False
+
+    # استبعاد الصور المصغرة جداً (أقل من 60 بكسل)
+    w = img.get('width')
+    h = img.get('height')
+    try:
+        if w and int(str(w).replace('px', '')) < 60:
+            return False
+        if h and int(str(h).replace('px', '')) < 60:
+            return False
+    except:
+        pass
+
+    return True
 
 def audit_single_page(url_item):
     url, base_url = url_item
@@ -196,8 +240,7 @@ def audit_single_page(url_item):
         except:
             time.sleep(1)
 
-    # اعتماد الرابط النهائي الفعلي بعد التحويلات (Redirect Resolution)
-    final_url = res.url if res else url
+    final_url = res.url.split('?')[0].rstrip('/') if res else url
 
     if res is None or res.status_code != 200:
         status_code = res.status_code if res else 'فشل اتصال'
@@ -237,15 +280,16 @@ def audit_single_page(url_item):
     elif len(meta_desc) < 70: desc_status = 'قصير جداً'
     elif len(meta_desc) > 165: desc_status = 'طويل جداً'
 
-    # فحص مفصل لجميع صور الصفحة وجلب بياناتها
-    images = soup.find_all('img')
-    total_img = len(images)
+    # فحص مفلتر ودقيق لصور المحتوى الحقيقية فقط
+    raw_images = soup.find_all('img')
+    total_img = 0
     missing_alt = 0
     page_images = []
 
-    for img in images:
+    for img in raw_images:
         src = img.get('src') or img.get('data-src') or ''
-        if src:
+        if src and is_relevant_seo_image(img, src):
+            total_img += 1
             full_img_url = urljoin(final_url, src)
             alt_text = img.get('alt', '').strip()
             is_missing = (alt_text == '')
@@ -413,7 +457,7 @@ def generate_client_pdf(domain, score, summary_stats):
     alt_ratio = round((missing_alts / total_imgs * 100), 1) if total_imgs > 0 else 0
 
     image_rows = [
-        ("إجمالي الصور المفحوصة بالمتجر", f"{total_imgs} صورة"),
+        ("إجمالي صور المحتوى والمنتجات المفحوصة", f"{total_imgs} صورة"),
         ("صور تفتقر لوسم النص البديل لمحركات البحث", f"{missing_alts} صورة"),
         ("نسبة الصور غير المهيأة لمحركات البحث", f"{alt_ratio}%"),
         ("حالة ظهور الصور في بحث صور جوجل المجاني", "ضعيف جداً ومفقود" if missing_alts > 0 else "ممتاز ومكتمل")
@@ -475,7 +519,7 @@ if nav == "🔍 فحص متجر جديد":
 
     if start_btn and input_url:
         st.session_state.current_url = input_url
-        with st.spinner("جاري استخراج كافة الصفحات وقوائم المتجر والسياسات..."):
+        with st.spinner("جاري استخراج كافة الصفحات وتجريد المتغيرات الزائدة..."):
             urls = get_all_store_urls(input_url)
 
         st.info(f"تم العثور على {len(urls)} صفحة شاملة. جاري الفحص وتدقيق الصفحات والصور بدقة...")
@@ -561,7 +605,7 @@ if nav == "🔍 فحص متجر جديد":
             st.dataframe(display_df, use_container_width=True)
 
         with tab2:
-            st.subheader("🖼️ التقرير المفصل لكل صور المتجر ونصوصها البديلة")
+            st.subheader("🖼️ التقرير المفصل لصور المحتوى والمنتجات (مستبعد منها الأيقونات)")
             if images_df is not None and not images_df.empty:
                 col_img1, col_img2 = st.columns(2)
                 with col_img1:
@@ -579,7 +623,6 @@ if nav == "🔍 فحص متجر جديد":
             else:
                 st.info("لا توجد بيانات صور متاحة للعرض.")
 
-        # تجهيز الحزمة المصنفة ZIP (تشمل ملف الصور الجديد)
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             df_p = df[df['نوع الصفحة'] == 'صفحة منتج']
@@ -593,7 +636,6 @@ if nav == "🔍 فحص متجر جديد":
             df_h = df[df['نوع الصفحة'] == 'صفحة رئيسية']
             if not df_h.empty: zip_file.writestr("5_الصفحة_الرئيسية_homepage.csv", df_h.to_csv(index=False, encoding='utf-8-sig'))
             
-            # 6. ملف تدقيق الصور التفصيلي الجديد
             if images_df is not None and not images_df.empty:
                 zip_file.writestr("6_تفاصيل_صور_المتجر_images_audit.csv", images_df.to_csv(index=False, encoding='utf-8-sig'))
 
