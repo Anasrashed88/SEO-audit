@@ -89,7 +89,6 @@ def extract_footer_and_menu_urls(base_url):
         pass
     return found
 
-# تصنيف الصفحات الذكي والمحدث (يشمل المدونة بشكل منفصل)
 def detect_page_type_advanced(url, base_url, soup):
     base_clean = base_url.rstrip('/')
     url_clean = url.rstrip('/')
@@ -97,27 +96,29 @@ def detect_page_type_advanced(url, base_url, soup):
         return 'صفحة رئيسية'
     
     path = urlparse(url).path.lower()
+    og_type = ""
+    if soup:
+        og_tag = soup.find('meta', attrs={'property': 'og:type'})
+        if og_tag and og_tag.get('content'):
+            og_type = og_tag['content'].lower()
     
-    # 1. فحص المدونة والمقالات (أولوية لتفادي دمجها مع التصنيفات)
+    # 1. فحص المدونة والمقالات
     if any(k in path for k in ['/blog', '/blogs', '/articles', '/article', '/post', '/posts']):
         return 'صفحة مدونة'
-    if soup:
-        og_type = soup.find('meta', attrs={'property': 'og:type'})
-        if og_type and 'article' in og_type.get('content', '').lower():
-            return 'صفحة مدونة'
-        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
-            return 'صفحة مدونة'
+    if 'article' in og_type:
+        return 'صفحة مدونة'
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting)', re.I)}):
+        return 'صفحة مدونة'
 
     # 2. فحص الصفحات التعريفية والسياسات
     if any(k in path for k in ['/pages/', '/policies/', 'privacy', 'terms', 'about', 'contact', 'faq', 'shipping', 'complaint', 'return', 'payment']):
         return 'صفحة تعريفية'
 
     # 3. فحص المنتجات
-    if soup:
-        if og_type and 'product' in og_type.get('content', '').lower():
-            return 'صفحة منتج'
-        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
-            return 'صفحة منتج'
+    if 'product' in og_type:
+        return 'صفحة منتج'
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
+        return 'صفحة منتج'
 
     if '/products/' in path or '/product/' in path or re.search(r'/p\d+', path) or path.endswith('/p') or '-p-' in path:
         return 'صفحة منتج'
@@ -251,10 +252,7 @@ def audit_single_page(url_item):
         'حالة المحتوى': content_status
     }
 
-# محرك الـ PDF المحسن
-# محرك الـ PDF المحسن بالكامل (شعار + خط Cairo + جداول مخصصة)
 def generate_client_pdf(domain, score, summary_stats):
-    # 1. تحميل خط Cairo وتثبيته
     font_path = "Cairo-Regular.ttf"
     if not os.path.exists(font_path):
         font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/static/Cairo-Regular.ttf"
@@ -262,7 +260,6 @@ def generate_client_pdf(domain, score, summary_stats):
         with open(font_path, "wb") as f:
             f.write(r.content)
 
-    # 2. تحميل الشعار الخاص بك
     logo_path = "brand_logo.png"
     if not os.path.exists(logo_path):
         try:
@@ -281,7 +278,6 @@ def generate_client_pdf(domain, score, summary_stats):
 
     class PDFReport(FPDF):
         def header(self):
-            # إدراج الشعار في الزاوية اليسرى
             if os.path.exists(logo_path):
                 self.image(logo_path, x=15, y=10, w=22)
             
@@ -308,7 +304,6 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.add_page()
     pdf.add_font("Cairo", "", font_path)
     
-    # عنوان التقرير
     pdf.set_font("Cairo", "", 15)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, ar("تقرير الفحص الفني الشامل لمحركات البحث"), ln=True, align="C")
@@ -318,7 +313,6 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(0, 5, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
     pdf.ln(4)
 
-    # مربع السكور (متوسط)
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(203, 213, 225)
     pdf.rect(15, 46, 180, 16, 'DF')
@@ -333,10 +327,9 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(180, 10, ar(f"درجة التوافق العامة مع محركات البحث: {score}%"), align="C")
     pdf.ln(18)
 
-    # دالة مساعدة لرسم الجداول في المنتصف
     def draw_table(title, rows, col_widths=[120, 60]):
         table_width = sum(col_widths)
-        start_x = (210 - table_width) / 2  # توسيط الجدول تماماً في منتصف الصفحة
+        start_x = (210 - table_width) / 2
         
         pdf.set_x(start_x)
         pdf.set_font("Cairo", "", 11)
@@ -344,7 +337,6 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.cell(table_width, 7, ar(title), ln=True, align="R")
         pdf.ln(1)
 
-        # رأس الجدول
         pdf.set_x(start_x)
         pdf.set_fill_color(241, 245, 249)
         pdf.set_draw_color(203, 213, 225)
@@ -353,7 +345,6 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.cell(col_widths[1], 7, ar("الحالة / العدد"), 1, 0, 'C', fill=True)
         pdf.cell(col_widths[0], 7, ar("عنصر الفحص والتدقيق"), 1, 1, 'C', fill=True)
 
-        # صفوف الجدول
         pdf.set_font("Cairo", "", 8)
         for label, val in rows:
             pdf.set_x(start_x)
@@ -362,7 +353,6 @@ def generate_client_pdf(domain, score, summary_stats):
             pdf.cell(col_widths[0], 6, ar(label), 1, 1, 'R')
         pdf.ln(5)
 
-    # 1. جدول بنية الصفحات والميتا
     pages_rows = [
         ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{summary_stats['total_pages']} صفحة"),
         ("صفحات المنتجات المكتشفة", f"{summary_stats['products']} منتج"),
@@ -374,7 +364,6 @@ def generate_client_pdf(domain, score, summary_stats):
     ]
     draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", pages_rows)
 
-    # 2. جدول تدقيق الصور ووسوم الـ Alt
     total_imgs = summary_stats.get('total_images', 0)
     missing_alts = summary_stats.get('missing_alts', 0)
     alt_ratio = round((missing_alts / total_imgs * 100), 1) if total_imgs > 0 else 0
@@ -387,7 +376,6 @@ def generate_client_pdf(domain, score, summary_stats):
     ]
     draw_table("2. جدول تدقيق وسوم وصور المتجر (Image SEO):", image_rows)
 
-    # 3. صندوق التشخيص والتوصيات في المنتصف
     box_width = 180
     box_x = (210 - box_width) / 2
     pdf.set_x(box_x)
@@ -396,11 +384,12 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(box_width, 6, ar("3. التشخيص الاستشاري وخطة العمل:"), ln=True, align="R")
     pdf.ln(1)
 
+    box_y = pdf.get_y()
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(226, 232, 240)
-    pdf.rect(box_x, pdf.get_y(), box_width, 24, 'DF')
+    pdf.rect(box_x, box_y, box_width, 24, 'DF')
     
-    pdf.set_xy(box_x + 5, pdf.get_y() + 3)
+    pdf.set_xy(box_x + 5, box_y + 3)
     pdf.set_font("Cairo", "", 8)
     pdf.set_text_color(71, 85, 105)
     
@@ -416,7 +405,7 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.cell(box_width - 10, 4.5, ar(line), ln=True, align="R")
 
     return bytes(pdf.output())
-# واجهة المستخدم
+
 st.sidebar.title("🧭 القائمة الرئيسية")
 nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
 
@@ -459,7 +448,7 @@ if nav == "🔍 فحص متجر جديد":
                 progress_bar.progress(completed / total_urls)
                 time.sleep(0.04)
 
-df = pd.DataFrame(results)
+        df = pd.DataFrame(results)
         st.session_state.audit_df = df
         
         avg_score = round(df['درجة السيو'].mean(), 1)
@@ -477,7 +466,8 @@ df = pd.DataFrame(results)
         }
         st.session_state.summary = summary
 
-        conn = sqlite3.connect(DB_FILE)        c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
         c.execute('''INSERT INTO audits (domain, scan_date, score, total_pages, products_count, categories_count, info_pages_count, blog_pages_count, data_json)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                   (input_url, datetime.now().strftime("%Y-%m-%d %H:%M"), avg_score, summary['total_pages'],
@@ -491,7 +481,6 @@ df = pd.DataFrame(results)
 
         st.success(f" اكتمل فحص وتصنيف المتجر بنجاح: {st.session_state.current_url}")
 
-        # كروت الإحصائيات الستة المرتبة
         k1, k2, k3, k4, k5, k6 = st.columns(6)
         with k1:
             st.markdown(f'<div class="metric-card"><div class="metric-value">{summary["total_pages"]}</div><div class="metric-label">إجمالي الصفحات</div></div>', unsafe_allow_html=True)
@@ -509,16 +498,14 @@ df = pd.DataFrame(results)
         st.subheader("📋 تصفية وعرض النتائج")
         selected_type = st.selectbox("اختر نوع الصفحة للعرض:", ["جميع الصفحات", "صفحة منتج", "صفحة تصنيف", "صفحة مدونة", "صفحة تعريفية", "صفحة رئيسية"])
         
-        # تصفية مع إعادة ضبط الترقيم ليصبح 1، 2، 3...
         if selected_type == "جميع الصفحات":
             display_df = df.copy().reset_index(drop=True)
         else:
             display_df = df[df['نوع الصفحة'] == selected_type].copy().reset_index(drop=True)
 
-        display_df.index = display_df.index + 1  # ليبدأ الترقيم من 1 بدلاً من 0
+        display_df.index = display_df.index + 1
         st.dataframe(display_df, use_container_width=True)
 
-        # الحزمة المصنفة ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             df_p = df[df['نوع الصفحة'] == 'صفحة منتج']
@@ -590,6 +577,7 @@ elif nav == "📁 سجل المتاجر السابقة":
                     'blog_pages': row[7] if row[7] is not None else 0,
                     'bad_titles': len(st.session_state.audit_df[st.session_state.audit_df['حالة العنوان'] != 'سليم']),
                     'bad_descs': len(st.session_state.audit_df[st.session_state.audit_df['حالة الوصف'] != 'سليم']),
-                    'missing_alts': int(st.session_state.audit_df['صور بدون Alt'].sum())
+                    'missing_alts': int(st.session_state.audit_df['صور بدون Alt'].sum()),
+                    'total_images': int(st.session_state.audit_df['إجمالي الصور'].sum())
                 }
                 st.success("تم استرجاع البيانات بنجاح! انتقل إلى صفحة (فحص متجر جديد) في القائمة الجانبية لتحميل ملفات الـ PDF و الـ ZIP.")
