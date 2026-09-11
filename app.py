@@ -36,7 +36,6 @@ def init_db():
         blog_pages_count INTEGER,
         data_json TEXT
     )''')
-    # تحديث تلقائي للجدول القديم لإضافة عمود المدونة دون أخطاء
     try:
         c.execute("ALTER TABLE audits ADD COLUMN blog_pages_count INTEGER DEFAULT 0")
     except:
@@ -258,7 +257,6 @@ def audit_single_page(url_item):
     }
 
 def generate_client_pdf(domain, score, summary_stats):
-    # 1. تحميل خط Amiri المتكامل بنسبة 100% مع الحروف العربية
     font_path = "Amiri-Regular.ttf"
     if not os.path.exists(font_path) or os.path.getsize(font_path) < 30000:
         font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
@@ -270,7 +268,6 @@ def generate_client_pdf(domain, score, summary_stats):
         except:
             pass
 
-    # 2. تحميل الشعار بأمان
     logo_path = "brand_logo.png"
     if not os.path.exists(logo_path) or os.path.getsize(logo_path) < 1000:
         try:
@@ -318,7 +315,6 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.add_font("Amiri", "", font_path)
     pdf.add_page()
     
-    # عنوان التقرير
     pdf.set_font("Amiri", "", 16)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, ar("تقرير الفحص الفني الشامل لمحركات البحث"), ln=True, align="C")
@@ -328,7 +324,6 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(0, 6, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
     pdf.ln(4)
 
-    # مربع السكور
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(203, 213, 225)
     pdf.rect(15, 46, 180, 16, 'DF')
@@ -343,7 +338,6 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(180, 10, ar(f"درجة التوافق العامة مع محركات البحث: {score}%"), align="C")
     pdf.ln(18)
 
-    # دالة رسم الجداول في المنتصف
     def draw_table(title, rows, col_widths=[120, 60]):
         table_width = sum(col_widths)
         start_x = (210 - table_width) / 2
@@ -370,7 +364,6 @@ def generate_client_pdf(domain, score, summary_stats):
             pdf.cell(col_widths[0], 6, ar(label), 1, 1, 'R')
         pdf.ln(5)
 
-    # 1. جدول بنية الصفحات والميتا (تعريب نقي لمنع انقلاب الأقواس)
     pages_rows = [
         ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{summary_stats['total_pages']} صفحة"),
         ("صفحات المنتجات المكتشفة", f"{summary_stats['products']} منتج"),
@@ -382,7 +375,6 @@ def generate_client_pdf(domain, score, summary_stats):
     ]
     draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", pages_rows)
 
-    # 2. جدول تدقيق الصور ووسوم الـ Alt
     total_imgs = summary_stats.get('total_images', 0)
     missing_alts = summary_stats.get('missing_alts', 0)
     alt_ratio = round((missing_alts / total_imgs * 100), 1) if total_imgs > 0 else 0
@@ -395,7 +387,6 @@ def generate_client_pdf(domain, score, summary_stats):
     ]
     draw_table("2. جدول تدقيق وسوم وصور المتجر:", image_rows)
 
-    # 3. صندوق التشخيص والتوصيات في المنتصف
     box_width = 180
     box_x = (210 - box_width) / 2
     pdf.set_x(box_x)
@@ -424,7 +415,9 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.set_x(box_x + 5)
         pdf.cell(box_width - 10, 4.8, ar(line), ln=True, align="R")
 
-    return bytes(pdf.output())st.sidebar.title("🧭 القائمة الرئيسية")
+    return bytes(pdf.output())
+
+st.sidebar.title("🧭 القائمة الرئيسية")
 nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
 
 if nav == "🔍 فحص متجر جديد":
