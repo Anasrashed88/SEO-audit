@@ -258,17 +258,25 @@ def audit_single_page(url_item):
     }
 
 def generate_client_pdf(domain, score, summary_stats):
+    # 1. تحميل خط Cairo الأصلي وتجاوز ملفات Git-LFS التالفة
     font_path = "Cairo-Regular.ttf"
-    if not os.path.exists(font_path):
-        font_url = "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/static/Cairo-Regular.ttf"
-        r = requests.get(font_url)
-        with open(font_path, "wb") as f:
-            f.write(r.content)
-
-    logo_path = "brand_logo.png"
-    if not os.path.exists(logo_path):
+    # إذا كان الملف غير موجود أو حجمه تالف (أقل من 30 كيلوبايت) نعيد تحميله فوراً
+    if not os.path.exists(font_path) or os.path.getsize(font_path) < 30000:
+        font_url = "https://cdn.jsdelivr.net/npm/pdfmake-rtl/fonts/Cairo/Cairo-Regular.ttf"
         try:
-            r = requests.get("https://imgur.com/zGoNASG.png", headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            r = requests.get(font_url, timeout=15)
+            if r.status_code == 200 and len(r.content) > 30000:
+                with open(font_path, "wb") as f:
+                    f.write(r.content)
+        except:
+            pass
+
+    # 2. تحميل الشعار بأمان
+    logo_path = "brand_logo.png"
+    if not os.path.exists(logo_path) or os.path.getsize(logo_path) < 1000:
+        try:
+            logo_url = "https://i.imgur.com/zGoNASG.png"
+            r = requests.get(logo_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             if r.status_code == 200:
                 with open(logo_path, "wb") as f:
                     f.write(r.content)
@@ -283,10 +291,13 @@ def generate_client_pdf(domain, score, summary_stats):
 
     class PDFReport(FPDF):
         def header(self):
+            # إدراج الشعار في الزاوية اليسرى بحماية كاملة
             if os.path.exists(logo_path):
-                self.image(logo_path, x=15, y=10, w=22)
+                try:
+                    self.image(logo_path, x=15, y=10, w=22)
+                except:
+                    pass
             
-            self.add_font("Cairo", "", font_path)
             self.set_font("Cairo", "", 13)
             self.set_text_color(15, 23, 42)
             self.cell(0, 6, ar("أنس راشد"), ln=True, align="R")
@@ -306,9 +317,11 @@ def generate_client_pdf(domain, score, summary_stats):
             self.cell(0, 10, "anasrashed.com   |   anas@anasrashed.com", align="C")
 
     pdf = PDFReport()
-    pdf.add_page()
+    # تسجيل الخط قبل فتح الصفحة لتفادي أخطاء الـ Header
     pdf.add_font("Cairo", "", font_path)
+    pdf.add_page()
     
+    # عنوان التقرير
     pdf.set_font("Cairo", "", 15)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, ar("تقرير الفحص الفني الشامل لمحركات البحث"), ln=True, align="C")
@@ -318,6 +331,7 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(0, 5, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: {datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
     pdf.ln(4)
 
+    # مربع السكور
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(203, 213, 225)
     pdf.rect(15, 46, 180, 16, 'DF')
@@ -332,6 +346,7 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.cell(180, 10, ar(f"درجة التوافق العامة مع محركات البحث: {score}%"), align="C")
     pdf.ln(18)
 
+    # دالة رسم الجداول في المنتصف
     def draw_table(title, rows, col_widths=[120, 60]):
         table_width = sum(col_widths)
         start_x = (210 - table_width) / 2
@@ -358,6 +373,7 @@ def generate_client_pdf(domain, score, summary_stats):
             pdf.cell(col_widths[0], 6, ar(label), 1, 1, 'R')
         pdf.ln(5)
 
+    # 1. جدول بنية الصفحات والميتا
     pages_rows = [
         ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{summary_stats['total_pages']} صفحة"),
         ("صفحات المنتجات المكتشفة", f"{summary_stats['products']} منتج"),
@@ -369,6 +385,7 @@ def generate_client_pdf(domain, score, summary_stats):
     ]
     draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", pages_rows)
 
+    # 2. جدول تدقيق الصور ووسوم الـ Alt
     total_imgs = summary_stats.get('total_images', 0)
     missing_alts = summary_stats.get('missing_alts', 0)
     alt_ratio = round((missing_alts / total_imgs * 100), 1) if total_imgs > 0 else 0
@@ -381,6 +398,7 @@ def generate_client_pdf(domain, score, summary_stats):
     ]
     draw_table("2. جدول تدقيق وسوم وصور المتجر (Image SEO):", image_rows)
 
+    # 3. صندوق التشخيص والتوصيات في المنتصف
     box_width = 180
     box_x = (210 - box_width) / 2
     pdf.set_x(box_x)
@@ -410,7 +428,6 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.cell(box_width - 10, 4.5, ar(line), ln=True, align="R")
 
     return bytes(pdf.output())
-
 st.sidebar.title("🧭 القائمة الرئيسية")
 nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
 
