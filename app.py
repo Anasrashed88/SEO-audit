@@ -459,11 +459,11 @@ if nav == "🔍 فحص متجر جديد":
                 progress_bar.progress(completed / total_urls)
                 time.sleep(0.04)
 
-        df = pd.DataFrame(results)
+df = pd.DataFrame(results)
         st.session_state.audit_df = df
         
         avg_score = round(df['درجة السيو'].mean(), 1)
-    summary = {
+        summary = {
             'total_pages': len(df),
             'score': avg_score,
             'products': len(df[df['نوع الصفحة'] == 'صفحة منتج']),
@@ -477,8 +477,7 @@ if nav == "🔍 فحص متجر جديد":
         }
         st.session_state.summary = summary
 
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
+        conn = sqlite3.connect(DB_FILE)        c = conn.cursor()
         c.execute('''INSERT INTO audits (domain, scan_date, score, total_pages, products_count, categories_count, info_pages_count, blog_pages_count, data_json)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                   (input_url, datetime.now().strftime("%Y-%m-%d %H:%M"), avg_score, summary['total_pages'],
