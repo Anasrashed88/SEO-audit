@@ -6,6 +6,7 @@ import pandas as pd
 import time
 import io
 import gzip
+import json
 import re
 import zipfile
 import sqlite3
@@ -24,15 +25,11 @@ from bidi.algorithm import get_display
 
 st.set_page_config(page_title="مركز عمليات السيو | أنس راشد", layout="wide", page_icon="🚀")
 
-# --------------------------------------------------------------
-#  المسارات المحلية (الخط والشعار مرفوعان داخل المستودع)
-# --------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
 FONT_PATH = BASE_DIR / "Amiri-Regular.ttf"
 LOGO_PATH = BASE_DIR / "brand_logo.png"
 DB_FILE = str(BASE_DIR / "store_history.db")
 
-# اختيار أسرع محلل متاح
 try:
     import lxml  # noqa: F401
     PARSER = "lxml"
@@ -40,6 +37,8 @@ except Exception:
     PARSER = "html.parser"
 
 MAX_PAGES_DEFAULT = 1500
+MAX_CATEGORIES_TO_CRAWL = 80
+MAX_PAGINATION_DEPTH = 40
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -71,13 +70,14 @@ def init_db():
         info_pages_count INTEGER,
         blog_pages_count INTEGER,
         data_json TEXT,
-        images_json TEXT
+        images_json TEXT,
+        coverage_json TEXT
     )''')
-    # ترحيل آمن للقواعد القديمة (فحص فعلي بدل except فارغة)
     c.execute("PRAGMA table_info(audits)")
-    existing_cols = {row[1] for row in c.fetchall()}
-    for col, coltype in [("blog_pages_count", "INTEGER DEFAULT 0"), ("images_json", "TEXT")]:
-        if col not in existing_cols:
+    existing = {row[1] for row in c.fetchall()}
+    for col, coltype in [("blog_pages_count", "INTEGER DEFAULT 0"),
+                         ("images_json", "TEXT"), ("coverage_json", "TEXT")]:
+        if col not in existing:
             c.execute(f"ALTER TABLE audits ADD COLUMN {col} {coltype}")
     conn.commit()
     conn.close()
@@ -87,7 +87,8 @@ init_db()
 
 for key, default in [
     ('audit_df', None), ('images_df', None), ('summary', None),
-    ('current_url', ""), ('pdf_bytes', None), ('zip_bytes', None)
+    ('current_url', ""), ('pdf_bytes', None), ('zip_bytes', None),
+    ('coverage', None)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -114,7 +115,6 @@ st.markdown("""
 #  أدوات مساعدة
 # ==============================================================
 def normalize_url(url):
-    """تطبيع الرابط المُدخل: إضافة البروتوكول وإزالة الشرطة الأخيرة."""
     if not url:
         return ""
     url = url.strip()
@@ -124,7 +124,6 @@ def normalize_url(url):
 
 
 def clean_url(url):
-    """توحيد شكل الرابط لأغراض المقارنة وإزالة التكرار."""
     if not url:
         return ""
     return url.split('#')[0].split('?')[0].rstrip('/')
@@ -134,44 +133,51 @@ def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
 
+def safe_get(url, timeout=12, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+            if res.status_code == 429:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return res
+        except Exception:
+            time.sleep(1)
+    return None
+
+
 # ==============================================================
-#  اكتشاف الروابط (robots.txt + خرائط الموقع + الفوتر)
+#  اكتشاف الروابط
 # ==============================================================
 def discover_sitemaps_from_robots(base_url):
-    """قراءة robots.txt لاكتشاف المسار الحقيقي لخرائط الموقع."""
     found = []
-    try:
-        res = requests.get(f"{base_url}/robots.txt", headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            for line in res.text.splitlines():
-                if line.lower().strip().startswith('sitemap:'):
-                    sm = line.split(':', 1)[1].strip()
-                    if sm:
-                        found.append(sm)
-    except Exception:
-        pass
+    res = safe_get(f"{base_url}/robots.txt", timeout=10, retries=1)
+    if res is not None and res.status_code == 200:
+        for line in res.text.splitlines():
+            if line.lower().strip().startswith('sitemap:'):
+                sm = line.split(':', 1)[1].strip()
+                if sm:
+                    found.append(sm)
     return found
 
 
 def fetch_xml_root(url):
-    """جلب ملف XML مع دعم النسخ المضغوطة (.gz)."""
+    res = safe_get(url, timeout=12, retries=1)
+    if res is None or res.status_code != 200:
+        return None
+    content = res.content
+    if url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
+        try:
+            content = gzip.decompress(content)
+        except Exception:
+            pass
     try:
-        res = requests.get(url, headers=HEADERS, timeout=12)
-        if res.status_code != 200:
-            return None
-        content = res.content
-        if url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
-            try:
-                content = gzip.decompress(content)
-            except Exception:
-                pass
         return ET.fromstring(content)
     except Exception:
         return None
 
 
 def iter_locs(root):
-    """استخراج جميع وسوم loc بغض النظر عن وجود namespace من عدمه."""
     for el in root.iter():
         tag = el.tag.split('}')[-1] if '}' in el.tag else el.tag
         if tag == 'loc' and el.text:
@@ -182,13 +188,12 @@ def collect_from_sitemap(sitemap_url, base_netloc, all_urls, visited, depth=0, m
     if depth > max_depth or sitemap_url in visited:
         return
     visited.add(sitemap_url)
-
     root = fetch_xml_root(sitemap_url)
     if root is None:
         return
-
     for loc in iter_locs(root):
-        if loc.lower().endswith('.xml') or loc.lower().endswith('.xml.gz'):
+        low = loc.lower()
+        if low.endswith('.xml') or low.endswith('.xml.gz'):
             collect_from_sitemap(loc, base_netloc, all_urls, visited, depth + 1, max_depth)
         else:
             u = clean_url(loc)
@@ -197,35 +202,31 @@ def collect_from_sitemap(sitemap_url, base_netloc, all_urls, visited, depth=0, m
 
 
 def extract_footer_and_menu_urls(base_url):
-    """صياد روابط الفوتر والقوائم لاكتشاف الصفحات القانونية والتعريفية."""
     found = set()
-    try:
-        res = requests.get(base_url, headers=HEADERS, timeout=12)
-        if res.status_code == 200:
-            soup = make_soup(res.text)
-            target_keywords = [
-                'سياسة', 'الشروط', 'الخصوصية', 'الاستبدال', 'الاسترجاع', 'الشحن',
-                'الشكاوى', 'الأسئلة', 'من نحن', 'اتصل', 'توصيل', 'ضمان', 'مدونة',
-                'faq', 'terms', 'privacy', 'return', 'shipping', 'about', 'contact', 'blog'
-            ]
-            base_netloc = urlparse(base_url).netloc
-            for a in soup.find_all('a', href=True):
-                href = a['href'].strip()
-                text = a.get_text(strip=True).lower()
-                if any(k in text for k in target_keywords) or any(k in href.lower() for k in target_keywords):
-                    full_url = clean_url(urljoin(base_url, href))
-                    if full_url and urlparse(full_url).netloc == base_netloc:
-                        found.add(full_url)
-    except Exception:
-        pass
+    res = safe_get(base_url)
+    if res is None or res.status_code != 200:
+        return found
+    soup = make_soup(res.text)
+    target_keywords = [
+        'سياسة', 'الشروط', 'الخصوصية', 'الاستبدال', 'الاسترجاع', 'الشحن',
+        'الشكاوى', 'الأسئلة', 'من نحن', 'اتصل', 'توصيل', 'ضمان', 'مدونة',
+        'faq', 'terms', 'privacy', 'return', 'shipping', 'about', 'contact', 'blog'
+    ]
+    base_netloc = urlparse(base_url).netloc
+    for a in soup.find_all('a', href=True):
+        href = a['href'].strip()
+        text = a.get_text(strip=True).lower()
+        if any(k in text for k in target_keywords) or any(k in href.lower() for k in target_keywords):
+            full_url = clean_url(urljoin(base_url, href))
+            if full_url and urlparse(full_url).netloc == base_netloc:
+                found.add(full_url)
     return found
 
 
 def get_all_store_urls(base_url, max_pages=MAX_PAGES_DEFAULT):
     base_url = normalize_url(base_url)
     base_netloc = urlparse(base_url).netloc
-    all_urls = set()
-    visited = set()
+    all_urls, visited = set(), set()
 
     candidates = discover_sitemaps_from_robots(base_url)
     candidates += [
@@ -235,7 +236,6 @@ def get_all_store_urls(base_url, max_pages=MAX_PAGES_DEFAULT):
         f"{base_url}/sitemap_categories.xml",
         f"{base_url}/sitemap_pages_1.xml",
     ]
-
     for s_url in candidates:
         collect_from_sitemap(s_url, base_netloc, all_urls, visited)
 
@@ -243,8 +243,7 @@ def get_all_store_urls(base_url, max_pages=MAX_PAGES_DEFAULT):
     all_urls.add(base_url)
 
     urls = sorted(all_urls)
-    truncated = len(urls) > max_pages
-    return urls[:max_pages], truncated, len(urls)
+    return urls[:max_pages], len(urls) > max_pages, len(urls)
 
 
 # ==============================================================
@@ -257,12 +256,13 @@ POLICY_KEYWORDS = [
     'shipping', 'complaint', 'complaints', 'returns', 'refund', 'payment'
 ]
 
+CATALOG_ROOTS = ['products', 'product', 'all-products', 'catalog', 'collections/all', 'shop']
 
-def detect_page_type_advanced(url, base_url, soup):
+
+def detect_page_type_advanced(url, base_url, soup=None):
     base_clean = normalize_url(base_url)
     url_clean = clean_url(url)
 
-    # 1. الصفحة الرئيسية
     if url_clean == base_clean or urlparse(url_clean).path in ('', '/'):
         return 'صفحة رئيسية'
 
@@ -276,7 +276,7 @@ def detect_page_type_advanced(url, base_url, soup):
         if og_tag and og_tag.get('content'):
             og_type = og_tag['content'].lower()
 
-    # 2. المنتجات أولاً (إشارات قاطعة قبل أي فحص بالكلمات المفتاحية)
+    # المنتجات أولاً
     if 'product' in og_type:
         return 'صفحة منتج'
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
@@ -288,7 +288,7 @@ def detect_page_type_advanced(url, base_url, soup):
     if any(re.match(r'^p\d+$', s) for s in segments):
         return 'صفحة منتج'
 
-    # 3. المدونة والمقالات
+    # المدونة
     if 'article' in og_type or 'blog' in og_type:
         return 'صفحة مدونة'
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}):
@@ -296,16 +296,13 @@ def detect_page_type_advanced(url, base_url, soup):
     if any(s in ('blog', 'blogs', 'articles', 'article', 'post', 'posts') for s in segments):
         return 'صفحة مدونة'
 
-    # 4. صفحات الكتالوج العامة
-    if path_clean in ['products', 'product', 'all-products', 'catalog', 'collections/all', 'shop']:
+    if path_clean in CATALOG_ROOTS:
         return 'صفحة تصنيف'
 
-    # 5. الصفحات التعريفية والسياسات (مطابقة مقاطع لا احتواء نصي)
     for seg in segments:
         if any(seg == k or seg.startswith(k + '-') or k in seg.split('-') for k in POLICY_KEYWORDS):
             return 'صفحة تعريفية'
 
-    # 6. التصنيفات والكولكشنات
     if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
         return 'صفحة تصنيف'
     if any(s in ('category', 'categories', 'collection', 'collections') for s in segments):
@@ -313,8 +310,102 @@ def detect_page_type_advanced(url, base_url, soup):
     if re.search(r'/c\d+', path) or any(re.match(r'^c\d+$', s) for s in segments):
         return 'صفحة تصنيف'
 
-    # 7. ما تبقّى: غير مصنّفة صراحةً (لا يُنفخ به رقم الأقسام)
     return 'غير مصنفة'
+
+
+# ==============================================================
+#  طبقة التحقق من التغطية (الزحف على الأقسام)
+# ==============================================================
+def extract_product_links(html, base_url, page_url):
+    """استخراج روابط المنتجات من صفحة قسم: من وسوم <a> ومن JSON-LD ItemList."""
+    soup = make_soup(html)
+    base_netloc = urlparse(base_url).netloc
+    links = set()
+
+    for a in soup.find_all('a', href=True):
+        u = clean_url(urljoin(page_url, a['href']))
+        if not u or urlparse(u).netloc != base_netloc:
+            continue
+        if detect_page_type_advanced(u, base_url, None) == 'صفحة منتج':
+            links.add(u)
+
+    for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
+        try:
+            data = json.loads(tag.string or '{}')
+        except Exception:
+            continue
+        blocks = data if isinstance(data, list) else [data]
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            for item in (block.get('itemListElement') or []):
+                if not isinstance(item, dict):
+                    continue
+                target = None
+                if isinstance(item.get('item'), dict):
+                    target = item['item'].get('url')
+                if not target:
+                    target = item.get('url')
+                if target:
+                    u = clean_url(urljoin(page_url, str(target)))
+                    if urlparse(u).netloc == base_netloc and \
+                            detect_page_type_advanced(u, base_url, None) == 'صفحة منتج':
+                        links.add(u)
+    return links
+
+
+def crawl_catalog_for_products(base_url, category_urls, progress_cb=None,
+                               max_categories=MAX_CATEGORIES_TO_CRAWL,
+                               max_depth=MAX_PAGINATION_DEPTH):
+    """يزحف على صفحات الأقسام مع الترقيم ليجمع المنتجات المعروضة فعلياً في الواجهة."""
+    base_url = normalize_url(base_url)
+    roots = list(dict.fromkeys(
+        [base_url] + [f"{base_url}/{r}" for r in ['products', 'collections/all', 'shop']]
+        + list(category_urls)
+    ))[:max_categories]
+
+    found = set()
+    pages_fetched = 0
+
+    for idx, cat in enumerate(roots):
+        seen_in_cat = set()
+        for page in range(1, max_depth + 1):
+            page_url = cat if page == 1 else f"{cat}?page={page}"
+            res = safe_get(page_url, retries=1)
+            pages_fetched += 1
+            if res is None or res.status_code != 200:
+                break
+
+            new_links = extract_product_links(res.text, base_url, page_url)
+            fresh = new_links - seen_in_cat
+            if not fresh:
+                break  # لا جديد: نهاية الترقيم أو ترقيم غير مدعوم
+            seen_in_cat |= fresh
+            found |= fresh
+
+        if progress_cb:
+            progress_cb((idx + 1) / max(len(roots), 1), len(found), pages_fetched)
+
+    return found, pages_fetched
+
+
+def build_coverage_report(sitemap_products, catalog_products):
+    """مقارنة ثنائية الاتجاه بين ما تعلنه خريطة الموقع وما يُعرض فعلياً."""
+    sm = set(sitemap_products)
+    cat = set(catalog_products)
+    missing_from_sitemap = sorted(cat - sm)
+    not_in_catalog = sorted(sm - cat)
+    total_real = len(sm | cat)
+    coverage_pct = round(len(sm) / total_real * 100, 1) if total_real else 100.0
+    return {
+        'sitemap_count': len(sm),
+        'catalog_count': len(cat),
+        'matched_count': len(sm & cat),
+        'missing_from_sitemap': missing_from_sitemap,
+        'not_in_catalog': not_in_catalog,
+        'total_real': total_real,
+        'coverage_pct': coverage_pct,
+    }
 
 
 # ==============================================================
@@ -330,20 +421,17 @@ JUNK_KEYWORDS = [
 
 
 def get_image_src(img):
-    """استخراج رابط الصورة الحقيقي مع دعم التحميل الكسول و srcset."""
     for attr in ['data-src', 'data-original', 'data-lazy', 'data-lazy-src',
                  'data-image', 'data-large_image']:
         val = img.get(attr)
         if val and val.strip():
             return val.strip()
-
     for attr in ['data-srcset', 'srcset']:
         val = img.get(attr)
         if val and val.strip():
             first = val.split(',')[0].strip().split(' ')[0]
             if first:
                 return first
-
     src = img.get('src')
     return src.strip() if src else ''
 
@@ -351,37 +439,25 @@ def get_image_src(img):
 def is_relevant_seo_image(img, src):
     if not src:
         return False
-    src_lower = src.lower()
-
-    # رفض base64 وصور النظام الثابتة (placeholders غالباً)
-    if src_lower.startswith('data:image'):
+    s = src.lower()
+    if s.startswith('data:image'):
         return False
-    if 'static.' in src_lower or '/static/' in src_lower:
+    if 'static.' in s or '/static/' in s:
         return False
-
-    # الشعار والعلامات
-    if any(k in src_lower for k in ['logo', 'brand', 'favicon', 'watermark']):
+    if any(k in s for k in ['logo', 'brand', 'favicon', 'watermark']):
         return False
-
-    img_classes = ' '.join(img.get('class', [])).lower()
+    classes = ' '.join(img.get('class', [])).lower()
     img_id = (img.get('id') or '').lower()
-    if any(k in img_classes or k in img_id for k in ['logo', 'brand']):
+    if any(k in classes or k in img_id for k in ['logo', 'brand']):
         return False
-
-    # امتدادات غير مخصصة لصور المحتوى
-    path_part = src_lower.split('?')[0]
-    if path_part.endswith(('.gif', '.svg', '.ico')):
+    if s.split('?')[0].endswith(('.gif', '.svg', '.ico')):
         return False
-
-    # عناصر الواجهة وبوابات الدفع
-    if any(junk in src_lower for junk in JUNK_KEYWORDS):
+    if any(j in s for j in JUNK_KEYWORDS):
         return False
-
     return True
 
 
 def strip_boilerplate(soup):
-    """إعدام الترويسة والفوتر والقوائم مرة واحدة فقط بدون تكرار."""
     targets = soup.select(
         'header, nav, footer, aside, '
         '[class*="header"], [class*="footer"], [class*="navbar"], [class*="nav-menu"]'
@@ -403,6 +479,7 @@ def failed_row(url, reason):
             'نوع الصفحة': 'صفحة غير متاحة',
             'الرابط': url,
             'الرابط الكانوني': url,
+            'مصدر الاكتشاف': '',
             'متاحة': False,
             'كود الاستجابة': str(reason),
             'درجة السيو': None,
@@ -420,46 +497,37 @@ def failed_row(url, reason):
 
 
 def audit_single_page(url_item):
-    url, base_url = url_item
+    url, base_url, source = url_item
     try:
-        return _audit_single_page(url, base_url)
+        result = _audit_single_page(url, base_url)
     except Exception as e:
-        # عزل الاستثناء حتى لا تسقط نتائج الفحص بالكامل
-        return failed_row(clean_url(url), f'خطأ فني: {type(e).__name__}')
+        result = failed_row(clean_url(url), f'خطأ فني: {type(e).__name__}')
+    result['page_data']['مصدر الاكتشاف'] = source
+    return result
 
 
 def _audit_single_page(url, base_url):
-    res = None
-    for attempt in range(3):
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
-            if res.status_code == 429:
-                time.sleep(2 * (attempt + 1))
-                continue
-            break
-        except Exception:
-            time.sleep(1)
-
+    res = safe_get(url, timeout=12, retries=2)
     if res is None:
         return failed_row(clean_url(url), 'فشل اتصال')
 
     final_url = clean_url(res.url)
-
     if res.status_code != 200:
         return failed_row(final_url, f'خطأ {res.status_code}')
 
     soup = make_soup(res.text)
     page_type = detect_page_type_advanced(final_url, base_url, soup)
 
-    # الرابط الكانوني (لاستبعاد النسخ المكررة بشكل صحيح)
     canonical = final_url
-    can_tag = soup.find('link', attrs={'rel': lambda v: v and 'canonical' in [x.lower() for x in (v if isinstance(v, list) else [v])]})
-    if can_tag and can_tag.get('href'):
-        cand = clean_url(urljoin(final_url, can_tag['href']))
-        if cand and urlparse(cand).netloc == urlparse(final_url).netloc:
-            canonical = cand
+    for link in soup.find_all('link', href=True):
+        rel = link.get('rel') or []
+        rel = [r.lower() for r in (rel if isinstance(rel, list) else [rel])]
+        if 'canonical' in rel:
+            cand = clean_url(urljoin(final_url, link['href']))
+            if cand and urlparse(cand).netloc == urlparse(final_url).netloc:
+                canonical = cand
+            break
 
-    # العنوان
     title_tag = soup.find('title')
     title = title_tag.get_text(strip=True) if title_tag else ''
     if not title:
@@ -471,7 +539,6 @@ def _audit_single_page(url, base_url):
     else:
         title_status = 'سليم'
 
-    # الوصف
     meta_desc_tag = (soup.find('meta', attrs={'name': 'description'})
                      or soup.find('meta', attrs={'property': 'og:description'}))
     meta_desc = meta_desc_tag['content'].strip() if meta_desc_tag and meta_desc_tag.get('content') else ''
@@ -484,28 +551,23 @@ def _audit_single_page(url, base_url):
     else:
         desc_status = 'سليم'
 
-    # جسم الصفحة بعد إزالة الترويسة والفوتر
     content_soup = strip_boilerplate(make_soup(res.text))
 
-    total_img = 0
-    missing_alt = 0
+    total_img = missing_alt = 0
     page_images = []
-
     for img in content_soup.find_all('img'):
         src = get_image_src(img)
         if src and is_relevant_seo_image(img, src):
             total_img += 1
-            full_img_url = urljoin(final_url, src)
             alt_text = (img.get('alt') or '').strip()
-            is_missing = (alt_text == '')
-            if is_missing:
+            if not alt_text:
                 missing_alt += 1
             page_images.append({
                 'رابط الصفحة': final_url,
                 'نوع الصفحة': page_type,
-                'رابط الصورة': full_img_url,
+                'رابط الصورة': urljoin(final_url, src),
                 'النص البديل الحالي (Alt)': alt_text if alt_text else 'لا يوجد (فارغ)',
-                'حالة النص البديل': 'مفقود' if is_missing else 'سليم ومكتمل'
+                'حالة النص البديل': 'مفقود' if not alt_text else 'سليم ومكتمل'
             })
 
     for s in content_soup(['script', 'style', 'noscript']):
@@ -529,6 +591,7 @@ def _audit_single_page(url, base_url):
             'نوع الصفحة': page_type,
             'الرابط': final_url,
             'الرابط الكانوني': canonical,
+            'مصدر الاكتشاف': '',
             'متاحة': True,
             'كود الاستجابة': '200',
             'درجة السيو': score,
@@ -545,20 +608,35 @@ def _audit_single_page(url, base_url):
     }
 
 
+def run_audit(urls_with_source, base_url, workers, progress_bar=None):
+    page_results, image_results = [], []
+    items = [(u, base_url, src) for u, src in urls_with_source]
+    total = max(len(items), 1)
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for res in ex.map(audit_single_page, items):
+            page_results.append(res['page_data'])
+            image_results.extend(res['images_data'])
+            done += 1
+            if progress_bar:
+                progress_bar.progress(min(done / total, 1.0))
+    return page_results, image_results
+
+
 # ==============================================================
-#  مولد تقرير العميل (PDF)
+#  تقرير العميل (PDF)
 # ==============================================================
 def ar(text):
     return get_display(arabic_reshaper.reshape(str(text)))
 
 
 def build_diagnosis(score, stats):
-    """نص تشخيص مبني على نتائج الفحص الفعلية لا نص ثابت."""
     total_imgs = stats.get('total_images', 0)
     missing = stats.get('missing_alts', 0)
     bad_titles = stats.get('bad_titles', 0)
     bad_descs = stats.get('bad_descs', 0)
     broken = stats.get('broken_pages', 0)
+    uncovered = stats.get('missing_from_sitemap_count', 0)
 
     issues = []
     if missing > 0 and total_imgs > 0:
@@ -569,13 +647,16 @@ def build_diagnosis(score, stats):
         issues.append(f"{bad_titles} عنوان ميتا مفقود أو خارج الطول الموصى به")
     if bad_descs > 0:
         issues.append(f"{bad_descs} وصف ميتا مفقود أو غير مهيأ")
+    if uncovered > 0:
+        issues.append(f"{uncovered} منتجاً معروضاً في المتجر لا يظهر في خريطة الموقع، "
+                      "أي أن محركات البحث قد لا تعلم بوجوده")
     if broken > 0:
         issues.append(f"{broken} رابط لم تنجح الاستجابة له أثناء الفحص")
 
     if not issues:
         return ("لم يرصد الفحص فجوات جوهرية في العناصر المدققة: العناوين والأوصاف ووسوم الصور "
-                "ضمن المعايير الموصى بها. يوصى بمتابعة دورية للحفاظ على هذا المستوى "
-                "ومراجعة المحتوى عند إضافة منتجات أو أقسام جديدة.")
+                "وتغطية خريطة الموقع ضمن المعايير الموصى بها. يوصى بمتابعة دورية للحفاظ على "
+                "هذا المستوى ومراجعة المحتوى عند إضافة منتجات أو أقسام جديدة.")
 
     body = "أظهر الفحص الفني: " + "، و".join(issues) + ". "
     if score < 60:
@@ -591,19 +672,15 @@ def build_diagnosis(score, stats):
     return body
 
 
-def generate_client_pdf(domain, score, summary_stats):
+def generate_client_pdf(domain, score, stats):
     if not FONT_PATH.exists():
-        raise FileNotFoundError(
-            f"ملف الخط غير موجود في المسار: {FONT_PATH}\n"
-            "تأكد من رفع Amiri-Regular.ttf إلى جذر المستودع."
-        )
+        raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
 
     clean_domain = urlparse(domain).netloc or domain
     logo_exists = LOGO_PATH.exists()
 
     class PDFReport(FPDF):
         def header(self):
-            # الشعار بنسبة 2:1 (عرض 34mm / ارتفاع 17mm) ليبقى داخل الترويسة
             if logo_exists:
                 try:
                     self.image(str(LOGO_PATH), x=15, y=9, h=13)
@@ -634,14 +711,12 @@ def generate_client_pdf(domain, score, summary_stats):
     pdf.set_font("Amiri", "", 16)
     pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, ar("تقرير الفحص الفني الشامل لمحركات البحث"), ln=True, align="C")
-
     pdf.set_font("Amiri", "", 11)
     pdf.set_text_color(71, 85, 105)
     pdf.cell(0, 6, ar(f"المتجر المستهدف: {clean_domain}   |   تاريخ الفحص: "
                       f"{datetime.now().strftime('%Y-%m-%d')}"), ln=True, align="C")
     pdf.ln(4)
 
-    # صندوق الدرجة (إحداثيات نسبية لا ثابتة)
     box_y = pdf.get_y()
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(203, 213, 225)
@@ -660,13 +735,13 @@ def generate_client_pdf(domain, score, summary_stats):
     def draw_table(title, rows, col_widths=(120, 60)):
         table_width = sum(col_widths)
         start_x = (210 - table_width) / 2
-
+        if pdf.get_y() + (len(rows) + 3) * 6.5 > 270:
+            pdf.add_page()
         pdf.set_x(start_x)
         pdf.set_font("Amiri", "", 12)
         pdf.set_text_color(15, 23, 42)
         pdf.cell(table_width, 7, ar(title), ln=True, align="R")
         pdf.ln(1)
-
         pdf.set_x(start_x)
         pdf.set_fill_color(241, 245, 249)
         pdf.set_draw_color(203, 213, 225)
@@ -674,7 +749,6 @@ def generate_client_pdf(domain, score, summary_stats):
         pdf.set_text_color(30, 41, 59)
         pdf.cell(col_widths[1], 7, ar("الحالة / العدد"), 1, 0, 'C', fill=True)
         pdf.cell(col_widths[0], 7, ar("عنصر الفحص والتدقيق"), 1, 1, 'C', fill=True)
-
         pdf.set_font("Amiri", "", 9)
         for label, val in rows:
             pdf.set_x(start_x)
@@ -683,22 +757,20 @@ def generate_client_pdf(domain, score, summary_stats):
             pdf.cell(col_widths[0], 6, ar(label), 1, 1, 'R')
         pdf.ln(5)
 
-    pages_rows = [
-        ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{summary_stats['total_pages']} صفحة"),
-        ("صفحات المنتجات المكتشفة", f"{summary_stats['products']} منتج"),
-        ("صفحات الأقسام والكولكشنات", f"{summary_stats['categories']} تصنيف"),
-        ("مقالات وصفحات المدونة", f"{summary_stats.get('blog_pages', 0)} مقال"),
-        ("الصفحات التعريفية والسياسات", f"{summary_stats['info_pages']} صفحة"),
-        ("روابط تعذر الوصول إليها أثناء الفحص", f"{summary_stats.get('broken_pages', 0)} رابط"),
-        ("عناوين الميتا الرئيسية المفقودة أو غير المتوافقة", f"{summary_stats['bad_titles']} عنوان"),
-        ("أوصاف الميتا التسويقية المفقودة أو غير المهيأة", f"{summary_stats['bad_descs']} وصف"),
-    ]
-    draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", pages_rows)
+    draw_table("1. جدول تدقيق بنية الصفحات والعناوين:", [
+        ("إجمالي عدد الصفحات المفحوصة في المتجر", f"{stats['total_pages']} صفحة"),
+        ("صفحات المنتجات المكتشفة", f"{stats['products']} منتج"),
+        ("صفحات الأقسام والكولكشنات", f"{stats['categories']} تصنيف"),
+        ("مقالات وصفحات المدونة", f"{stats.get('blog_pages', 0)} مقال"),
+        ("الصفحات التعريفية والسياسات", f"{stats['info_pages']} صفحة"),
+        ("روابط تعذر الوصول إليها أثناء الفحص", f"{stats.get('broken_pages', 0)} رابط"),
+        ("عناوين الميتا المفقودة أو غير المتوافقة", f"{stats['bad_titles']} عنوان"),
+        ("أوصاف الميتا المفقودة أو غير المهيأة", f"{stats['bad_descs']} وصف"),
+    ])
 
-    total_imgs = summary_stats.get('total_images', 0)
-    missing_alts = summary_stats.get('missing_alts', 0)
+    total_imgs = stats.get('total_images', 0)
+    missing_alts = stats.get('missing_alts', 0)
     alt_ratio = round((missing_alts / total_imgs * 100), 1) if total_imgs > 0 else 0
-
     if total_imgs == 0:
         img_state = "لم يرصد الفحص صور محتوى"
     elif missing_alts == 0:
@@ -708,32 +780,40 @@ def generate_client_pdf(domain, score, summary_stats):
     else:
         img_state = "فجوة جزئية"
 
-    image_rows = [
+    draw_table("2. جدول تدقيق وسوم وصور المتجر:", [
         ("إجمالي صور المحتوى والمنتجات المفحوصة", f"{total_imgs} صورة"),
         ("صور تفتقر لوسم النص البديل لمحركات البحث", f"{missing_alts} صورة"),
         ("نسبة الصور غير المهيأة لمحركات البحث", f"{alt_ratio}%"),
         ("حالة تهيئة الصور للظهور في بحث صور جوجل", img_state),
-    ]
-    draw_table("2. جدول تدقيق وسوم وصور المتجر:", image_rows)
+    ])
 
-    # صندوق التشخيص بارتفاع محسوب من عدد الأسطر الفعلي
+    if stats.get('coverage_enabled'):
+        draw_table("3. جدول تدقيق تغطية خريطة الموقع:", [
+            ("منتجات معروضة في واجهة المتجر", f"{stats.get('catalog_count', 0)} منتج"),
+            ("منتجات معلنة في خريطة الموقع", f"{stats.get('sitemap_count', 0)} منتج"),
+            ("منتجات معروضة ولا تظهر في الخريطة", f"{stats.get('missing_from_sitemap_count', 0)} منتج"),
+            ("روابط في الخريطة غير معروضة في المتجر", f"{stats.get('not_in_catalog_count', 0)} رابط"),
+            ("نسبة تغطية خريطة الموقع", f"{stats.get('coverage_pct', 0)}%"),
+        ])
+        diag_no = "4"
+    else:
+        diag_no = "3"
+
     box_width = 180
     box_x = (210 - box_width) / 2
     pdf.set_x(box_x)
     pdf.set_font("Amiri", "", 12)
     pdf.set_text_color(15, 23, 42)
-    pdf.cell(box_width, 6, ar("3. التشخيص الاستشاري وخطة العمل:"), ln=True, align="R")
+    pdf.cell(box_width, 6, ar(f"{diag_no}. التشخيص الاستشاري وخطة العمل:"), ln=True, align="R")
     pdf.ln(1)
 
-    diag_text = build_diagnosis(score, summary_stats)
-
+    diag_text = build_diagnosis(score, stats)
     pdf.set_font("Amiri", "", 9)
-    max_text_width = box_width - 10
-    lines = []
-    current = ""
+    max_w = box_width - 10
+    lines, current = [], ""
     for word in diag_text.split():
         trial = (current + " " + word).strip()
-        if pdf.get_string_width(ar(trial)) <= max_text_width:
+        if pdf.get_string_width(ar(trial)) <= max_w:
             current = trial
         else:
             if current:
@@ -744,28 +824,28 @@ def generate_client_pdf(domain, score, summary_stats):
 
     line_h = 4.8
     box_h = len(lines) * line_h + 6
+    if pdf.get_y() + box_h > 265:
+        pdf.add_page()
     box_y = pdf.get_y()
-
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(226, 232, 240)
     pdf.rect(box_x, box_y, box_width, box_h, 'DF')
-
     pdf.set_xy(box_x + 5, box_y + 3)
     pdf.set_text_color(71, 85, 105)
     for line in lines:
         pdf.set_x(box_x + 5)
-        pdf.cell(max_text_width, line_h, ar(line), ln=True, align="R")
+        pdf.cell(max_w, line_h, ar(line), ln=True, align="R")
 
     return bytes(pdf.output())
 
 
 # ==============================================================
-#  حزمة الملفات (ZIP)
+#  حزمة الملفات والملخص
 # ==============================================================
-def build_zip(df, images_df):
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        groups = [
+def build_zip(df, images_df, coverage=None):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for ptype, fname in [
             ('صفحة منتج', "1_المنتجات_products.csv"),
             ('صفحة تصنيف', "2_التصنيفات_categories.csv"),
             ('صفحة مدونة', "3_المدونة_blog.csv"),
@@ -773,24 +853,60 @@ def build_zip(df, images_df):
             ('صفحة رئيسية', "5_الصفحة_الرئيسية_homepage.csv"),
             ('غير مصنفة', "6_غير_مصنفة_unclassified.csv"),
             ('صفحة غير متاحة', "7_روابط_معطلة_errors.csv"),
-        ]
-        for ptype, fname in groups:
+        ]:
             sub = df[df['نوع الصفحة'] == ptype]
             if not sub.empty:
-                zip_file.writestr(fname, sub.to_csv(index=False, encoding='utf-8-sig'))
+                z.writestr(fname, sub.to_csv(index=False, encoding='utf-8-sig'))
 
         if images_df is not None and not images_df.empty:
-            zip_file.writestr("8_تفاصيل_صور_المتجر_images_audit.csv",
-                              images_df.to_csv(index=False, encoding='utf-8-sig'))
+            z.writestr("8_تفاصيل_صور_المتجر_images_audit.csv",
+                       images_df.to_csv(index=False, encoding='utf-8-sig'))
 
-        excel_buf = io.BytesIO()
-        with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='SEO Pages Audit')
+        if coverage:
+            if coverage.get('missing_from_sitemap'):
+                z.writestr("9_منتجات_غير_مدرجة_في_الخريطة.csv",
+                           pd.DataFrame({'رابط المنتج': coverage['missing_from_sitemap']})
+                           .to_csv(index=False, encoding='utf-8-sig'))
+            if coverage.get('not_in_catalog'):
+                z.writestr("10_روابط_في_الخريطة_غير_معروضة.csv",
+                           pd.DataFrame({'الرابط': coverage['not_in_catalog']})
+                           .to_csv(index=False, encoding='utf-8-sig'))
+
+        xbuf = io.BytesIO()
+        with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
+            df.to_excel(w, index=False, sheet_name='SEO Pages Audit')
             if images_df is not None and not images_df.empty:
-                images_df.to_excel(writer, index=False, sheet_name='Images Alt Audit')
-        zip_file.writestr("التقرير_الشامل_all_pages_and_images.xlsx", excel_buf.getvalue())
+                images_df.to_excel(w, index=False, sheet_name='Images Alt Audit')
+        z.writestr("التقرير_الشامل_all_pages_and_images.xlsx", xbuf.getvalue())
+    return buf.getvalue()
 
-    return zip_buffer.getvalue()
+
+def compute_summary(df, coverage=None):
+    ok = df[df['متاحة'] == True]  # noqa: E712
+    s = {
+        'total_pages': len(df),
+        'score': round(ok['درجة السيو'].mean(), 1) if not ok.empty else 0.0,
+        'products': int((df['نوع الصفحة'] == 'صفحة منتج').sum()),
+        'categories': int((df['نوع الصفحة'] == 'صفحة تصنيف').sum()),
+        'info_pages': int((df['نوع الصفحة'] == 'صفحة تعريفية').sum()),
+        'blog_pages': int((df['نوع الصفحة'] == 'صفحة مدونة').sum()),
+        'unclassified': int((df['نوع الصفحة'] == 'غير مصنفة').sum()),
+        'broken_pages': int((df['متاحة'] == False).sum()),  # noqa: E712
+        'bad_titles': int((ok['حالة العنوان'] != 'سليم').sum()),
+        'bad_descs': int((ok['حالة الوصف'] != 'سليم').sum()),
+        'missing_alts': int(ok['صور بدون Alt'].sum()),
+        'total_images': int(ok['إجمالي الصور'].sum()),
+        'coverage_enabled': bool(coverage),
+    }
+    if coverage:
+        s.update({
+            'sitemap_count': coverage['sitemap_count'],
+            'catalog_count': coverage['catalog_count'],
+            'missing_from_sitemap_count': len(coverage['missing_from_sitemap']),
+            'not_in_catalog_count': len(coverage['not_in_catalog']),
+            'coverage_pct': coverage['coverage_pct'],
+        })
+    return s
 
 
 # ==============================================================
@@ -801,7 +917,8 @@ nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد
 
 if nav == "🔍 فحص متجر جديد":
     st.title("🚀 مركز عمليات السيو الشامل للمتاجر")
-    st.write("أداة الفحص والتدقيق الكامل لجميع أقسام ومنتجات ومدونات وسياسات وصور المتجر الإلكتروني.")
+    st.write("فحص وتدقيق كامل لأقسام ومنتجات ومدونة وسياسات وصور المتجر، "
+             "مع التحقق من تغطية خريطة الموقع.")
 
     c_url, c_btn = st.columns([4, 1])
     with c_url:
@@ -813,98 +930,96 @@ if nav == "🔍 فحص متجر جديد":
         st.write("")
         start_btn = st.button("🔍 بدء الفحص")
 
-    with st.sidebar.expander("⚙️ إعدادات الفحص"):
-        max_pages = st.number_input("الحد الأقصى للصفحات:", min_value=50, max_value=5000,
-                                    value=MAX_PAGES_DEFAULT, step=50)
-        workers = st.slider("عدد المسارات المتوازية:", min_value=1, max_value=8, value=4)
+    with st.sidebar.expander("⚙️ إعدادات الفحص", expanded=False):
+        max_pages = st.number_input("الحد الأقصى للصفحات:", 50, 5000, MAX_PAGES_DEFAULT, 50)
+        workers = st.slider("عدد المسارات المتوازية:", 1, 8, 4)
+        do_coverage = st.checkbox("التحقق من تغطية خريطة الموقع", value=True,
+                                  help="يزحف على صفحات الأقسام لاكتشاف المنتجات المعروضة "
+                                       "فعلياً ومقارنتها بخريطة الموقع. يطيل مدة الفحص.")
+        audit_missing = st.checkbox("فحص المنتجات المكتشفة خارج الخريطة", value=True)
 
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 فحص متجر جديد (تفريغ الشاشة)"):
-            for k in ['audit_df', 'images_df', 'summary', 'pdf_bytes', 'zip_bytes']:
+            for k in ['audit_df', 'images_df', 'summary', 'pdf_bytes', 'zip_bytes', 'coverage']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
 
     if start_btn and input_url:
-        target_url = normalize_url(input_url)
-        st.session_state.current_url = target_url
+        target = normalize_url(input_url)
+        st.session_state.current_url = target
 
-        with st.spinner("جاري استخراج كافة الصفحات من خرائط الموقع وروابط الفوتر..."):
-            urls, truncated, total_found = get_all_store_urls(target_url, max_pages)
-
+        with st.spinner("استخراج الروابط من robots.txt وخرائط الموقع وروابط الفوتر..."):
+            urls, truncated, total_found = get_all_store_urls(target, max_pages)
         if truncated:
-            st.warning(f"تم العثور على {total_found} رابط، وسيقتصر الفحص على أول {max_pages} رابط "
-                       "حسب الحد المحدد في الإعدادات الجانبية.")
-        st.info(f"جاري فحص {len(urls)} صفحة وتدقيق الصفحات والصور...")
+            st.warning(f"عُثر على {total_found} رابط، وسيقتصر الفحص على {max_pages} رابط.")
 
-        progress_bar = st.progress(0)
-        page_results = []
-        all_images_results = []
-        url_tuples = [(u, target_url) for u in urls]
-        total_urls = max(len(urls), 1)
-        completed = 0
+        st.info(f"المرحلة 1: فحص {len(urls)} صفحة من خريطة الموقع...")
+        bar1 = st.progress(0)
+        pages, imgs = run_audit([(u, 'خريطة الموقع') for u in urls], target, workers, bar1)
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for res in executor.map(audit_single_page, url_tuples):
-                page_results.append(res['page_data'])
-                all_images_results.extend(res['images_data'])
-                completed += 1
-                progress_bar.progress(min(completed / total_urls, 1.0))
+        df = pd.DataFrame(pages)
+        images_df = pd.DataFrame(imgs)
 
-        df = pd.DataFrame(page_results)
-        images_df = pd.DataFrame(all_images_results)
-
-        # إزالة التكرار على الرابط ثم على الرابط الكانوني (بدل تجريد الأرقام)
         df = df.drop_duplicates(subset=['الرابط']).copy()
-        available = df[df['متاحة'] == True]  # noqa: E712
-        dup_mask = available.duplicated(subset=['الرابط الكانوني'], keep='first')
-        dup_urls = set(available[dup_mask]['الرابط'])
-        df = df[~df['الرابط'].isin(dup_urls)].copy().reset_index(drop=True)
+        avail = df[df['متاحة'] == True]  # noqa: E712
+        dups = set(avail[avail.duplicated(subset=['الرابط الكانوني'], keep='first')]['الرابط'])
+        df = df[~df['الرابط'].isin(dups)].copy().reset_index(drop=True)
 
-        # مزامنة جدول الصور مع الصفحات الباقية
+        coverage = None
+        if do_coverage:
+            st.info("المرحلة 2: الزحف على صفحات الأقسام للتحقق من التغطية...")
+            cat_urls = df[df['نوع الصفحة'] == 'صفحة تصنيف']['الرابط'].tolist()
+            bar2 = st.progress(0)
+            status2 = st.empty()
+
+            def cb(pct, found_n, fetched_n):
+                bar2.progress(min(pct, 1.0))
+                status2.caption(f"تم جلب {fetched_n} صفحة قسم واكتشاف {found_n} رابط منتج.")
+
+            catalog_products, fetched = crawl_catalog_for_products(target, cat_urls, cb)
+            sitemap_products = set(df[df['نوع الصفحة'] == 'صفحة منتج']['الرابط'])
+            coverage = build_coverage_report(sitemap_products, catalog_products)
+
+            known = set(df['الرابط'])
+            new_products = [u for u in coverage['missing_from_sitemap'] if u not in known]
+            if audit_missing and new_products:
+                st.info(f"المرحلة 3: فحص {len(new_products)} منتج مكتشف خارج خريطة الموقع...")
+                bar3 = st.progress(0)
+                extra_pages, extra_imgs = run_audit(
+                    [(u, 'الزحف على الأقسام') for u in new_products], target, workers, bar3)
+                df = pd.concat([df, pd.DataFrame(extra_pages)], ignore_index=True)
+                if extra_imgs:
+                    images_df = pd.concat([images_df, pd.DataFrame(extra_imgs)], ignore_index=True)
+                df = df.drop_duplicates(subset=['الرابط']).reset_index(drop=True)
+
         if not images_df.empty:
-            images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])].copy().reset_index(drop=True)
+            images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
+                .copy().reset_index(drop=True)
 
-        ok_df = df[df['متاحة'] == True]  # noqa: E712
-        avg_score = round(ok_df['درجة السيو'].mean(), 1) if not ok_df.empty else 0.0
-
-        summary = {
-            'total_pages': len(df),
-            'score': avg_score,
-            'products': int((df['نوع الصفحة'] == 'صفحة منتج').sum()),
-            'categories': int((df['نوع الصفحة'] == 'صفحة تصنيف').sum()),
-            'info_pages': int((df['نوع الصفحة'] == 'صفحة تعريفية').sum()),
-            'blog_pages': int((df['نوع الصفحة'] == 'صفحة مدونة').sum()),
-            'unclassified': int((df['نوع الصفحة'] == 'غير مصنفة').sum()),
-            'broken_pages': int((df['متاحة'] == False).sum()),  # noqa: E712
-            'bad_titles': int((ok_df['حالة العنوان'] != 'سليم').sum()),
-            'bad_descs': int((ok_df['حالة الوصف'] != 'سليم').sum()),
-            'missing_alts': int(ok_df['صور بدون Alt'].sum()),
-            'total_images': int(ok_df['إجمالي الصور'].sum()),
-        }
+        summary = compute_summary(df, coverage)
 
         st.session_state.audit_df = df
         st.session_state.images_df = images_df
         st.session_state.summary = summary
-
-        # توليد المخرجات مرة واحدة فقط بعد الفحص
-        st.session_state.zip_bytes = build_zip(df, images_df)
+        st.session_state.coverage = coverage
+        st.session_state.zip_bytes = build_zip(df, images_df, coverage)
         try:
-            st.session_state.pdf_bytes = generate_client_pdf(target_url, avg_score, summary)
+            st.session_state.pdf_bytes = generate_client_pdf(target, summary['score'], summary)
         except Exception as e:
             st.session_state.pdf_bytes = None
-            st.error(f"تعذر توليد ملف الـ PDF: {e}")
+            st.error(f"تعذر توليد الـ PDF: {e}")
 
         conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('''INSERT INTO audits (domain, scan_date, score, total_pages, products_count,
-                     categories_count, info_pages_count, blog_pages_count, data_json, images_json)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (target_url, datetime.now().strftime("%Y-%m-%d %H:%M"), avg_score,
-                   summary['total_pages'], summary['products'], summary['categories'],
-                   summary['info_pages'], summary['blog_pages'],
-                   df.to_json(orient='records'),
-                   images_df.to_json(orient='records') if not images_df.empty else ''))
+        conn.cursor().execute(
+            '''INSERT INTO audits (domain, scan_date, score, total_pages, products_count,
+               categories_count, info_pages_count, blog_pages_count, data_json,
+               images_json, coverage_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+            (target, datetime.now().strftime("%Y-%m-%d %H:%M"), summary['score'],
+             summary['total_pages'], summary['products'], summary['categories'],
+             summary['info_pages'], summary['blog_pages'], df.to_json(orient='records'),
+             images_df.to_json(orient='records') if not images_df.empty else '',
+             json.dumps(coverage, ensure_ascii=False) if coverage else ''))
         conn.commit()
         conn.close()
 
@@ -912,11 +1027,12 @@ if nav == "🔍 فحص متجر جديد":
         df = st.session_state.audit_df
         images_df = st.session_state.images_df
         summary = st.session_state.summary
+        coverage = st.session_state.coverage
 
-        st.success(f"اكتمل فحص وتصنيف المتجر: {st.session_state.current_url}")
+        st.success(f"اكتمل الفحص: {st.session_state.current_url}")
 
         cols = st.columns(7)
-        metrics = [
+        for col, (val, lbl) in zip(cols, [
             (summary["total_pages"], "إجمالي الصفحات"),
             (f'{summary["score"]}%', "نسبة التوافق"),
             (summary["products"], "المنتجات"),
@@ -924,142 +1040,147 @@ if nav == "🔍 فحص متجر جديد":
             (summary["blog_pages"], "المدونة"),
             (summary["info_pages"], "التعريفية"),
             (summary.get("broken_pages", 0), "روابط معطلة"),
-        ]
-        for col, (value, label) in zip(cols, metrics):
+        ]):
             with col:
-                st.markdown(
-                    f'<div class="metric-card"><div class="metric-value">{value}</div>'
-                    f'<div class="metric-label">{label}</div></div>',
-                    unsafe_allow_html=True
-                )
+                st.markdown(f'<div class="metric-card"><div class="metric-value">{val}</div>'
+                            f'<div class="metric-label">{lbl}</div></div>', unsafe_allow_html=True)
 
-        if summary.get('unclassified', 0) > 0:
-            st.caption(f"ملاحظة: {summary['unclassified']} صفحة لم يمكن تصنيفها آلياً "
-                       "وهي معروضة تحت تصنيف (غير مصنفة) للمراجعة اليدوية.")
+        tabs = st.tabs(["📄 الصفحات", "🖼️ الصور", "🎯 تغطية الخريطة", "🔬 التحقق اليدوي"])
 
-        tab1, tab2 = st.tabs(["📄 جدول فحص الصفحات", "🖼️ جدول تدقيق صور المتجر (Alt Tags)"])
+        with tabs[0]:
+            types_avail = ["جميع الصفحات"] + [t for t in PAGE_TYPES if (df['نوع الصفحة'] == t).any()]
+            sel = st.selectbox("نوع الصفحة:", types_avail)
+            d = df if sel == "جميع الصفحات" else df[df['نوع الصفحة'] == sel]
+            d = d.copy().reset_index(drop=True)
+            d.index = d.index + 1
+            st.dataframe(d, use_container_width=True)
+            if summary.get('unclassified', 0) > 0:
+                st.caption(f"{summary['unclassified']} صفحة غير مصنفة آلياً تحتاج مراجعة يدوية.")
 
-        with tab1:
-            st.subheader("📋 تصفية وعرض الصفحات")
-            available_types = ["جميع الصفحات"] + [t for t in PAGE_TYPES if (df['نوع الصفحة'] == t).any()]
-            selected_type = st.selectbox("اختر نوع الصفحة للعرض:", available_types)
-
-            if selected_type == "جميع الصفحات":
-                display_df = df.copy().reset_index(drop=True)
-            else:
-                display_df = df[df['نوع الصفحة'] == selected_type].copy().reset_index(drop=True)
-
-            display_df.index = display_df.index + 1
-            st.dataframe(display_df, use_container_width=True)
-
-        with tab2:
-            st.subheader("🖼️ التقرير المفصل لصور المحتوى والمنتجات")
+        with tabs[1]:
             if images_df is not None and not images_df.empty:
-                filter_img = st.selectbox("تصفية الصور:",
-                                          ["جميع الصور", "صور تفتقر لوسم Alt فقط", "صور سليمة"])
-                if filter_img == "صور تفتقر لوسم Alt فقط":
-                    view_images_df = images_df[images_df['حالة النص البديل'] == 'مفقود']
-                elif filter_img == "صور سليمة":
-                    view_images_df = images_df[images_df['حالة النص البديل'] == 'سليم ومكتمل']
+                f = st.selectbox("تصفية:", ["جميع الصور", "بدون Alt فقط", "سليمة فقط"])
+                v = images_df
+                if f == "بدون Alt فقط":
+                    v = images_df[images_df['حالة النص البديل'] == 'مفقود']
+                elif f == "سليمة فقط":
+                    v = images_df[images_df['حالة النص البديل'] == 'سليم ومكتمل']
+                v = v.copy().reset_index(drop=True)
+                v.index = v.index + 1
+                st.dataframe(v, use_container_width=True)
+            else:
+                st.info("لا توجد صور محتوى مرصودة.")
+
+        with tabs[2]:
+            if not coverage:
+                st.info("لم يُفعَّل التحقق من التغطية في هذا الفحص. "
+                        "فعّله من الإعدادات الجانبية وأعد الفحص.")
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("معروضة في المتجر", coverage['catalog_count'])
+                c2.metric("معلنة في الخريطة", coverage['sitemap_count'])
+                c3.metric("مفقودة من الخريطة", len(coverage['missing_from_sitemap']))
+                c4.metric("نسبة التغطية", f"{coverage['coverage_pct']}%")
+
+                if coverage['missing_from_sitemap']:
+                    st.error(f"{len(coverage['missing_from_sitemap'])} منتج معروض في المتجر "
+                             "ولا يظهر في خريطة الموقع — محركات البحث قد لا تعلم بوجوده.")
+                    st.dataframe(pd.DataFrame({'رابط المنتج': coverage['missing_from_sitemap']}),
+                                 use_container_width=True)
                 else:
-                    view_images_df = images_df
+                    st.success("جميع المنتجات المعروضة مدرجة في خريطة الموقع.")
 
-                view_images_df = view_images_df.copy().reset_index(drop=True)
-                view_images_df.index = view_images_df.index + 1
-                st.dataframe(view_images_df, use_container_width=True)
+                if coverage['not_in_catalog']:
+                    st.warning(f"{len(coverage['not_in_catalog'])} رابط موجود في خريطة الموقع "
+                               "ولم يظهر في أي صفحة قسم — قد تكون منتجات مخفية أو محذوفة أو "
+                               "غير مرتبطة بأي تصنيف.")
+                    st.dataframe(pd.DataFrame({'الرابط': coverage['not_in_catalog']}),
+                                 use_container_width=True)
+
+                st.caption("ملاحظة: الزحف يعتمد على ترقيم الصفحات بصيغة ?page=N. "
+                           "المتاجر التي تحمّل المنتجات بالتمرير اللانهائي قد لا تُغطى بالكامل.")
+
+        with tabs[3]:
+            st.subheader("🔬 عيّنة للتحقق اليدوي")
+            st.write("افتح كل رابط في المتصفح وقارن العنوان والوصف بما هو مسجّل هنا. "
+                     "إن تطابقت العيّنة كاملة، فمحرك القراءة يعمل بشكل صحيح.")
+            ok_pages = df[(df['متاحة'] == True) & (df['نوع الصفحة'] == 'صفحة منتج')]  # noqa: E712
+            if ok_pages.empty:
+                ok_pages = df[df['متاحة'] == True]  # noqa: E712
+            if ok_pages.empty:
+                st.info("لا توجد صفحات متاحة للتحقق.")
             else:
-                st.info("لا توجد صور محتوى بحاجة لتدقيق في هذه الصفحات.")
+                n = min(5, len(ok_pages))
+                sample = ok_pages.sample(n=n, random_state=int(time.time()) % 1000)
+                for _, row in sample.iterrows():
+                    with st.container(border=True):
+                        st.markdown(f"**الرابط:** [{row['الرابط']}]({row['الرابط']})")
+                        st.write(f"العنوان المقروء ({len(str(row['عنوان الميتا']))} حرف): "
+                                 f"{row['عنوان الميتا'] or '— مفقود —'}")
+                        st.write(f"الوصف المقروء ({len(str(row['وصف الميتا']))} حرف): "
+                                 f"{row['وصف الميتا'] or '— مفقود —'}")
+                        st.write(f"صور مرصودة: {row['إجمالي الصور']} | "
+                                 f"بدون Alt: {row['صور بدون Alt']} | "
+                                 f"كلمات: {row['عدد الكلمات']}")
+                st.caption("إن ظهرت الصور بصفر والصفحة تحتوي صورًا فعلية، "
+                           "فالمتجر يبني المحتوى بـ JavaScript ويحتاج معالجة مختلفة.")
 
-        st.subheader("📥 منطقة التحميل والتصدير")
+        st.subheader("📥 التحميل والتصدير")
         netloc = urlparse(st.session_state.current_url).netloc or "store"
-        d_col1, d_col2 = st.columns(2)
-        with d_col1:
+        d1, d2 = st.columns(2)
+        with d1:
             if st.session_state.pdf_bytes:
-                st.download_button(
-                    label="📄 تحميل تقرير العميل الرسمي (PDF)",
-                    data=st.session_state.pdf_bytes,
-                    file_name=f"SEO_Audit_Report_{netloc}.pdf",
-                    mime="application/pdf"
-                )
+                st.download_button("📄 تقرير العميل (PDF)", st.session_state.pdf_bytes,
+                                   f"SEO_Audit_{netloc}.pdf", "application/pdf")
             else:
-                st.info("تقرير الـ PDF غير متاح لهذا الفحص.")
-        with d_col2:
+                st.info("تقرير الـ PDF غير متاح.")
+        with d2:
             if st.session_state.zip_bytes:
-                st.download_button(
-                    label="📦 تحميل حزمة البيانات والملفات المصنفة (ZIP)",
-                    data=st.session_state.zip_bytes,
-                    file_name=f"Data_Package_{netloc}.zip",
-                    mime="application/zip"
-                )
+                st.download_button("📦 حزمة البيانات (ZIP)", st.session_state.zip_bytes,
+                                   f"Data_Package_{netloc}.zip", "application/zip")
 
 elif nav == "📁 سجل المتاجر السابقة":
-    st.title("📁 سجل المتاجر المفحوصة مسبقاً")
-    st.write("يمكنك استعراض أي متجر فحصته مسبقاً وإعادة تحميل تقاريره فوراً دون إعادة الفحص.")
-    st.caption("تنبيه: قاعدة البيانات محلية داخل الخادم، وقد تُفقد عند إعادة نشر التطبيق "
-               "على Streamlit Cloud. للاعتماد الدائم يُنصح بتخزين خارجي.")
+    st.title("📁 سجل المتاجر المفحوصة")
+    st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على Streamlit Cloud.")
 
     conn = sqlite3.connect(DB_FILE)
-    history_df = pd.read_sql_query(
+    hist = pd.read_sql_query(
         "SELECT id, domain as 'المتجر', scan_date as 'تاريخ الفحص', score as 'النسبة', "
         "total_pages as 'الصفحات', products_count as 'المنتجات', categories_count as 'الأقسام', "
         "blog_pages_count as 'المدونة', info_pages_count as 'التعريفية' "
         "FROM audits ORDER BY id DESC", conn)
     conn.close()
 
-    if history_df.empty:
-        st.info("لا توجد متاجر مفحوصة بعد في السجل.")
+    if hist.empty:
+        st.info("لا توجد متاجر مفحوصة بعد.")
     else:
-        st.dataframe(history_df.drop(columns=['id']), use_container_width=True)
-
-        selected_id = st.selectbox(
-            "اختر المتجر لاسترجاع بياناته:",
-            history_df['id'].tolist(),
-            format_func=lambda x: (f"متجر: {history_df[history_df['id'] == x]['المتجر'].values[0]} "
-                                   f"({history_df[history_df['id'] == x]['تاريخ الفحص'].values[0]})")
-        )
-
-        if st.button("📥 استرجاع بيانات هذا المتجر"):
+        st.dataframe(hist.drop(columns=['id']), use_container_width=True)
+        sel_id = st.selectbox("اختر المتجر:", hist['id'].tolist(),
+                              format_func=lambda x: f"{hist[hist['id']==x]['المتجر'].values[0]} "
+                                                    f"({hist[hist['id']==x]['تاريخ الفحص'].values[0]})")
+        if st.button("📥 استرجاع البيانات"):
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("SELECT domain, data_json, images_json, score FROM audits WHERE id = ?",
-                      (selected_id,))
+            c.execute("SELECT domain, data_json, images_json, coverage_json, score "
+                      "FROM audits WHERE id = ?", (sel_id,))
             row = c.fetchone()
             conn.close()
-
             if row:
-                restored_df = pd.read_json(io.StringIO(row[1]))
-                restored_images = (pd.read_json(io.StringIO(row[2]))
-                                   if row[2] else pd.DataFrame())
-
-                if 'متاحة' not in restored_df.columns:
-                    restored_df['متاحة'] = True
-                ok_df = restored_df[restored_df['متاحة'] == True]  # noqa: E712
-
+                rdf = pd.read_json(io.StringIO(row[1]))
+                rimg = pd.read_json(io.StringIO(row[2])) if row[2] else pd.DataFrame()
+                rcov = json.loads(row[3]) if row[3] else None
+                if 'متاحة' not in rdf.columns:
+                    rdf['متاحة'] = True
                 st.session_state.current_url = row[0]
-                st.session_state.audit_df = restored_df
-                st.session_state.images_df = restored_images
-                st.session_state.summary = {
-                    'total_pages': len(restored_df),
-                    'score': row[3],
-                    'products': int((restored_df['نوع الصفحة'] == 'صفحة منتج').sum()),
-                    'categories': int((restored_df['نوع الصفحة'] == 'صفحة تصنيف').sum()),
-                    'info_pages': int((restored_df['نوع الصفحة'] == 'صفحة تعريفية').sum()),
-                    'blog_pages': int((restored_df['نوع الصفحة'] == 'صفحة مدونة').sum()),
-                    'unclassified': int((restored_df['نوع الصفحة'] == 'غير مصنفة').sum()),
-                    'broken_pages': int((restored_df['متاحة'] == False).sum()),  # noqa: E712
-                    'bad_titles': int((ok_df['حالة العنوان'] != 'سليم').sum()),
-                    'bad_descs': int((ok_df['حالة الوصف'] != 'سليم').sum()),
-                    'missing_alts': int(ok_df['صور بدون Alt'].sum()),
-                    'total_images': int(ok_df['إجمالي الصور'].sum()),
-                }
-
-                st.session_state.zip_bytes = build_zip(restored_df, restored_images)
+                st.session_state.audit_df = rdf
+                st.session_state.images_df = rimg
+                st.session_state.coverage = rcov
+                st.session_state.summary = compute_summary(rdf, rcov)
+                st.session_state.zip_bytes = build_zip(rdf, rimg, rcov)
                 try:
                     st.session_state.pdf_bytes = generate_client_pdf(
-                        row[0], row[3], st.session_state.summary)
+                        row[0], row[4], st.session_state.summary)
                 except Exception as e:
                     st.session_state.pdf_bytes = None
-                    st.error(f"تعذر توليد ملف الـ PDF: {e}")
-
-                st.success("تم استرجاع البيانات بنجاح! انتقل إلى صفحة (فحص متجر جديد) "
-                           "من القائمة الجانبية لعرض الجداول وتحميل الملفات.")
+                    st.error(f"تعذر توليد الـ PDF: {e}")
+                st.success("تم الاسترجاع. انتقل إلى (فحص متجر جديد) لعرض النتائج والتحميل.")
