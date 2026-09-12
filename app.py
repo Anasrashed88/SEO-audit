@@ -146,7 +146,8 @@ init_db()
 
 for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
                      ('current_url', ""), ('coverage', None), ('platform', 'unknown'),
-                     ('selfcheck', None), ('brand', ''), ('dup_groups', None)]:
+                     ('selfcheck', None), ('brand', ''), ('dup_groups', None),
+                     ('speed', None)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -1513,6 +1514,70 @@ def localize_df(df, lang):
 
 
 
+
+# ==============================================================
+#  سرعة الموقع — PageSpeed Insights من جوجل
+# ==============================================================
+PSI_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+PSI_METRICS = [
+    ('largest-contentful-paint', 'أكبر عنصر مرئي', 'Largest Contentful Paint'),
+    ('first-contentful-paint', 'أول محتوى يظهر', 'First Contentful Paint'),
+    ('total-blocking-time', 'زمن التجميد', 'Total Blocking Time'),
+    ('cumulative-layout-shift', 'اهتزاز التخطيط', 'Cumulative Layout Shift'),
+    ('speed-index', 'مؤشر السرعة', 'Speed Index'),
+]
+
+
+def fetch_pagespeed(url, strategy='mobile', api_key=None, timeout=75):
+    """يستدعي PageSpeed Insights ويعيد الدرجة والمقاييس الأساسية.
+
+    يعيد None عند أي فشل (مهلة، حصة مستنفدة، موقع محجوب) حتى لا يتعطل الفحص.
+    """
+    params = {'url': url, 'strategy': strategy, 'category': 'performance'}
+    if api_key:
+        params['key'] = api_key
+    try:
+        res = requests.get(PSI_ENDPOINT, params=params, timeout=timeout)
+        if res.status_code != 200:
+            return {'error': f'HTTP {res.status_code}'}
+        data = res.json()
+    except Exception as e:
+        return {'error': type(e).__name__}
+
+    try:
+        lh = data.get('lighthouseResult', {})
+        cat = (lh.get('categories', {}).get('performance') or {})
+        score = cat.get('score')
+        audits = lh.get('audits', {})
+        metrics = {}
+        for key, ar_lbl, en_lbl in PSI_METRICS:
+            a = audits.get(key) or {}
+            metrics[key] = {
+                'display': a.get('displayValue', '—'),
+                'value': a.get('numericValue'),
+                'score': a.get('score'),
+            }
+        field = data.get('loadingExperience', {}).get('overall_category')
+        return {
+            'score': round(score * 100) if isinstance(score, (int, float)) else None,
+            'metrics': metrics,
+            'field_category': field,
+            'strategy': strategy,
+        }
+    except Exception as e:
+        return {'error': f'parse:{type(e).__name__}'}
+
+
+def speed_verdict(score):
+    if score is None:
+        return 'na'
+    if score >= 90:
+        return 'ok'
+    if score >= 50:
+        return 'warn'
+    return 'bad'
+
+
 # ==============================================================
 #  الفحص الذاتي — الأداة تحكم على موثوقية نتائجها قبل العميل
 # ==============================================================
@@ -1704,109 +1769,195 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None)
 PDF_TXT = {
     'ar': {
         'owner': 'أنس راشد', 'role': 'خبير تحسين محركات البحث',
-        'title': 'تقرير الفحص الفني الشامل لمحركات البحث',
-        'meta': 'المتجر المستهدف: {d}   |   تاريخ الفحص: {t}',
-        'score': 'درجة التوافق العامة مع محركات البحث: {s}%',
+        'title': 'تقرير الفحص الفني الشامل',
+        'subtitle': 'تحسين محركات البحث للمتاجر الإلكترونية',
+        'prepared': 'أُعدّ التقرير بواسطة أنس راشد — خبير تحسين محركات البحث',
+        'store': 'المتجر', 'date': 'تاريخ الفحص', 'platform': 'المنصة',
         'scope': 'نطاق الفحص: الصفحات والمنتجات المعروضة فعلياً لزوار المتجر',
-        'tbl1': '1. جدول بنية المتجر:',
-        'tbl2': '2. جدول تدقيق أطوال العناوين والأوصاف:',
-        'tbl_url': '3. جدول تدقيق روابط الصفحات:',
-        'r_url_ok': 'روابط سليمة الصياغة ومطابقة لاسم المنتج',
-        'r_url_clone': 'منتجات مستنسخة برابط يحمل بادئة النسخ',
-        'r_dup_content': 'صفحات بنفس العنوان والوصف حرفياً',
-        'r_url_wrong': 'روابط تحمل اسم منتج مختلف عن المعروض',
-        'r_url_style': 'روابط بصياغة غير مثالية: شرطة سفلية أو طول مفرط',
-        'r_url_generic': 'روابط بأرقام أو رموز بلا كلمات',
-        'r_formats': 'صيغ الصور المستخدمة',
-        'r_modern': 'نسبة الصور بالصيغ الحديثة الخفيفة',
-        'tbl3': '4. جدول تدقيق النصوص البديلة للصور:',
-        'tbl4': '5. جدول مقارنة المعروض بخريطة الموقع:',
-        'diag': '{n}. التشخيص الاستشاري وخطة العمل:',
-        'h_val': 'الحالة / العدد', 'h_item': 'عنصر الفحص والتدقيق',
-        'r_total': 'إجمالي الصفحات المعروضة والمفحوصة', 'u_page': 'صفحة',
-        'r_products': 'صفحات المنتجات المعروضة', 'u_product': 'منتج',
-        'r_categories': 'صفحات الأقسام والكولكشنات', 'u_cat': 'تصنيف',
-        'r_blog': 'مقالات وصفحات المدونة', 'u_article': 'مقال',
-        'r_info': 'الصفحات التعريفية والسياسات',
-        'r_broken': 'روابط معطلة داخل المتجر', 'u_link': 'رابط',
-        'r_platform': 'منصة المتجر',
-        'r_titles_ok': 'عناوين ضمن الطول المثالي (50-60 حرفاً)',
-        'r_titles_crit': 'عناوين مفقودة أو قصيرة جداً أو تتجاوز 60 حرفاً',
-        'u_title': 'عنوان',
-        'r_descs_ok': 'أوصاف ضمن الطول المثالي (120-150 حرفاً)',
-        'r_descs_crit': 'أوصاف مفقودة أو قصيرة جداً أو تتجاوز 150 حرفاً',
-        'u_desc': 'وصف',
-        'r_canon': 'صفحات بلا وسم كانونيكال',
-        'r_thin': 'صفحات بمحتوى نصي ضعيف',
-        'r_imgs': 'إجمالي صور المحتوى والمنتجات', 'u_img': 'صورة',
-        'r_noalt': 'صور بلا نص بديل إطلاقاً',
-        'r_generic': 'صور بنص بديل غير وصفي (اسم ملف أو كلمة عامة)',
-        'r_dup': 'صور تتشارك نفس النص البديل',
-        'r_altok': 'صور بنص بديل سليم',
-        'r_imgstate': 'حالة تهيئة الصور لبحث صور جوجل',
-        'img_none': 'لم يرصد الفحص صور محتوى', 'img_ok': 'مكتمل',
-        'img_gap': 'فجوة واسعة', 'img_part': 'فجوة جزئية',
-        'r_vis': 'منتجات معروضة لزوار المتجر',
-        'r_sm': 'منتجات معلنة في خريطة الموقع',
-        'r_notidx': 'منتجات معروضة ولا تظهر في الخريطة',
-        'r_redirect': 'روابط في الخريطة تعيد التوجيه لصفحات أخرى',
-        'r_orphan': 'صفحات في الخريطة لا يصل إليها الزائر بأي رابط',
-        'r_idxpct': 'نسبة المنتجات المعروضة المدرجة في الخريطة',
-        'footer': 'anasrashed.com   |   anas@anasrashed.com',
+        'score_lbl': 'درجة التوافق العامة مع محركات البحث',
+        'sc_bad': 'يحتاج معالجة عاجلة', 'sc_warn': 'مهيأ جزئياً', 'sc_ok': 'مستوى جيد',
+        'page_of': 'صفحة {a} من {b}',
+        'impact': 'الأثر على متجرك',
+        'h_item': 'عنصر الفحص', 'h_val': 'النتيجة',
+        'm_pages': 'صفحة معروضة', 'm_products': 'منتج', 'm_images': 'صورة',
+        'm_issues': 'بند يحتاج معالجة', 'm_speed': 'سرعة الجوال', 'm_cats': 'قسم',
+        'u_page': 'صفحة', 'u_product': 'منتج', 'u_cat': 'تصنيف', 'u_article': 'مقال',
+        'u_link': 'رابط', 'u_title': 'عنوان', 'u_desc': 'وصف', 'u_img': 'صورة',
+        'na': 'غير متاح',
     },
     'en': {
         'owner': 'Anas Rashed', 'role': 'SEO Expert',
-        'title': 'Comprehensive Technical SEO Audit Report',
-        'meta': 'Store: {d}   |   Audit date: {t}',
-        'score': 'Overall search engine compliance score: {s}%',
+        'title': 'Comprehensive Technical SEO Audit',
+        'subtitle': 'Search engine optimisation for e-commerce stores',
+        'prepared': 'Prepared by Anas Rashed - SEO Expert',
+        'store': 'Store', 'date': 'Audit date', 'platform': 'Platform',
         'scope': 'Audit scope: pages and products actually visible to store visitors',
-        'tbl1': '1. Store structure:',
-        'tbl2': '2. Title and description length audit:',
-        'tbl_url': '3. Page URL audit:',
-        'r_url_ok': 'URLs well-formed and matching the product name',
-        'r_url_clone': 'Cloned products (copy-of URL pattern)',
-        'r_dup_content': 'Pages with identical title and description',
-        'r_url_wrong': 'URLs naming a different product than displayed',
-        'r_url_style': 'URLs with imperfect formatting',
-        'r_url_generic': 'URLs made of numbers or codes with no words',
-        'r_formats': 'Image formats in use',
-        'r_modern': 'Share of modern formats (WebP/AVIF)',
-        'tbl3': '4. Image alt text audit:',
-        'tbl4': '5. Visible catalogue vs sitemap comparison:',
-        'diag': '{n}. Consultant diagnosis and action plan:',
-        'h_val': 'Value / Count', 'h_item': 'Audited item',
-        'r_total': 'Total visible pages audited', 'u_page': 'pages',
-        'r_products': 'Visible product pages', 'u_product': 'products',
-        'r_categories': 'Category and collection pages', 'u_cat': 'categories',
-        'r_blog': 'Blog posts and articles', 'u_article': 'articles',
-        'r_info': 'Info and policy pages',
-        'r_broken': 'Broken links inside the store', 'u_link': 'links',
-        'r_platform': 'Store platform',
-        'r_titles_ok': 'Titles within optimal length (50-60 chars)',
-        'r_titles_crit': 'Titles missing, far too short, or over 60 characters',
-        'u_title': 'titles',
-        'r_descs_ok': 'Descriptions within optimal length (120-150 chars)',
-        'r_descs_crit': 'Descriptions missing, far too short, or over 150 characters',
-        'u_desc': 'descriptions',
-        'r_canon': 'Pages without a canonical tag',
-        'r_thin': 'Pages with thin text content',
-        'r_imgs': 'Total content and product images', 'u_img': 'images',
-        'r_noalt': 'Images with no alt text at all',
-        'r_generic': 'Images with non-descriptive alt text (filename or generic word)',
-        'r_dup': 'Images sharing identical alt text',
-        'r_altok': 'Images with sound alt text',
-        'r_imgstate': 'Readiness for Google Image search',
-        'img_none': 'No content images detected', 'img_ok': 'Complete',
-        'img_gap': 'Major gap', 'img_part': 'Partial gap',
-        'r_vis': 'Products visible to visitors',
-        'r_sm': 'Products declared in sitemap',
-        'r_notidx': 'Visible products absent from sitemap',
-        'r_redirect': 'Sitemap URLs redirecting elsewhere',
-        'r_orphan': 'Sitemap pages with no link path for visitors',
-        'r_idxpct': 'Visible products included in sitemap',
-        'footer': 'anasrashed.com   |   anas@anasrashed.com',
+        'score_lbl': 'Overall search engine compliance score',
+        'sc_bad': 'Needs urgent work', 'sc_warn': 'Partially optimised',
+        'sc_ok': 'Good standard',
+        'page_of': 'Page {a} of {b}',
+        'impact': 'What this means for your store',
+        'h_item': 'Audited item', 'h_val': 'Result',
+        'm_pages': 'visible pages', 'm_products': 'products', 'm_images': 'images',
+        'm_issues': 'items to fix', 'm_speed': 'mobile speed', 'm_cats': 'categories',
+        'u_page': 'pages', 'u_product': 'products', 'u_cat': 'categories',
+        'u_article': 'articles', 'u_link': 'links', 'u_title': 'titles',
+        'u_desc': 'descriptions', 'u_img': 'images', 'na': 'not available',
     },
 }
+
+SECTION_TXT = {
+    'ar': {
+        'speed': {
+            'title': 'سرعة تحميل المتجر',
+            'intro': 'تُقاس السرعة بأداة PageSpeed Insights من جوجل، التي تحاكي فتح '
+                     'المتجر على جوال متوسط وعلى جهاز مكتبي. الدرجة من 100، والمقاييس '
+                     'أدناه هي ذاتها التي يعتمدها جوجل ضمن معايير تجربة الصفحة.',
+            'impact': 'سرعة الجوال عامل ترتيب معلن من جوجل، وأثرها على المبيعات مباشر: '
+                      'كل ثانية تأخير في التحميل ترفع نسبة مغادرة الزائر قبل أن يرى '
+                      'المنتج. وبما أن غالبية زوار المتاجر السعودية يتصفحون من الجوال، '
+                      'فإن تحسين هذه الدرجة يسبق في الأولوية كثيراً من التحسينات الأخرى.',
+        },
+        'structure': {
+            'title': 'بنية المتجر ونطاق الفحص',
+            'intro': 'يبدأ الفحص من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه الزائر، '
+                     'متتبعاً الروابط الداخلية وصفحات الأقسام. لا تدخل التقرير أي صفحة '
+                     'لا يمكن للزائر الوصول إليها بالنقر.',
+            'impact': 'هذه الأرقام هي ما تراه محركات البحث فعلياً عند زحفها للمتجر. أي '
+                      'رابط معطل يصل إليه الزائر يهدر جزءاً من ميزانية الزحف المخصصة '
+                      'للمتجر، ويقلل فرص أرشفة الصفحات المهمة.',
+        },
+        'meta': {
+            'title': 'عناوين وأوصاف الميتا',
+            'intro': 'عنوان الميتا هو السطر الأزرق القابل للنقر في نتائج البحث، والوصف '
+                     'هو السطران تحته. المعيار المعتمد: العنوان بين 50 و60 حرفاً، والوصف '
+                     'بين 120 و150 حرفاً، ويُحسب الطول بالحروف شاملاً المسافات وعلامات '
+                     'الترقيم كما تحسبها محركات البحث.',
+            'impact': 'العنوان القصير جداً يضيّع مساحة مجانية في نتيجة البحث، والطويل '
+                      'يُقتطع بثلاث نقاط فتضيع نهايته. أما العنوان المفقود أو المكوّن من '
+                      'رموز فيجعل جوجل يختار نصاً عشوائياً من الصفحة بدلاً عنه، وغالباً '
+                      'ما يكون نصاً لا يشجع على النقر.',
+        },
+        'urls': {
+            'title': 'روابط صفحات المتجر',
+            'intro': 'الرابط عنصر سيو مستقل: تقرأه محركات البحث، ويظهر للزبون في نتيجة '
+                     'البحث وعند مشاركة المنتج. يفحص هذا القسم صياغة الرابط ومطابقته '
+                     'للمنتج المعروض، ووجود نسخ مكررة من منتج واحد.',
+            'impact': 'المنتجات المستنسخة تُنشئ صفحات متطابقة تتنافس فيما بينها، فيوزّع '
+                      'جوجل قوة الصفحة بين النسخ ثم يختار واحدة ويتجاهل الباقي. والرابط '
+                      'الذي يحمل اسم منتج مختلف يربك الزبون: ينقر على شيء ويصل إلى آخر، '
+                      'فترتفع نسبة المغادرة الفورية.',
+        },
+        'images': {
+            'title': 'صور المتجر ونصوصها البديلة',
+            'intro': 'النص البديل هو الوصف المرفق بالصورة في كود الصفحة. محركات البحث '
+                     'لا ترى الصورة، بل تقرأ هذا النص. ويفحص هذا القسم أيضاً صيغة الصور، '
+                     'إذ تؤثر مباشرة في حجم الصفحة وسرعتها.',
+            'impact': 'بحث صور جوجل مصدر زيارات مهم في المتاجر البصرية كالأزياء والعطور '
+                      'والهدايا، حيث يبحث الزبون بالصورة قبل الكلمة. الصورة بلا نص بديل '
+                      'غير موجودة بالنسبة لجوجل. كما أن الصيغ الحديثة تخفض حجم الصورة '
+                      'بنحو الثلث بنفس الجودة، فتتحسن سرعة الجوال تلقائياً.',
+        },
+        'sitemap': {
+            'title': 'مقارنة المعروض بخريطة الموقع',
+            'intro': 'خريطة الموقع هي القائمة التي يعلنها المتجر لمحركات البحث. يقارن '
+                     'هذا القسم ما يراه الزائر فعلاً بما تعلنه الخريطة، في الاتجاهين.',
+            'impact': 'المنتج المعروض وغير المدرج في الخريطة قد لا تعلم به محركات البحث '
+                      'أصلاً. والصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط '
+                      'داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. '
+                      'والروابط المحوّلة داخل الخريطة تستهلك ميزانية الزحف بلا مقابل.',
+        },
+        'diagnosis': {
+            'title': 'التشخيص وخطة العمل',
+            'intro': 'ملخص ما رصده الفحص، مرتباً حسب أثره على الظهور في نتائج البحث.',
+            'impact': '',
+        },
+    },
+    'en': {
+        'speed': {
+            'title': 'Store loading speed',
+            'intro': 'Speed is measured with Google PageSpeed Insights, which simulates '
+                     'opening the store on a mid-range mobile device and on desktop. The '
+                     'score runs to 100, and the metrics below are the ones Google uses '
+                     'within its page experience signals.',
+            'impact': 'Mobile speed is a declared Google ranking factor with a direct '
+                      'commercial effect: every extra second of loading raises the share '
+                      'of visitors who leave before seeing the product. Since most Saudi '
+                      'store traffic is mobile, this score often outranks other fixes in '
+                      'priority.',
+        },
+        'structure': {
+            'title': 'Store structure and audit scope',
+            'intro': 'The audit starts at the homepage and browses the store the way a '
+                     'visitor does, following internal links and category pages. No page '
+                     'a visitor cannot reach by clicking enters this report.',
+            'impact': 'These figures reflect what search engines actually encounter when '
+                      'crawling the store. Every broken link a visitor can reach wastes '
+                      'part of the crawl budget allocated to the store and reduces the '
+                      'chance that important pages get indexed.',
+        },
+        'meta': {
+            'title': 'Meta titles and descriptions',
+            'intro': 'The meta title is the clickable blue line in search results; the '
+                     'description is the two lines beneath it. Standard applied: titles '
+                     'between 50 and 60 characters, descriptions between 120 and 150, '
+                     'counted in characters including spaces and punctuation.',
+            'impact': 'A very short title wastes free space in the result, while an '
+                      'overly long one is truncated and loses its ending. A missing title '
+                      'or one made of symbols leaves Google to pick arbitrary text from '
+                      'the page instead, rarely text that invites a click.',
+        },
+        'urls': {
+            'title': 'Page URLs',
+            'intro': 'The URL is an SEO element in its own right: search engines read it, '
+                     'and customers see it in results and when a product is shared. This '
+                     'section checks URL formatting, its match to the displayed product, '
+                     'and cloned copies of a single product.',
+            'impact': 'Cloned products create near-identical pages competing with each '
+                      'other, splitting page authority before Google picks one and '
+                      'ignores the rest. A URL naming a different product confuses the '
+                      'customer, who clicks one thing and lands on another, raising '
+                      'bounce rate.',
+        },
+        'images': {
+            'title': 'Store images and alt text',
+            'intro': 'Alt text is the description attached to an image in the page code. '
+                     'Search engines do not see the image; they read this text. This '
+                     'section also checks image formats, which affect page weight and '
+                     'loading speed directly.',
+            'impact': 'Google Image search is a meaningful traffic source for visual '
+                      'stores such as fashion, fragrance and gifts, where customers search '
+                      'by image before words. An image without alt text does not exist to '
+                      'Google. Modern formats also cut image weight by about a third at '
+                      'the same quality, improving mobile speed automatically.',
+        },
+        'sitemap': {
+            'title': 'Visible catalogue vs sitemap',
+            'intro': 'The sitemap is the list the store declares to search engines. This '
+                     'section compares what visitors actually see against what the sitemap '
+                     'declares, in both directions.',
+            'impact': 'A visible product missing from the sitemap may be unknown to search '
+                      'engines. A sitemap page with no internal link path stays worthless: '
+                      'it gains no authority and brings no traffic. Redirecting URLs inside '
+                      'the sitemap consume crawl budget for nothing.',
+        },
+        'diagnosis': {
+            'title': 'Diagnosis and action plan',
+            'intro': 'A summary of the audit findings, ordered by impact on search '
+                     'visibility.',
+            'impact': '',
+        },
+    },
+}
+
+C_INK = (15, 23, 42)
+C_MUTED = (100, 116, 139)
+C_LINE = (226, 232, 240)
+C_BG = (248, 250, 252)
+C_OK = (5, 150, 105)
+C_WARN = (217, 119, 6)
+C_BAD = (220, 38, 38)
+STATUS_RGB = {'ok': C_OK, 'warn': C_WARN, 'bad': C_BAD, 'neutral': C_MUTED}
 
 
 def shape_ar(text):
@@ -2007,233 +2158,494 @@ def build_diagnosis(score, stats, lang):
     return intro, points, close
 
 
-def generate_client_pdf(domain, score, stats, lang='ar'):
+def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
+    """تقرير عميل بتصميم حديث: غلاف، ثم قسم لكل محور في صفحة مستقلة
+    يضم شرحاً للمقياس وجدول النتائج وصندوق الأثر، ثم التشخيص وخطة العمل."""
     rtl = (lang == 'ar')
     if rtl and not FONT_PATH.exists():
         raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
 
     T = PDF_TXT[lang]
-    fmt = shape_ar if rtl else (lambda x: str(x))
-    align_text = "R" if rtl else "L"
-    font_name = "Amiri" if rtl else "Helvetica"
+    S = SECTION_TXT[lang]
+    def _latin(t):
+        t = str(t)
+        for a, b in [('—', '-'), ('–', '-'), ('·', '|'), ('’', "'"), ('‘', "'"),
+                     ('“', '"'), ('”', '"'), ('…', '...'), ('•', '-')]:
+            t = t.replace(a, b)
+        return t.encode('latin-1', 'replace').decode('latin-1')
+
+    fmt = shape_ar if rtl else _latin
+    ALIGN = "R" if rtl else "L"
+    FONT = "Amiri" if rtl else "Helvetica"
     clean_domain = urlparse(domain).netloc or domain
     logo_exists = LOGO_PATH.exists()
+    M = 18                      # الهامش
+    W = 210 - 2 * M             # عرض المحتوى
+    verdict_rgb = C_BAD if score < 60 else (C_WARN if score < 80 else C_OK)
 
     class Report(FPDF):
         def header(self):
-            if logo_exists:
-                try:
-                    self.image(str(LOGO_PATH), x=15 if rtl else 163, y=9, h=13)
-                except Exception:
-                    pass
-            self.set_font(font_name, "", 14)
-            self.set_text_color(15, 23, 42)
-            self.cell(0, 7, fmt(T['owner']), ln=True, align=align_text)
-            self.set_font(font_name, "", 10)
-            self.set_text_color(100, 116, 139)
-            self.cell(0, 5, fmt(T['role']), ln=True, align=align_text)
-            self.set_draw_color(226, 232, 240)
-            self.line(15, 27, 195, 27)
-            self.ln(6)
+            if self.page_no() <= 1:
+                return
+            self.set_y(10)
+            self.set_font(FONT, "", 8)
+            self.set_text_color(*C_MUTED)
+            self.cell(W, 4, fmt(f"{T['owner']}  ·  {clean_domain}"), align=ALIGN)
+            self.set_draw_color(*C_LINE)
+            self.line(M, 17, 210 - M, 17)
+            self.set_y(26)
 
         def footer(self):
-            self.set_y(-15)
-            self.set_draw_color(226, 232, 240)
-            self.line(15, 282, 195, 282)
-            self.set_font(font_name, "", 9)
-            self.set_text_color(148, 163, 184)
-            self.cell(0, 10, T['footer'], align="C")
+            if self.page_no() <= 1:
+                return
+            self.set_y(-16)
+            self.set_draw_color(*C_LINE)
+            self.line(M, 282, 210 - M, 282)
+            self.set_font(FONT, "", 8)
+            self.set_text_color(*C_MUTED)
+            self.cell(W / 2, 8, "anasrashed.com", align="L" if rtl else "R")
+            self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no(), b='{nb}')),
+                      align="R" if rtl else "L")
+
+        # ---------- أدوات الرسم ----------
+        def wrap(self, txt, width, size=9):
+            self.set_font(FONT, "", size)
+            out, cur = [], ""
+            for word in str(txt).split():
+                trial = (cur + " " + word).strip()
+                if self.get_string_width(fmt(trial)) <= width:
+                    cur = trial
+                else:
+                    if cur:
+                        out.append(cur)
+                    cur = word
+            if cur:
+                out.append(cur)
+            return out
+
+        def safe(self, txt):
+            """Helvetica لا يدعم يونيكود: تُستبدل الرموز الطويلة في النسخة اللاتينية."""
+            t = str(txt)
+            if rtl:
+                return t
+            for a, b in [('—', '-'), ('–', '-'), ('·', '|'), ('’', "'"),
+                         ('‘', "'"), ('“', '"'), ('”', '"'), ('…', '...'),
+                         ('•', '-')]:
+                t = t.replace(a, b)
+            return t.encode('latin-1', 'replace').decode('latin-1')
+
+        def para(self, txt, width=W, size=9, color=C_MUTED, lh=5.0, x=M):
+            self.set_font(FONT, "", size)
+            self.set_text_color(*color)
+            for line in self.wrap(txt, width, size):
+                self.set_x(x)
+                self.cell(width, lh, fmt(line), ln=True, align=ALIGN)
+
+        def section(self, num, key):
+            """ترويسة قسم: مربع رقم ملوّن + عنوان + شرح."""
+            y = self.get_y()
+            box = 9
+            bx = (210 - M - box) if rtl else M
+            self.set_fill_color(*C_INK)
+            self.rect(bx, y, box, box, 'F')
+            self.set_font(FONT, "", 10)
+            self.set_text_color(255, 255, 255)
+            self.set_xy(bx, y + 0.6)
+            self.cell(box, box - 1, str(num), align="C")
+            self.set_font(FONT, "", 15)
+            self.set_text_color(*C_INK)
+            tw = W - box - 4
+            self.set_xy(M if rtl else M + box + 4, y + 0.4)
+            self.cell(tw, box, fmt(S[key]['title']), align=ALIGN)
+            self.set_y(y + box + 4)
+            self.para(S[key]['intro'])
+            self.ln(3)
+
+        def table(self, rows):
+            """جدول نتائج: عمود العنصر وعمود النتيجة بلون دلالي."""
+            wv, wl = 52, W - 52
+            self.set_font(FONT, "", 9.5)
+            self.set_fill_color(*C_INK)
+            self.set_text_color(255, 255, 255)
+            self.set_x(M)
+            if rtl:
+                self.cell(wv, 8, fmt(T['h_val']), 0, 0, 'C', fill=True)
+                self.cell(wl, 8, fmt(T['h_item']), 0, 1, 'R', fill=True)
+            else:
+                self.cell(wl, 8, fmt(T['h_item']), 0, 0, 'L', fill=True)
+                self.cell(wv, 8, fmt(T['h_val']), 0, 1, 'C', fill=True)
+            self.set_font(FONT, "", 9)
+            for i, (label, value, st) in enumerate(rows):
+                if self.get_y() > 250:
+                    self.add_page()
+                self.set_x(M)
+                if i % 2 == 0:
+                    self.set_fill_color(*C_BG)
+                    self.rect(M, self.get_y(), W, 7.5, 'F')
+                self.set_text_color(*STATUS_RGB.get(st, C_MUTED))
+                self.set_font(FONT, "", 9)
+                if rtl:
+                    self.cell(wv, 7.5, fmt(value), 0, 0, 'C')
+                    self.set_text_color(*C_INK)
+                    self.cell(wl, 7.5, fmt(label), 0, 1, 'R')
+                else:
+                    self.set_text_color(*C_INK)
+                    self.cell(wl, 7.5, fmt(label), 0, 0, 'L')
+                    self.set_text_color(*STATUS_RGB.get(st, C_MUTED))
+                    self.cell(wv, 7.5, fmt(value), 0, 1, 'C')
+                self.set_draw_color(*C_LINE)
+                self.line(M, self.get_y(), 210 - M, self.get_y())
+            self.ln(6)
+
+        def impact(self, key):
+            txt = S[key].get('impact')
+            if not txt:
+                return
+            lines = self.wrap(txt, W - 14, 9)
+            h = len(lines) * 5.0 + 13
+            if self.get_y() + h > 265:
+                self.add_page()
+            y = self.get_y()
+            self.set_fill_color(*C_BG)
+            self.rect(M, y, W, h, 'F')
+            self.set_fill_color(*C_INK)
+            if rtl:
+                self.rect(210 - M - 2.2, y, 2.2, h, 'F')
+            else:
+                self.rect(M, y, 2.2, h, 'F')
+            self.set_font(FONT, "", 9.5)
+            self.set_text_color(*C_INK)
+            self.set_xy(M + 7, y + 3.5)
+            self.cell(W - 14, 5, fmt(T['impact']), ln=True, align=ALIGN)
+            self.set_font(FONT, "", 9)
+            self.set_text_color(*C_MUTED)
+            yy = y + 9.5
+            for line in lines:
+                self.set_xy(M + 7, yy)
+                self.cell(W - 14, 5, fmt(line), align=ALIGN)
+                yy += 5.0
+            self.set_y(y + h + 6)
+
+        def mini(self, x, y, w, value, label, color=C_INK):
+            self.set_fill_color(*C_BG)
+            self.rect(x, y, w, 20, 'F')
+            self.set_font(FONT, "", 15)
+            self.set_text_color(*color)
+            self.set_xy(x, y + 3)
+            self.cell(w, 8, fmt(value), align="C")
+            self.set_font(FONT, "", 8)
+            self.set_text_color(*C_MUTED)
+            self.set_xy(x, y + 11.5)
+            self.cell(w, 5, fmt(label), align="C")
 
     pdf = Report()
+    pdf.alias_nb_pages()
     if rtl:
         pdf.add_font("Amiri", "", str(FONT_PATH))
+    pdf.set_auto_page_break(True, margin=22)
+
+    # ======================= الغلاف =======================
     pdf.add_page()
+    if logo_exists:
+        try:
+            pdf.image(str(LOGO_PATH), x=(210 - 40) / 2, y=22, h=15)
+        except Exception:
+            pass
+    pdf.set_y(48)
+    pdf.set_draw_color(*C_LINE)
+    pdf.line(M + 55, 46, 210 - M - 55, 46)
 
-    pdf.set_font(font_name, "", 16)
-    pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 8, fmt(T['title']), ln=True, align="C")
-    pdf.set_font(font_name, "", 11)
-    pdf.set_text_color(71, 85, 105)
-    pdf.cell(0, 6, fmt(T['meta'].format(d=clean_domain,
-                                        t=datetime.now().strftime('%Y-%m-%d'))),
-             ln=True, align="C")
-    pdf.set_font(font_name, "", 9)
-    pdf.set_text_color(100, 116, 139)
-    pdf.cell(0, 5, fmt(T['scope']), ln=True, align="C")
-    pdf.ln(3)
+    pdf.set_font(FONT, "", 23)
+    pdf.set_text_color(*C_INK)
+    pdf.cell(0, 12, fmt(T['title']), ln=True, align="C")
+    pdf.set_font(FONT, "", 11)
+    pdf.set_text_color(*C_MUTED)
+    pdf.cell(0, 7, fmt(T['subtitle']), ln=True, align="C")
+    pdf.ln(6)
 
+    # بطاقة الدرجة
+    y = pdf.get_y()
+    pdf.set_fill_color(*C_BG)
+    pdf.rect(M, y, W, 44, 'F')
+    pdf.set_fill_color(*verdict_rgb)
+    pdf.rect(M, y, W, 1.6, 'F')
+    pdf.set_font(FONT, "", 40)
+    pdf.set_text_color(*verdict_rgb)
+    pdf.set_xy(M, y + 7)
+    pdf.cell(W, 18, f"{score}%", align="C")
+    pdf.set_font(FONT, "", 10.5)
+    pdf.set_text_color(*C_INK)
+    pdf.set_xy(M, y + 25)
+    pdf.cell(W, 6, fmt(T['score_lbl']), align="C")
+    pdf.set_font(FONT, "", 9)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_xy(M, y + 32)
+    verdict_lbl = (T['sc_bad'] if score < 60 else
+                   T['sc_warn'] if score < 80 else T['sc_ok'])
+    pdf.cell(W, 6, fmt(verdict_lbl), align="C")
+    pdf.set_y(y + 52)
+
+    # بطاقات موجزة
+    speed_m = (speed or {}).get('mobile') or {}
+    sp_score = speed_m.get('score')
+    cards = [
+        (str(stats['total_pages']), T['m_pages'], C_INK),
+        (str(stats['products']), T['m_products'], C_INK),
+        (str(stats['categories']), T['m_cats'], C_INK),
+        (str(stats.get('total_images', 0)), T['m_images'], C_INK),
+        (f"{sp_score}%" if sp_score is not None else T['na'], T['m_speed'],
+         STATUS_RGB.get(speed_verdict(sp_score), C_MUTED)),
+        (str(stats.get('critical_titles', 0) + stats.get('missing_alts', 0)),
+         T['m_issues'], C_BAD),
+    ]
+    gap, cw = 4, (W - 2 * 4) / 3
     y0 = pdf.get_y()
-    pdf.set_fill_color(248, 250, 252)
-    pdf.set_draw_color(203, 213, 225)
-    pdf.rect(15, y0, 180, 16, 'DF')
-    pdf.set_xy(15, y0 + 3)
-    pdf.set_font(font_name, "", 15)
-    pdf.set_text_color(*((225, 29, 72) if score < 60 else
-                         (217, 119, 6) if score < 80 else (16, 185, 129)))
-    pdf.cell(180, 10, fmt(T['score'].format(s=score)), align="C")
-    pdf.set_y(y0 + 22)
+    for i, (v, l, c) in enumerate(cards):
+        col, row = i % 3, i // 3
+        pdf.mini(M + col * (cw + gap), y0 + row * 24, cw, v, l, c)
+    pdf.set_y(y0 + 56)
 
-    def draw_table(title, rows, col_widths=(120, 60)):
-        tw = sum(col_widths)
-        sx = (210 - tw) / 2
-        if pdf.get_y() + (len(rows) + 3) * 6.5 > 268:
-            pdf.add_page()
-        pdf.set_x(sx)
-        pdf.set_font(font_name, "", 12)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(tw, 7, fmt(title), ln=True, align=align_text)
-        pdf.ln(1)
-        pdf.set_x(sx)
-        pdf.set_fill_color(241, 245, 249)
-        pdf.set_draw_color(203, 213, 225)
-        pdf.set_font(font_name, "", 10)
-        pdf.set_text_color(30, 41, 59)
-        if rtl:
-            pdf.cell(col_widths[1], 7, fmt(T['h_val']), 1, 0, 'C', fill=True)
-            pdf.cell(col_widths[0], 7, fmt(T['h_item']), 1, 1, 'C', fill=True)
-        else:
-            pdf.cell(col_widths[0], 7, T['h_item'], 1, 0, 'C', fill=True)
-            pdf.cell(col_widths[1], 7, T['h_val'], 1, 1, 'C', fill=True)
-        pdf.set_font(font_name, "", 9)
-        for label, val in rows:
-            pdf.set_x(sx)
-            pdf.set_text_color(71, 85, 105)
-            if rtl:
-                pdf.cell(col_widths[1], 6, fmt(val), 1, 0, 'C')
-                pdf.cell(col_widths[0], 6, fmt(label), 1, 1, 'R')
-            else:
-                pdf.cell(col_widths[0], 6, str(label), 1, 0, 'L')
-                pdf.cell(col_widths[1], 6, str(val), 1, 1, 'C')
-        pdf.ln(5)
+    # بيانات المتجر
+    pdf.set_draw_color(*C_LINE)
+    pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
+    pdf.ln(5)
+    pdf.set_font(FONT, "", 10)
+    pdf.set_text_color(*C_INK)
+    for lbl, val in [(T['store'], clean_domain),
+                     (T['platform'], stats.get('platform_label', '—')),
+                     (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
+        pdf.set_x(M)
+        pdf.cell(W, 6.5, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
+    pdf.ln(3)
+    pdf.set_font(FONT, "", 8.5)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_x(M)
+    pdf.cell(W, 5, fmt(T['scope']), ln=True, align=ALIGN)
 
-    draw_table(T['tbl1'], [
-        (T['r_total'], f"{stats['total_pages']} {T['u_page']}"),
-        (T['r_products'], f"{stats['products']} {T['u_product']}"),
-        (T['r_categories'], f"{stats['categories']} {T['u_cat']}"),
-        (T['r_blog'], f"{stats.get('blog_pages', 0)} {T['u_article']}"),
-        (T['r_info'], f"{stats['info_pages']} {T['u_page']}"),
-        (T['r_broken'], f"{stats.get('broken_pages', 0)} {T['u_link']}"),
-        (T['r_platform'], stats.get('platform_label', '—')),
+    pdf.set_y(265)
+    pdf.set_font(FONT, "", 9)
+    pdf.set_text_color(*C_MUTED)
+    pdf.cell(0, 5, fmt(T['prepared']), ln=True, align="C")
+    pdf.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+
+    n = 0
+
+    # ======================= السرعة =======================
+    if speed and any(speed.get(k) for k in ('mobile', 'desktop')):
+        n += 1
+        pdf.add_page()
+        pdf.section(n, 'speed')
+        rows = []
+        for strat, lbl_ar, lbl_en in [('mobile', 'الجوال', 'Mobile'),
+                                      ('desktop', 'سطح المكتب', 'Desktop')]:
+            d = speed.get(strat) or {}
+            sc = d.get('score')
+            lbl = lbl_ar if rtl else lbl_en
+            head = ('درجة الأداء على ' if rtl else 'Performance score - ') + lbl
+            rows.append((head, f"{sc}%" if sc is not None else T['na'],
+                         speed_verdict(sc)))
+            for key, ar_lbl, en_lbl in PSI_METRICS:
+                mm = (d.get('metrics') or {}).get(key) or {}
+                msc = mm.get('score')
+                st = ('ok' if isinstance(msc, (int, float)) and msc >= 0.9 else
+                      'warn' if isinstance(msc, (int, float)) and msc >= 0.5 else
+                      'bad' if isinstance(msc, (int, float)) else 'neutral')
+                sep = ' — ' if rtl else ' - '
+                rows.append((f"{ar_lbl if rtl else en_lbl}{sep}{lbl}",
+                             mm.get('display', '—'), st))
+        pdf.table(rows)
+        pdf.impact('speed')
+
+    # ======================= البنية =======================
+    n += 1
+    pdf.add_page()
+    pdf.section(n, 'structure')
+    pdf.table([
+        ('إجمالي الصفحات المعروضة والمفحوصة' if rtl else 'Total visible pages audited',
+         f"{stats['total_pages']} {T['u_page']}", 'neutral'),
+        ('صفحات المنتجات' if rtl else 'Product pages',
+         f"{stats['products']} {T['u_product']}", 'neutral'),
+        ('صفحات الأقسام والكولكشنات' if rtl else 'Category and collection pages',
+         f"{stats['categories']} {T['u_cat']}", 'neutral'),
+        ('مقالات وصفحات المدونة' if rtl else 'Blog posts and articles',
+         f"{stats.get('blog_pages', 0)} {T['u_article']}",
+         'warn' if not stats.get('blog_pages') else 'neutral'),
+        ('الصفحات التعريفية والسياسات' if rtl else 'Info and policy pages',
+         f"{stats['info_pages']} {T['u_page']}", 'neutral'),
+        ('روابط معطلة يصل إليها الزائر' if rtl else 'Broken links reachable by visitors',
+         f"{stats.get('broken_pages', 0)} {T['u_link']}",
+         'bad' if stats.get('broken_pages') else 'ok'),
+        ('صفحات بمحتوى نصي ضعيف' if rtl else 'Pages with thin text content',
+         f"{stats.get('thin_pages', 0)} {T['u_page']}",
+         'warn' if stats.get('thin_pages') else 'ok'),
     ])
+    pdf.impact('structure')
 
+    # ======================= الميتا =======================
+    n += 1
+    pdf.add_page()
+    pdf.section(n, 'meta')
     tot = max(stats['total_pages'] - stats.get('broken_pages', 0), 1)
-    draw_table(T['tbl2'], [
-        (T['r_titles_ok'], f"{tot - stats['bad_titles']} / {tot}"),
-        (T['r_titles_crit'], f"{stats.get('critical_titles', 0)} {T['u_title']}"),
-        (T['r_descs_ok'], f"{tot - stats['bad_descs']} / {tot}"),
-        (T['r_descs_crit'], f"{stats.get('critical_descs', 0)} {T['u_desc']}"),
-        (T['r_canon'], f"{stats.get('canon_missing', 0)} {T['u_page']}"),
-        (T['r_thin'], f"{stats.get('thin_pages', 0)} {T['u_page']}"),
+    ok_t = tot - stats['bad_titles']
+    ok_d = tot - stats['bad_descs']
+    pdf.table([
+        ('عناوين ضمن الطول المثالي (50-60)' if rtl else
+         'Titles within optimal length (50-60)', f"{ok_t} / {tot}",
+         'ok' if ok_t / tot > 0.7 else 'warn'),
+        ('عناوين تحتاج إصلاحاً عاجلاً' if rtl else 'Titles needing urgent work',
+         f"{stats.get('critical_titles', 0)} {T['u_title']}",
+         'bad' if stats.get('critical_titles') else 'ok'),
+        ('عناوين مجرد رموز أو قيمة قالب' if rtl else
+         'Titles that are symbols or placeholders',
+         f"{stats.get('title_symbols', 0)} {T['u_title']}",
+         'bad' if stats.get('title_symbols') else 'ok'),
+        ('عناوين لا تحمل سوى اسم المتجر' if rtl else 'Titles with only the store name',
+         f"{stats.get('title_brand_only', 0)} {T['u_title']}",
+         'bad' if stats.get('title_brand_only') else 'ok'),
+        ('صفحات تتشارك نفس العنوان' if rtl else 'Pages sharing the same title',
+         f"{stats.get('title_dup', 0)} {T['u_page']}",
+         'warn' if stats.get('title_dup') else 'ok'),
+        ('أوصاف ضمن الطول المثالي (120-150)' if rtl else
+         'Descriptions within optimal length (120-150)', f"{ok_d} / {tot}",
+         'ok' if ok_d / tot > 0.7 else 'warn'),
+        ('أوصاف تحتاج إصلاحاً عاجلاً' if rtl else 'Descriptions needing urgent work',
+         f"{stats.get('critical_descs', 0)} {T['u_desc']}",
+         'bad' if stats.get('critical_descs') else 'ok'),
+        ('صفحات بلا وسم كانونيكال' if rtl else 'Pages without a canonical tag',
+         f"{stats.get('canon_missing', 0)} {T['u_page']}",
+         'warn' if stats.get('canon_missing') else 'ok'),
     ])
+    pdf.impact('meta')
 
-    draw_table(T['tbl_url'], [
-        (T['r_url_ok'], f"{max(stats['total_pages'] - stats.get('broken_pages', 0) - stats.get('url_bad', 0), 0)} / {max(stats['total_pages'] - stats.get('broken_pages', 0), 1)}"),
-        (T['r_url_clone'], f"{stats.get('url_clone', 0)} {T['u_product']}"),
-        (T['r_dup_content'], f"{stats.get('dup_content', 0)} {T['u_page']}"),
-        (T['r_url_wrong'], f"{stats.get('url_wrongname', 0)} {T['u_link']}"),
-        (T['r_url_style'], f"{stats.get('url_style', 0)} {T['u_link']}"),
-        (T['r_url_generic'], f"{stats.get('url_generic', 0)} {T['u_link']}"),
+    # ======================= الروابط =======================
+    n += 1
+    pdf.add_page()
+    pdf.section(n, 'urls')
+    good_u = max(tot - stats.get('url_bad', 0), 0)
+    pdf.table([
+        ('روابط سليمة الصياغة' if rtl else 'Well-formed URLs', f"{good_u} / {tot}",
+         'ok' if good_u / tot > 0.8 else 'warn'),
+        ('منتجات مستنسخة من منتج واحد' if rtl else 'Cloned products',
+         f"{stats.get('url_clone', 0)} {T['u_product']}",
+         'bad' if stats.get('url_clone') else 'ok'),
+        ('صفحات بنفس العنوان والوصف حرفياً' if rtl else
+         'Pages with identical title and description',
+         f"{stats.get('dup_content', 0)} {T['u_page']}",
+         'bad' if stats.get('dup_content') else 'ok'),
+        ('روابط تحمل اسم منتج مختلف' if rtl else 'URLs naming a different product',
+         f"{stats.get('url_wrongname', 0)} {T['u_link']}",
+         'bad' if stats.get('url_wrongname') else 'ok'),
+        ('روابط بأرقام أو رموز بلا كلمات' if rtl else 'URLs with no descriptive words',
+         f"{stats.get('url_generic', 0)} {T['u_link']}",
+         'warn' if stats.get('url_generic') else 'ok'),
+        ('روابط بصياغة غير مثالية' if rtl else 'URLs with imperfect formatting',
+         f"{stats.get('url_style', 0)} {T['u_link']}",
+         'warn' if stats.get('url_style') else 'ok'),
     ])
+    pdf.impact('urls')
 
+    # ======================= الصور =======================
+    n += 1
+    pdf.add_page()
+    pdf.section(n, 'images')
     imgs = stats.get('total_images', 0)
     noalt = stats.get('missing_alts', 0)
     weak = stats.get('weak_alts', 0)
-    healthy = stats.get('good_alts', 0)
-    ratio = round(((noalt + weak) / imgs * 100), 1) if imgs else 0
-    state = (T['img_none'] if imgs == 0 else T['img_ok'] if (noalt + weak) == 0
-             else T['img_gap'] if ratio > 50 else T['img_part'])
-    draw_table(T['tbl3'], [
-        (T['r_imgs'], f"{imgs} {T['u_img']}"),
-        (T['r_noalt'], f"{noalt} {T['u_img']}"),
-        (T['r_generic'], f"{weak - stats.get('dup_alts', 0)} {T['u_img']}"),
-        (T['r_dup'], f"{stats.get('dup_alts', 0)} {T['u_img']}"),
-        (T['r_altok'], f"{healthy} {T['u_img']}"),
-        (T['r_formats'], ' · '.join(f"{k.upper()} {v}" for k, v in
-                                    list(stats.get('img_formats', {}).items())[:4]) or '—'),
-        (T['r_modern'], f"{stats.get('img_modern_pct', 0)}%"),
-        (T['r_imgstate'], state),
+    good = stats.get('good_alts', 0)
+    ratio = round((noalt + weak) / imgs * 100, 1) if imgs else 0
+    fmts = ' · '.join(f"{k.upper()} {v}" for k, v in
+                      list((stats.get('img_formats') or {}).items())[:4]) or '—'
+    pdf.table([
+        ('إجمالي صور المحتوى والمنتجات' if rtl else 'Total content and product images',
+         f"{imgs} {T['u_img']}", 'neutral'),
+        ('صور بلا نص بديل إطلاقاً' if rtl else 'Images with no alt text at all',
+         f"{noalt} {T['u_img']}", 'bad' if noalt else 'ok'),
+        ('صور بنص بديل غير وصفي أو مكرر' if rtl else
+         'Images with non-descriptive or duplicated alt text',
+         f"{weak} {T['u_img']}", 'warn' if weak else 'ok'),
+        ('صور بنص بديل سليم' if rtl else 'Images with sound alt text',
+         f"{good} {T['u_img']}", 'ok' if good else 'neutral'),
+        ('نسبة الصور غير المهيأة' if rtl else 'Share of images not optimised',
+         f"{ratio}%", 'bad' if ratio > 50 else 'warn' if ratio else 'ok'),
+        ('صيغ الصور المستخدمة' if rtl else 'Image formats in use', fmts, 'neutral'),
+        ('نسبة الصور بالصيغ الحديثة الخفيفة' if rtl else
+         'Share of modern lightweight formats',
+         f"{stats.get('img_modern_pct', 0)}%",
+         'ok' if stats.get('img_modern_pct', 0) > 50 else 'warn'),
     ])
+    pdf.impact('images')
 
+    # ======================= خريطة الموقع =======================
     if stats.get('coverage_enabled'):
-        draw_table(T['tbl4'], [
-            (T['r_vis'], f"{stats.get('visible_products', 0)} {T['u_product']}"),
-            (T['r_sm'], f"{stats.get('sitemap_products', 0)} {T['u_product']}"),
-            (T['r_notidx'], f"{stats.get('not_indexed_count', 0)} {T['u_product']}"),
-            (T['r_redirect'], f"{stats.get('redirect_count', 0)} {T['u_link']}"),
-            (T['r_orphan'], f"{stats.get('hidden_count', 0)} {T['u_page']}"),
-            (T['r_idxpct'], f"{stats.get('indexed_pct', 0)}%"),
-        ])
-        diag_n = "6"
-    else:
-        diag_n = "5"
-
-    bw = 180
-    bx = (210 - bw) / 2
-    intro, points, close = build_diagnosis(score, stats, lang)
-    pdf.set_font(font_name, "", 9)
-    maxw = bw - 10
-
-    def wrap(txt, width):
-        out, cur = [], ""
-        for word in str(txt).split():
-            trial = (cur + " " + word).strip()
-            if pdf.get_string_width(fmt(trial)) <= width:
-                cur = trial
-            else:
-                if cur:
-                    out.append(cur)
-                cur = word
-        if cur:
-            out.append(cur)
-        return out
-
-    bullet_indent = 6
-    blocks = [('p', l) for l in wrap(intro, maxw)]
-    for pt in points:
-        wl = wrap(pt, maxw - bullet_indent)
-        for k, line in enumerate(wl):
-            blocks.append(('b' if k == 0 else 'c', line))
-        blocks.append(('s', ''))
-    blocks += [('p', l) for l in wrap(close, maxw)]
-
-    lh = 4.8
-    bh = sum(lh if t != 's' else 2.0 for t, _ in blocks) + 7
-    # العنوان وصندوقه وحدة واحدة: لا يُفصلان بين صفحتين
-    if pdf.get_y() + bh + 9 > 262:
+        n += 1
         pdf.add_page()
-    pdf.set_x(bx)
-    pdf.set_font(font_name, "", 12)
-    pdf.set_text_color(15, 23, 42)
-    pdf.cell(bw, 6, fmt(T['diag'].format(n=diag_n)), ln=True, align=align_text)
-    pdf.ln(1)
-    pdf.set_font(font_name, "", 9)
-    by = pdf.get_y()
-    pdf.set_fill_color(248, 250, 252)
-    pdf.set_draw_color(226, 232, 240)
-    pdf.rect(bx, by, bw, bh, 'DF')
+        pdf.section(n, 'sitemap')
+        pdf.table([
+            ('منتجات معروضة لزوار المتجر' if rtl else 'Products visible to visitors',
+             f"{stats.get('visible_products', 0)} {T['u_product']}", 'neutral'),
+            ('منتجات معلنة في خريطة الموقع' if rtl else 'Products declared in sitemap',
+             f"{stats.get('sitemap_products', 0)} {T['u_product']}", 'neutral'),
+            ('منتجات معروضة ولا تظهر في الخريطة' if rtl else
+             'Visible products absent from sitemap',
+             f"{stats.get('not_indexed_count', 0)} {T['u_product']}",
+             'bad' if stats.get('not_indexed_count') else 'ok'),
+            ('روابط في الخريطة تعيد التوجيه' if rtl else 'Sitemap URLs redirecting',
+             f"{stats.get('redirect_count', 0)} {T['u_link']}",
+             'warn' if stats.get('redirect_count') else 'ok'),
+            ('صفحات في الخريطة لا يصل إليها الزائر' if rtl else
+             'Sitemap pages unreachable by visitors',
+             f"{stats.get('hidden_count', 0)} {T['u_page']}",
+             'warn' if stats.get('hidden_count') else 'ok'),
+            ('نسبة المنتجات المعروضة المدرجة' if rtl else
+             'Visible products included in sitemap',
+             f"{stats.get('indexed_pct', 0)}%",
+             'ok' if stats.get('indexed_pct', 0) >= 95 else 'warn'),
+        ])
+        pdf.impact('sitemap')
 
-    y = by + 3.5
-    for kind, line in blocks:
-        if kind == 's':
-            y += 2.0
-            continue
-        if kind == 'b':
-            pdf.set_xy(bx + 5, y)
-            pdf.set_text_color(15, 23, 42)
-            if rtl:
-                pdf.cell(maxw, lh, fmt("• " + line), align="R")
-            else:
-                pdf.cell(maxw, lh, "- " + line, align="L")
-        else:
-            pdf.set_text_color(71, 85, 105)
-            if rtl:
-                pdf.set_xy(bx + 5, y)
-                pdf.cell(maxw - (bullet_indent if kind == 'c' else 0), lh,
-                         fmt(line), align="R")
-            else:
-                pdf.set_xy(bx + 5 + (bullet_indent if kind == 'c' else 0), y)
-                pdf.cell(maxw, lh, line, align="L")
-        y += lh
+    # ======================= التشخيص =======================
+    n += 1
+    pdf.add_page()
+    pdf.section(n, 'diagnosis')
+    intro, points, close = build_diagnosis(score, stats, lang)
+    pdf.para(intro, size=9.5, color=C_INK)
+    pdf.ln(3)
+    for pt in points:
+        lines = pdf.wrap(pt, W - 10, 9)
+        need = len(lines) * 5 + 3
+        if pdf.get_y() + need > 262:
+            pdf.add_page()
+        y = pdf.get_y()
+        pdf.set_fill_color(*C_INK)
+        dot = (210 - M - 2.4) if rtl else M
+        pdf.rect(dot, y + 1.6, 2.4, 2.4, 'F')
+        pdf.set_font(FONT, "", 9)
+        pdf.set_text_color(*C_MUTED)
+        for i, line in enumerate(lines):
+            pdf.set_xy(M if rtl else M + 6, y + i * 5)
+            pdf.cell(W - 6, 5, fmt(line), align=ALIGN)
+        pdf.set_y(y + len(lines) * 5 + 2.5)
+    pdf.ln(3)
+
+    lines = pdf.wrap(close, W - 14, 9.5)
+    h = len(lines) * 5.2 + 8
+    if pdf.get_y() + h > 265:
+        pdf.add_page()
+    y = pdf.get_y()
+    pdf.set_fill_color(*C_BG)
+    pdf.rect(M, y, W, h, 'F')
+    pdf.set_fill_color(*verdict_rgb)
+    if rtl:
+        pdf.rect(210 - M - 2.2, y, 2.2, h, 'F')
+    else:
+        pdf.rect(M, y, 2.2, h, 'F')
+    pdf.set_font(FONT, "", 9.5)
+    pdf.set_text_color(*C_INK)
+    yy = y + 4
+    for line in lines:
+        pdf.set_xy(M + 7, yy)
+        pdf.cell(W - 14, 5.2, fmt(line), align=ALIGN)
+        yy += 5.2
 
     return bytes(pdf.output())
 
@@ -2330,7 +2742,7 @@ if nav == "🔍 فحص متجر جديد":
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
             for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck',
-                      'dup_groups']:
+                      'dup_groups', 'speed']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
@@ -2394,6 +2806,24 @@ if nav == "🔍 فحص متجر جديد":
                               "وجهة الروابط غير المطابقة")
                 coverage = build_coverage_report(df, sm_urls, target, workers)
 
+            speed = None
+            if do_speed:
+                st.write("**المرحلة 5** — قياس سرعة الموقع عبر PageSpeed Insights")
+                sp_note = st.empty()
+                speed = {}
+                for strat, lbl in [('mobile', 'الجوال'), ('desktop', 'سطح المكتب')]:
+                    sp_note.caption(f"جارٍ قياس {lbl}... قد يستغرق نصف دقيقة.")
+                    speed[strat] = fetch_pagespeed(target, strat,
+                                                   psi_key.strip() or None)
+                errs = [v.get('error') for v in speed.values() if v and v.get('error')]
+                if errs:
+                    sp_note.caption(f"تعذّر القياس ({', '.join(errs)}) — "
+                                    "سيصدر التقرير بدون قسم السرعة.")
+                    if all(v.get('error') for v in speed.values()):
+                        speed = None
+                else:
+                    sp_note.caption("اكتمل قياس السرعة.")
+
             summary = compute_summary(df, coverage, images_df)
             selfcheck = run_self_checks(df, images_df, coverage, platform,
                                         summary, crawl_meta)
@@ -2406,6 +2836,7 @@ if nav == "🔍 فحص متجر جديد":
         st.session_state.summary = summary
         st.session_state.coverage = coverage
         st.session_state.selfcheck = selfcheck
+        st.session_state.speed = speed
 
         conn = sqlite3.connect(DB_FILE)
         conn.cursor().execute(
@@ -2444,6 +2875,8 @@ if nav == "🔍 فحص متجر جديد":
                        "على هذه المنصات الثلاث — راجع تبويب التحقق اليدوي قبل إرسال "
                        "التقرير لأي عميل.")
 
+        sp = st.session_state.get('speed') or {}
+        sp_m = (sp.get('mobile') or {}).get('score')
         cards = [
             (summary["total_pages"], "الصفحات المعروضة", COLOR['accent']),
             (summary["products"], "المنتجات", COLOR['accent']),
@@ -2455,8 +2888,11 @@ if nav == "🔍 فحص متجر جديد":
              COLOR['bad'] if summary["missing_alts"] else COLOR['ok']),
             (summary.get("broken_pages", 0), "روابط معطلة",
              COLOR['bad'] if summary.get("broken_pages") else COLOR['ok']),
+            (f"{sp_m}%" if sp_m is not None else "—", "سرعة الجوال",
+             {'ok': COLOR['ok'], 'warn': COLOR['warn'], 'bad': COLOR['bad'],
+              'na': COLOR['muted']}[speed_verdict(sp_m)]),
         ]
-        for col, (v, l, c) in zip(st.columns(7), cards):
+        for col, (v, l, c) in zip(st.columns(8), cards):
             with col:
                 st.markdown(metric_card(v, l, c), unsafe_allow_html=True)
 
@@ -2562,6 +2998,18 @@ if nav == "🔍 فحص متجر جديد":
                     'JPG': COLOR['warn'], 'PNG': COLOR['warn']}),
                     unsafe_allow_html=True)
 
+            if sp:
+                items = []
+                for strat, lbl in [('mobile', 'الجوال'), ('desktop', 'سطح المكتب')]:
+                    d = sp.get(strat) or {}
+                    if d.get('score') is not None:
+                        items.append((lbl, d['score']))
+                if items:
+                    st.markdown(bar_chart("درجة سرعة الموقع (من 100)", items, {
+                        k: (COLOR['ok'] if v >= 90 else COLOR['warn'] if v >= 50
+                            else COLOR['bad']) for k, v in items}),
+                        unsafe_allow_html=True)
+
             st.markdown("#### أبرز النتائج")
             out = []
             if summary['missing_alts']:
@@ -2571,6 +3019,13 @@ if nav == "🔍 فحص متجر جديد":
             if summary['weak_alts']:
                 out.append((f"<b>{summary['weak_alts']}</b> صورة نصها البديل موجود لكنه "
                             "غير وصفي أو مكرر — يمر كسليم في الأدوات السطحية.", 'warn'))
+            if sp_m is not None and sp_m < 50:
+                out.append((f"سرعة الموقع على الجوال <b>{sp_m}%</b> — بطء يرفع نسبة "
+                            "مغادرة الزائر قبل رؤية المنتج، وهو عامل ترتيب معلن "
+                            "من جوجل.", 'bad'))
+            elif sp_m is not None and sp_m < 90:
+                out.append((f"سرعة الموقع على الجوال <b>{sp_m}%</b> — مقبولة "
+                            "وقابلة للتحسين.", 'warn'))
             if summary.get('url_clone'):
                 out.append((f"<b>{summary['url_clone']}</b> منتج مستنسخ — نسخ مكررة "
                             "من منتج واحد تتنافس مع أصلها.", 'bad'))
@@ -2831,7 +3286,8 @@ if nav == "🔍 فحص متجر جديد":
             netloc = urlparse(st.session_state.current_url).netloc or "store"
             try:
                 pdf_bytes = generate_client_pdf(st.session_state.current_url,
-                                                summary['score'], exp_summary, lang)
+                                                summary['score'], exp_summary, lang,
+                                                st.session_state.get('speed'))
             except Exception as e:
                 pdf_bytes = None
                 st.error(f"تعذر توليد الـ PDF: {e}")
