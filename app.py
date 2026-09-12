@@ -464,9 +464,11 @@ def unique_images(images_df):
 #  كشف منصة المتجر
 # ==============================================================
 PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
-                  'shopify': 'شوبيفاي (Shopify)', 'unknown': 'غير معروفة'}
-PLATFORM_LABEL_EN = {'salla': 'Salla', 'zid': 'Zid',
-                     'shopify': 'Shopify', 'unknown': 'Unidentified'}
+                  'shopify': 'شوبيفاي (Shopify)', 'rmz': 'رمز (rmz.gg)',
+                  'woocommerce': 'ووكومرس', 'unknown': 'غير معروفة'}
+PLATFORM_LABEL_EN = {'salla': 'Salla', 'zid': 'Zid', 'shopify': 'Shopify',
+                     'rmz': 'rmz.gg', 'woocommerce': 'WooCommerce',
+                     'unknown': 'Unidentified'}
 SUPPORTED_PLATFORMS = ('salla', 'zid', 'shopify')
 
 
@@ -481,6 +483,10 @@ def detect_platform(html, headers=None, url=""):
     if any(s in blob for s in ['cdn.shopify.com', 'myshopify.com', 'shopify.theme',
                                'x-shopify', 'shopify-features']):
         return 'shopify'
+    if any(s in blob for s in ['cdn.rmz.gg', 'rmz.gg/store', 'matjrah']):
+        return 'rmz'
+    if any(s in blob for s in ['woocommerce', 'wp-content/plugins/woo']):
+        return 'woocommerce'
     return 'unknown'
 
 
@@ -1528,10 +1534,11 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None)
         add(CHECK_PASS, "منصة المتجر",
             f"تم التعرف على المنصة: {PLATFORM_LABEL[platform]}.")
     else:
-        add(CHECK_FAIL, "منصة المتجر",
-            "لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. الأداة معايرة على "
-            "هذه المنصات الثلاث فقط.",
-            "افتح المتجر وتأكد من منصته يدوياً قبل الاعتماد على أي رقم.")
+        known = PLATFORM_LABEL.get(platform, 'غير معروفة')
+        add(CHECK_WARN, "منصة المتجر",
+            f"المنصة ({known}) خارج المنصات التي عُوِّرت عليها الأداة "
+            "(سلة وزد وشوبيفاي). الفحوص التالية هي ما يحدد موثوقية النتائج.",
+            "راجع باقي الفحوص وعيّنة التحقق اليدوي قبل الإرسال.")
 
     # 2) حجم الزحف
     if n_ok == 0:
