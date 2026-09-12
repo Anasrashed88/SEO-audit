@@ -110,6 +110,8 @@ COL_EN = {
     'عدد الصفحات': 'Appears On Pages',
     'الوجهة النهائية': 'Final Destination',
     'جودة العنوان': 'Title Quality', 'جودة الوصف': 'Description Quality',
+    'جودة الرابط': 'URL Quality', 'المسار': 'Slug', 'محتوى مكرر': 'Duplicate Content',
+    'اسم المنتج المعروض': 'Displayed Product Name', 'صيغة الصورة': 'Image Format',
 }
 
 COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
@@ -144,7 +146,7 @@ init_db()
 
 for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
                      ('current_url', ""), ('coverage', None), ('platform', 'unknown'),
-                     ('selfcheck', None), ('brand', '')]:
+                     ('selfcheck', None), ('brand', ''), ('dup_groups', None)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -733,6 +735,13 @@ def _fetch_and_audit(url, base_url, source):
     else:
         canon_status = 'canon_diff'
 
+    h1 = soup.find('h1')
+    display_name = re.sub(r'\s+', ' ', h1.get_text(strip=True)).strip() if h1 else ''
+    if not display_name:
+        ogt = soup.find('meta', attrs={'property': 'og:title'})
+        if ogt and ogt.get('content'):
+            display_name = re.sub(r'\s+', ' ', ogt['content']).strip()
+
     title_tag = soup.find('title')
     title = re.sub(r'\s+', ' ', title_tag.get_text(strip=True)).strip() if title_tag else ''
     title_len = text_length(title)
@@ -759,6 +768,7 @@ def _fetch_and_audit(url, base_url, source):
                 'رابط الصورة': urljoin(final_url, src),
                 'النص البديل الحالي (Alt)': alt_text,
                 'طول النص البديل': alt_len, 'حالة النص البديل': alt_status,
+                'صيغة الصورة': image_format(urljoin(final_url, src)),
             })
 
     for s in content_soup(['script', 'style', 'noscript']):
@@ -921,6 +931,137 @@ def analyze_text_quality(df):
     return out, brand
 
 
+
+# ==============================================================
+#  تدقيق الروابط (Slug) — الرابط عنصر سيو مستقل
+# ==============================================================
+CLONE_PATTERNS = [r'copy-of', r'copy_of', r'-copy\b', r'نسخة', r'نسخه',
+                  r'duplicate', r'\bتجربة\b', r'\btest\b']
+URL_MAX_PATH = 90
+
+URL_LABEL = {
+    'ar': {'u_ok': 'سليم', 'u_clone': 'منتج مستنسخ', 'u_mismatch': 'لا يطابق اسم المنتج',
+           'u_generic': 'رقم أو رمز بلا كلمات', 'u_underscore': 'يستخدم الشرطة السفلية',
+           'u_long': 'طويل جداً', 'u_na': '—'},
+    'en': {'u_ok': 'Sound', 'u_clone': 'Cloned product', 'u_mismatch': 'Does not match product name',
+           'u_generic': 'ID or code with no words', 'u_underscore': 'Uses underscores',
+           'u_long': 'Too long', 'u_na': '—'},
+}
+URL_CREDIT = {'u_ok': 1.0, 'u_underscore': 0.8, 'u_long': 0.7, 'u_mismatch': 0.4,
+              'u_generic': 0.2, 'u_clone': 0.0, 'u_na': 1.0}
+
+
+def slug_of(url):
+    path = unquote(urlparse(clean_url(url)).path)
+    segs = [x for x in path.split('/') if x]
+    if not segs:
+        return ''
+    # سلة تضع معرّف المنتج في المقطع الأخير (p123456) والاسم قبله
+    if re.fullmatch(r'p\d+', segs[-1]) and len(segs) >= 2:
+        return segs[-2]
+    return segs[-1]
+
+
+def tokens_of(text):
+    raw = re.split(r'[\s\-_/|،,.:؛]+', str(text or '').lower())
+    out = set()
+    for t in raw:
+        t = re.sub(r'[^0-9a-z\u0600-\u06FF]', '', t)
+        if len(t) < 2:
+            continue
+        out.add(normalize_ar_token(t) if re.search(r'[\u0600-\u06FF]', t) else t)
+    return out
+
+
+def name_match_ratio(slug, name):
+    a, b = tokens_of(slug), tokens_of(name)
+    if not a or not b:
+        return 1.0            # لا نحكم عند غياب أحد الطرفين
+    return len(a & b) / len(a)
+
+
+def analyze_url_quality(df, brand=''):
+    """يقيّم الرابط: الاستنساخ، مطابقته لاسم المنتج، وصياغته."""
+    if df.empty:
+        return df
+    out = df.copy()
+    out['المسار'] = out['الرابط'].map(slug_of)
+
+    brand_tokens = tokens_of(brand)
+    known = {url_key(u) for u in out['الرابط']}
+
+    def grade(row):
+        if not row['متاحة']:
+            return 'u_na'
+        slug = str(row['المسار'] or '')
+        if not slug:
+            return 'u_na'
+        low = slug.lower()
+
+        if any(re.search(pat, low) for pat in CLONE_PATTERNS):
+            return 'u_clone'
+        # لاحقة رقمية مع وجود الأصل بنفس المسار
+        mo = re.match(r'^(.*)-(\d{1,2})$', slug)
+        if mo:
+            base = mo.group(1)
+            parent = str(row['الرابط']).replace(slug, base)
+            if url_key(parent) in known:
+                return 'u_clone'
+        if re.fullmatch(r'[\d\W_]+', slug) or re.fullmatch(r'(product|item|page)[-_]?\d*',
+                                                            low):
+            return 'u_generic'
+        if len(unquote(urlparse(clean_url(row['الرابط'])).path)) > URL_MAX_PATH:
+            return 'u_long'
+        if '_' in slug:
+            return 'u_underscore'
+
+        # المطابقة مع اسم المنتج: العنوان الحقيقي (H1) ثم عنوان الميتا
+        name = str(row.get('اسم المنتج المعروض') or '').strip()
+        if not name:
+            name = str(row.get('عنوان الميتا') or '')
+            for t in brand_tokens:
+                name = re.sub(t, ' ', name, flags=re.I)
+        if name.strip() and name_match_ratio(slug, name) < 0.34:
+            return 'u_mismatch'
+        return 'u_ok'
+
+    out['جودة الرابط'] = out.apply(grade, axis=1)
+    return out
+
+
+def detect_duplicate_content(df):
+    """مجموعات صفحات تتشارك نفس العنوان والوصف — محتوى مكرر فعلي."""
+    if df.empty:
+        return df, []
+    out = df.copy()
+    ok = out[out['متاحة'] == True]  # noqa: E712
+    groups = []
+    sub = ok[(ok['عنوان الميتا'].astype(str).str.strip() != '')]
+    for (t, d), grp in sub.groupby(['عنوان الميتا', 'وصف الميتا']):
+        if len(grp) > 1:
+            groups.append({'العنوان': t, 'عدد الصفحات': len(grp),
+                           'الروابط': list(grp['الرابط'])})
+    dup_urls = {u for g in groups for u in g['الروابط']}
+    out['محتوى مكرر'] = out['الرابط'].isin(dup_urls)
+    return out, groups
+
+
+# ==============================================================
+#  صيغ الصور
+# ==============================================================
+MODERN_FORMATS = ('webp', 'avif')
+
+
+def image_format(url):
+    path = urlparse(str(url or '')).path.lower()
+    mo = re.search(r'\.(jpe?g|png|webp|avif|gif|svg|bmp|tiff?)(?:$|\?)', path)
+    if mo:
+        ext = mo.group(1)
+        return 'jpg' if ext in ('jpg', 'jpeg') else ext
+    mo2 = re.search(r'(?:format|fm)=(\w+)', str(url or '').lower())
+    return mo2.group(1) if mo2 else '—'
+
+
 LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
               'long': 0.4, 'missing': 0.0}
 
@@ -960,6 +1101,7 @@ def score_pages(df, images_df):
             miss.append(info['missing'])
             weak.append(info['weak'])
         s += 25 if r['حالة المحتوى'] == 'good' else 0
+        s *= URL_CREDIT.get(r.get('جودة الرابط', 'u_na'), 1.0) ** 0.5
         scores.append(max(0, min(100, round(s))))
     out['درجة السيو'] = scores
     out['صور بدون Alt'] = miss
@@ -1243,11 +1385,27 @@ def compute_summary(df, coverage=None, images_df=None):
         if 'جودة الوصف' in ok.columns else 0,
         'desc_same': int((ok['جودة الوصف'] == 'q_same_as_title').sum())
         if 'جودة الوصف' in ok.columns else 0,
+        'url_clone': int((ok['جودة الرابط'] == 'u_clone').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_mismatch': int((ok['جودة الرابط'] == 'u_mismatch').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_generic': int((ok['جودة الرابط'] == 'u_generic').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_bad': int((~ok['جودة الرابط'].isin(['u_ok', 'u_na'])).sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'dup_content': int(ok['محتوى مكرر'].sum()) if 'محتوى مكرر' in ok.columns else 0,
         'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum()),
         'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum()),
         'thin_pages': int((ok['حالة المحتوى'] == 'thin').sum()),
         'coverage_enabled': bool(coverage),
     }
+    if uimg is not None and not uimg.empty and 'صيغة الصورة' in uimg.columns:
+        fmts = uimg['صيغة الصورة'].value_counts().to_dict()
+        modern = sum(v for k, v in fmts.items() if k in MODERN_FORMATS)
+        s['img_formats'] = fmts
+        s['img_modern'] = int(modern)
+        s['img_legacy'] = int(len(uimg) - modern)
+        s['img_modern_pct'] = round(modern / len(uimg) * 100, 1)
     if coverage:
         s.update({
             'visible_products': coverage['visible_count'],
@@ -1276,6 +1434,8 @@ def localize_df(df, lang):
     for col in ['جودة العنوان', 'جودة الوصف']:
         if col in out.columns:
             out[col] = out[col].map(lambda v: QUALITY_LABEL[lang].get(v, v))
+    if 'جودة الرابط' in out.columns:
+        out['جودة الرابط'] = out['جودة الرابط'].map(lambda v: URL_LABEL[lang].get(v, v))
     if 'النص البديل الحالي (Alt)' in out.columns:
         empty = STATUS_LABEL[lang]['alt_empty']
         out['النص البديل الحالي (Alt)'] = out['النص البديل الحالي (Alt)'].map(
@@ -1390,16 +1550,28 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None)
     # 6ب) العناوين الرمزية وقيم القوالب
     if n_ok and 'جودة العنوان' in ok.columns:
         sym = int(ok['جودة العنوان'].isin(QUALITY_FATAL).sum())
-        if sym / n_ok > 0.3:
-            add(CHECK_FAIL, "سلامة العناوين",
-                f"{sym} عنوان من أصل {n_ok} مجرد رموز أو قيمة قالب افتراضية.",
-                "قالب المتجر لا يولّد عناوين ميتا. تأكد من ذلك يدوياً قبل الإرسال.")
+        if sym / n_ok > 0.6:
+            add(CHECK_WARN, "سلامة العناوين",
+                f"{sym} عنوان من أصل {n_ok} مجرد رموز أو قيمة قالب افتراضية — "
+                "نسبة مرتفعة تعني أن قالب المتجر لا يولّد عناوين ميتا.",
+                "تحقق من عيّنة يدوياً. هذه نتيجة حقيقية عن المتجر لا خلل في القراءة.")
         elif sym:
             add(CHECK_WARN, "سلامة العناوين",
                 f"{sym} عنوان مجرد رموز أو قيمة قالب (مثل [] أو {{{{ }}}}).",
                 "عُوملت كعناوين مفقودة في الأرقام.")
         else:
             add(CHECK_PASS, "سلامة العناوين", "لا توجد عناوين رمزية أو قيم قوالب.")
+
+    # 6ج) جودة الروابط
+    if n_ok and 'جودة الرابط' in ok.columns:
+        mism = int((ok['جودة الرابط'] == 'u_mismatch').sum())
+        if mism / n_ok > 0.7:
+            add(CHECK_WARN, "مطابقة الروابط",
+                f"{mism} رابط لا يطابق اسم المنتج — نسبة مرتفعة جداً.",
+                "قد يكون الزاحف لم يقرأ اسم المنتج (H1) بشكل صحيح. تحقق من عيّنة.")
+        else:
+            add(CHECK_PASS, "مطابقة الروابط",
+                f"{n_ok - mism} رابط من {n_ok} متسق مع اسم المنتج.")
 
     # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
     if n_ok:
@@ -1463,8 +1635,16 @@ PDF_TXT = {
         'scope': 'نطاق الفحص: الصفحات والمنتجات المعروضة فعلياً لزوار المتجر',
         'tbl1': '1. جدول بنية المتجر:',
         'tbl2': '2. جدول تدقيق أطوال العناوين والأوصاف:',
-        'tbl3': '3. جدول تدقيق النصوص البديلة للصور:',
-        'tbl4': '4. جدول مقارنة المعروض بخريطة الموقع:',
+        'tbl_url': '3. جدول تدقيق روابط الصفحات:',
+        'r_url_ok': 'روابط سليمة الصياغة ومطابقة لاسم المنتج',
+        'r_url_clone': 'منتجات مستنسخة (رابط بنمط copy-of)',
+        'r_dup_content': 'صفحات بنفس العنوان والوصف حرفياً',
+        'r_url_mismatch': 'روابط لا تطابق اسم المنتج المعروض',
+        'r_url_generic': 'روابط بأرقام أو رموز بلا كلمات',
+        'r_formats': 'صيغ الصور المستخدمة',
+        'r_modern': 'نسبة الصور بصيغ حديثة (WebP/AVIF)',
+        'tbl3': '4. جدول تدقيق النصوص البديلة للصور:',
+        'tbl4': '5. جدول مقارنة المعروض بخريطة الموقع:',
         'diag': '{n}. التشخيص الاستشاري وخطة العمل:',
         'h_val': 'الحالة / العدد', 'h_item': 'عنصر الفحص والتدقيق',
         'r_total': 'إجمالي الصفحات المعروضة والمفحوصة', 'u_page': 'صفحة',
@@ -1506,8 +1686,16 @@ PDF_TXT = {
         'scope': 'Audit scope: pages and products actually visible to store visitors',
         'tbl1': '1. Store structure:',
         'tbl2': '2. Title and description length audit:',
-        'tbl3': '3. Image alt text audit:',
-        'tbl4': '4. Visible catalogue vs sitemap comparison:',
+        'tbl_url': '3. Page URL audit:',
+        'r_url_ok': 'URLs well-formed and matching the product name',
+        'r_url_clone': 'Cloned products (copy-of URL pattern)',
+        'r_dup_content': 'Pages with identical title and description',
+        'r_url_mismatch': 'URLs not matching the displayed product name',
+        'r_url_generic': 'URLs made of numbers or codes with no words',
+        'r_formats': 'Image formats in use',
+        'r_modern': 'Share of modern formats (WebP/AVIF)',
+        'tbl3': '4. Image alt text audit:',
+        'tbl4': '5. Visible catalogue vs sitemap comparison:',
         'diag': '{n}. Consultant diagnosis and action plan:',
         'h_val': 'Value / Count', 'h_item': 'Audited item',
         'r_total': 'Total visible pages audited', 'u_page': 'pages',
@@ -1597,6 +1785,22 @@ def build_diagnosis(score, stats, lang):
         if imp_d:
             points.append(f"{imp_d} وصف ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
                           f"({DESC_MIN_OPTIMAL}-{DESC_MAX} حرفاً).")
+        if stats.get('url_clone'):
+            points.append(f"{stats['url_clone']} منتجاً مستنسخاً برابط يحمل بادئة النسخ "
+                          "(copy-of)، أي نسخ مكررة من منتج واحد تتنافس مع أصلها "
+                          "في نتائج البحث.")
+        if stats.get('dup_content'):
+            points.append(f"{stats['dup_content']} صفحة تتشارك نفس العنوان والوصف "
+                          "حرفياً، فتُعدّ محتوى مكرراً ويختار جوجل واحدة ويتجاهل الباقي.")
+        if stats.get('url_mismatch'):
+            points.append(f"{stats['url_mismatch']} رابط لا يطابق اسم المنتج المعروض، "
+                          "فيفقد المتجر كلمات مفتاحية مجانية في الرابط.")
+        if stats.get('url_generic'):
+            points.append(f"{stats['url_generic']} رابط مكوّن من أرقام أو رموز بلا "
+                          "كلمات وصفية.")
+        if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
+            points.append(f"{stats['img_legacy']} صورة بصيغ قديمة (JPEG/PNG) بدل "
+                          "WebP، ما يزيد حجم الصفحة ويبطئ تحميلها على الجوال.")
         if stats.get('canon_missing'):
             points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
                           "ما يعرّض المتجر لتكرار المحتوى.")
@@ -1664,6 +1868,21 @@ def build_diagnosis(score, stats, lang):
     if imp_d:
         points.append(f"{imp_d} descriptions are acceptable and could be raised to the "
                       f"optimal {DESC_MIN_OPTIMAL}-{DESC_MAX} character range.")
+    if stats.get('url_clone'):
+        points.append(f"{stats['url_clone']} cloned products carry a copy-of prefix in "
+                      "their URL and compete with the original in search results.")
+    if stats.get('dup_content'):
+        points.append(f"{stats['dup_content']} pages share an identical title and "
+                      "description, counting as duplicate content.")
+    if stats.get('url_mismatch'):
+        points.append(f"{stats['url_mismatch']} URLs do not match the displayed product "
+                      "name, wasting free keywords in the slug.")
+    if stats.get('url_generic'):
+        points.append(f"{stats['url_generic']} URLs consist of numbers or codes with no "
+                      "descriptive words.")
+    if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
+        points.append(f"{stats['img_legacy']} images use legacy formats (JPEG/PNG) "
+                      "instead of WebP, increasing page weight on mobile.")
     if stats.get('canon_missing'):
         points.append(f"{stats['canon_missing']} pages have no canonical tag, exposing "
                       "the store to duplicate content.")
@@ -1821,6 +2040,14 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         (T['r_thin'], f"{stats.get('thin_pages', 0)} {T['u_page']}"),
     ])
 
+    draw_table(T['tbl_url'], [
+        (T['r_url_ok'], f"{max(stats['total_pages'] - stats.get('broken_pages', 0) - stats.get('url_bad', 0), 0)} / {max(stats['total_pages'] - stats.get('broken_pages', 0), 1)}"),
+        (T['r_url_clone'], f"{stats.get('url_clone', 0)} {T['u_product']}"),
+        (T['r_dup_content'], f"{stats.get('dup_content', 0)} {T['u_page']}"),
+        (T['r_url_mismatch'], f"{stats.get('url_mismatch', 0)} {T['u_link']}"),
+        (T['r_url_generic'], f"{stats.get('url_generic', 0)} {T['u_link']}"),
+    ])
+
     imgs = stats.get('total_images', 0)
     noalt = stats.get('missing_alts', 0)
     weak = stats.get('weak_alts', 0)
@@ -1834,6 +2061,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         (T['r_generic'], f"{weak - stats.get('dup_alts', 0)} {T['u_img']}"),
         (T['r_dup'], f"{stats.get('dup_alts', 0)} {T['u_img']}"),
         (T['r_altok'], f"{healthy} {T['u_img']}"),
+        (T['r_formats'], ' · '.join(f"{k.upper()} {v}" for k, v in
+                                    list(stats.get('img_formats', {}).items())[:4]) or '—'),
+        (T['r_modern'], f"{stats.get('img_modern_pct', 0)}%"),
         (T['r_imgstate'], state),
     ])
 
@@ -1846,9 +2076,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
             (T['r_orphan'], f"{stats.get('hidden_count', 0)} {T['u_page']}"),
             (T['r_idxpct'], f"{stats.get('indexed_pct', 0)}%"),
         ])
-        diag_n = "5"
+        diag_n = "6"
     else:
-        diag_n = "4"
+        diag_n = "5"
 
     bw = 180
     bx = (210 - bw) / 2
@@ -2011,7 +2241,8 @@ if nav == "🔍 فحص متجر جديد":
 
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
-            for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck']:
+            for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck',
+                      'dup_groups']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
@@ -2060,8 +2291,11 @@ if nav == "🔍 فحص متجر جديد":
                     .copy().reset_index(drop=True)
                 images_df = apply_duplicate_alt(images_df)
             df, brand = analyze_text_quality(df)
+            df = analyze_url_quality(df, brand)
+            df, dup_groups = detect_duplicate_content(df)
             df = score_pages(df, images_df)
             st.session_state.brand = brand
+            st.session_state.dup_groups = dup_groups
 
             coverage = None
             if do_sitemap_check:
@@ -2217,6 +2451,26 @@ if nav == "🔍 فحص متجر جديد":
                     QL['q_placeholder']: COLOR['bad'], QL['q_symbols']: COLOR['bad']}),
                     unsafe_allow_html=True)
 
+            UL = URL_LABEL['ar']
+            if 'جودة الرابط' in ok.columns:
+                uc = ok['جودة الرابط'].value_counts()
+                items = [(UL[k], int(uc.get(k, 0))) for k in
+                         ['u_ok', 'u_mismatch', 'u_underscore', 'u_long',
+                          'u_generic', 'u_clone'] if uc.get(k, 0)]
+                if len(items) > 1:
+                    st.markdown(bar_chart("جودة روابط الصفحات", items, {
+                        UL['u_ok']: COLOR['ok'], UL['u_mismatch']: COLOR['warn'],
+                        UL['u_underscore']: COLOR['warn'], UL['u_long']: COLOR['warn'],
+                        UL['u_generic']: COLOR['bad'], UL['u_clone']: COLOR['bad']}),
+                        unsafe_allow_html=True)
+            if summary.get('img_formats'):
+                items = [(k.upper(), v) for k, v in
+                         sorted(summary['img_formats'].items(), key=lambda x: -x[1])[:5]]
+                st.markdown(bar_chart("صيغ صور المتجر", items, {
+                    'WEBP': COLOR['ok'], 'AVIF': COLOR['ok'],
+                    'JPG': COLOR['warn'], 'PNG': COLOR['warn']}),
+                    unsafe_allow_html=True)
+
             st.markdown("#### أبرز النتائج")
             out = []
             if summary['missing_alts']:
@@ -2226,6 +2480,20 @@ if nav == "🔍 فحص متجر جديد":
             if summary['weak_alts']:
                 out.append((f"<b>{summary['weak_alts']}</b> صورة نصها البديل موجود لكنه "
                             "غير وصفي أو مكرر — يمر كسليم في الأدوات السطحية.", 'warn'))
+            if summary.get('url_clone'):
+                out.append((f"<b>{summary['url_clone']}</b> منتج مستنسخ برابط "
+                            "<code>copy-of</code> — نسخ مكررة تتنافس مع أصلها.", 'bad'))
+            if summary.get('dup_content'):
+                out.append((f"<b>{summary['dup_content']}</b> صفحة بنفس العنوان والوصف "
+                            "حرفياً — محتوى مكرر يختار جوجل منه واحدة فقط.", 'bad'))
+            if summary.get('url_mismatch'):
+                out.append((f"<b>{summary['url_mismatch']}</b> رابط لا يطابق اسم المنتج "
+                            "المعروض — كلمات مفتاحية ضائعة في الرابط.", 'warn'))
+            if summary.get('img_legacy') and summary.get('img_modern_pct', 100) < 50:
+                out.append((f"<b>{summary['img_legacy']}</b> صورة بصيغ قديمة "
+                            f"(JPEG/PNG) — {summary.get('img_modern_pct', 0)}% فقط "
+                            "بصيغ حديثة. التحويل إلى WebP يخفض حجم الصفحة بنحو الثلث.",
+                            'warn'))
             if summary.get('title_symbols'):
                 out.append((f"<b>{summary['title_symbols']}</b> عنوان ميتا مجرد رموز أو "
                             "قيمة قالب افتراضية — الصفحة بلا عنوان فعلي في نتائج البحث.",
@@ -2307,6 +2575,8 @@ if nav == "🔍 فحص متجر جديد":
                       (d['حالة الوصف'] != STATUS_LABEL['ar']['optimal']) |
                       (~d['جودة العنوان'].isin([QL['q_ok'], QL['q_na']])) |
                       (~d['جودة الوصف'].isin([QL['q_ok'], QL['q_na']])) |
+                      (~d['جودة الرابط'].isin([URL_LABEL['ar']['u_ok'],
+                                               URL_LABEL['ar']['u_na']])) |
                       (d['صور بدون Alt'] > 0) | (d['متاحة'] == False)]  # noqa: E712
             d = d.copy().reset_index(drop=True)
             d.index = d.index + 1
@@ -2315,6 +2585,15 @@ if nav == "🔍 فحص متجر جديد":
                              "الرابط", width="large"),
                              "درجة السيو": st.column_config.ProgressColumn(
                                  "درجة السيو", min_value=0, max_value=100, format="%d")})
+            dgroups = st.session_state.get('dup_groups') or []
+            if dgroups:
+                with st.expander(f"⚠️ {len(dgroups)} مجموعة محتوى مكرر "
+                                 f"({sum(g['عدد الصفحات'] for g in dgroups)} صفحة)"):
+                    for g in dgroups:
+                        st.markdown(f"**{g['عدد الصفحات']} صفحات** بنفس العنوان: "
+                                    f"{str(g['العنوان'])[:70]}")
+                        for u in g['الروابط']:
+                            st.caption(f"• {u}")
             langs = df[df['متاحة'] == True]['لغة الصفحة'].value_counts()  # noqa: E712
             st.caption(
                 f"معايير الطول — العنوان مثالي {TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرفاً "
@@ -2327,8 +2606,14 @@ if nav == "🔍 فحص متجر جديد":
         with tabs[3]:
             if view_imgs is not None and not view_imgs.empty:
                 L = STATUS_LABEL['ar']
-                f = st.selectbox("تصفية", ["الكل", "بلا نص بديل", "نص بديل ضعيف",
-                                           "نص بديل سليم"])
+                fc1, fc2 = st.columns(2)
+                with fc1:
+                    f = st.selectbox("تصفية", ["الكل", "بلا نص بديل", "نص بديل ضعيف",
+                                               "نص بديل سليم"])
+                with fc2:
+                    fmts = ["الكل"] + sorted(view_imgs['صيغة الصورة'].dropna().unique().tolist()) \
+                        if 'صيغة الصورة' in view_imgs.columns else ["الكل"]
+                    fsel = st.selectbox("صيغة الصورة", fmts)
                 v = view_imgs
                 if f == "بلا نص بديل":
                     v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_missing']]
@@ -2337,6 +2622,8 @@ if nav == "🔍 فحص متجر جديد":
                         [L[k] for k in ALT_WEAK_STATES])]
                 elif f == "نص بديل سليم":
                     v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_ok']]
+                if fsel != "الكل" and 'صيغة الصورة' in v.columns:
+                    v = v[v['صيغة الصورة'] == fsel]
                 v = v.copy().reset_index(drop=True)
                 v.index = v.index + 1
                 st.dataframe(v, use_container_width=True, height=460,
