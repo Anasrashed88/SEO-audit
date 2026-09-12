@@ -628,6 +628,8 @@ JUNK_KEYWORDS = [
     # شعارات شركات الشحن ومزودي الخدمة
     'zidship', 'aramex', 'smsa', 'redbox', 'naqel', 'servicelevel', 'courier',
     'shipment', 'shipping-company', 'carrier', 'fastlo', 'imile',
+    # صور وهمية تضعها القوالب قبل التحميل الكسول
+    's-empty', 'empty.png', 'lazy.png', 'transparent', 'dummy', '1x1',
 ]
 
 
@@ -1071,12 +1073,16 @@ def analyze_url_quality(df, brand=''):
             return 'u_wordy'
 
         # 4) هل يشير الرابط لمنتج مختلف عن المعروض في الصفحة؟
+        # يُقارن الرابط بالاسم المعروض وبعنوان الميتا معاً: بعض المتاجر
+        # تختار رابطاً بكلمات البحث واسماً تجارياً مختلفاً، وهذا سليم.
         name = str(row.get('اسم المنتج المعروض') or '').strip()
-        if name and row.get('نوع الصفحة') == T_PRODUCT:
+        meta_t = str(row.get('عنوان الميتا') or '').strip()
+        if (name or meta_t) and row.get('نوع الصفحة') == T_PRODUCT:
             s_tok = [t for t in slug_tokens(slug) if not t.isdigit()]
-            n_tok = set(slug_tokens(name)) - brand_tokens
+            n_tok = (set(slug_tokens(name)) | set(slug_tokens(meta_t))) - brand_tokens
             # تُقارن الكلمات فقط عند اتفاق الأبجدية: الرابط قد يكون نقلاً صوتياً
-            if s_tok and n_tok and script_of(slug) == script_of(name):
+            ref = name if name else meta_t
+            if s_tok and n_tok and script_of(slug) == script_of(ref):
                 distinctive = [t for t in s_tok
                                if t not in generic_vocab and t not in brand_tokens]
                 if distinctive and not (set(distinctive) & n_tok):
