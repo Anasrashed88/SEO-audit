@@ -30,7 +30,37 @@ st.set_page_config(page_title="مركز عمليات السيو | أنس راش�
                    layout="wide", page_icon="🚀", initial_sidebar_state="expanded")
 
 BASE_DIR = Path(__file__).parent
-FONT_PATH = BASE_DIR / "Amiri-Regular.ttf"
+# خطوط التقرير: تُختار أول عائلة يوجد ملفها في المستودع.
+# لتغيير خط التقرير يكفي رفع ملفي الخط بالاسمين أدناه — لا تعديل في الكود.
+FONT_CANDIDATES = [
+    ("Tajawal", "Tajawal-Regular.ttf", "Tajawal-Bold.ttf"),
+    ("Almarai", "Almarai-Regular.ttf", "Almarai-Bold.ttf"),
+    ("Cairo", "Cairo-Regular.ttf", "Cairo-Bold.ttf"),
+    ("IBMPlexArabic", "IBMPlexSansArabic-Regular.ttf", "IBMPlexSansArabic-Bold.ttf"),
+    ("NotoKufi", "NotoKufiArabic-Regular.ttf", "NotoKufiArabic-Bold.ttf"),
+    ("Amiri", "Amiri-Regular.ttf", "Amiri-Bold.ttf"),
+]
+
+
+def pick_font():
+    """يعيد (الاسم، مسار العادي، مسار العريض أو None)."""
+    for name, reg, bold in FONT_CANDIDATES:
+        rp = BASE_DIR / reg
+        if rp.exists() and rp.stat().st_size > 20000:
+            bp = BASE_DIR / bold
+            return name, rp, (bp if bp.exists() and bp.stat().st_size > 20000 else None)
+    return "Amiri", BASE_DIR / "Amiri-Regular.ttf", None
+
+
+AR_FONT_NAME, FONT_PATH, FONT_BOLD_PATH = pick_font()
+
+# التشكيل الحديث (HarfBuzz) يتيح استخدام أي خط عربي عصري بلا الحاجة
+# لأشكال الحروف القديمة. عند غيابه نعود لطريقة arabic-reshaper.
+try:
+    import uharfbuzz  # noqa: F401
+    HAS_SHAPING = True
+except Exception:
+    HAS_SHAPING = False
 LOGO_PATH = BASE_DIR / "brand_logo.png"
 DB_FILE = str(BASE_DIR / "store_history.db")
 
@@ -1776,7 +1806,7 @@ PDF_TXT = {
         'scope': 'نطاق الفحص: الصفحات والمنتجات المعروضة فعلياً لزوار المتجر',
         'score_lbl': 'درجة التوافق العامة مع محركات البحث',
         'sc_bad': 'يحتاج معالجة عاجلة', 'sc_warn': 'مهيأ جزئياً', 'sc_ok': 'مستوى جيد',
-        'page_of': 'صفحة {a} من {b}',
+        'page_of': 'صفحة {a}',
         'impact': 'الأثر على متجرك',
         'h_item': 'عنصر الفحص', 'h_val': 'النتيجة',
         'm_pages': 'صفحة معروضة', 'm_products': 'منتج', 'm_images': 'صورة',
@@ -1795,7 +1825,7 @@ PDF_TXT = {
         'score_lbl': 'Overall search engine compliance score',
         'sc_bad': 'Needs urgent work', 'sc_warn': 'Partially optimised',
         'sc_ok': 'Good standard',
-        'page_of': 'Page {a} of {b}',
+        'page_of': 'Page {a}',
         'impact': 'What this means for your store',
         'h_item': 'Audited item', 'h_val': 'Result',
         'm_pages': 'visible pages', 'm_products': 'products', 'm_images': 'images',
@@ -2163,7 +2193,9 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     يضم شرحاً للمقياس وجدول النتائج وصندوق الأثر، ثم التشخيص وخطة العمل."""
     rtl = (lang == 'ar')
     if rtl and not FONT_PATH.exists():
-        raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
+        raise FileNotFoundError(
+            f"ملف الخط غير موجود: {FONT_PATH.name}. ارفع أحد الخطوط المدعومة "
+            "إلى جذر المستودع.")
 
     T = PDF_TXT[lang]
     S = SECTION_TXT[lang]
@@ -2174,9 +2206,16 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
             t = t.replace(a, b)
         return t.encode('latin-1', 'replace').decode('latin-1')
 
-    fmt = shape_ar if rtl else _latin
+    use_shaping = rtl and HAS_SHAPING
+    fmt = (lambda t: str(t)) if use_shaping else (shape_ar if rtl else _latin)
+    if not rtl:
+        fmt = _latin
     ALIGN = "R" if rtl else "L"
-    FONT = "Amiri" if rtl else "Helvetica"
+    FONT = AR_FONT_NAME if rtl else "Helvetica"
+    has_bold = bool(FONT_BOLD_PATH) if rtl else True
+
+    def BOLD():
+        return "B" if has_bold else ""
     clean_domain = urlparse(domain).netloc or domain
     logo_exists = LOGO_PATH.exists()
     M = 18                      # الهامش
@@ -2204,7 +2243,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
             self.set_font(FONT, "", 8)
             self.set_text_color(*C_MUTED)
             self.cell(W / 2, 8, "anasrashed.com", align="L" if rtl else "R")
-            self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no(), b='{nb}')),
+            self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no())),
                       align="R" if rtl else "L")
 
         # ---------- أدوات الرسم ----------
@@ -2252,7 +2291,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
             self.set_text_color(255, 255, 255)
             self.set_xy(bx, y + 0.6)
             self.cell(box, box - 1, str(num), align="C")
-            self.set_font(FONT, "", 15)
+            self.set_font(FONT, BOLD(), 15)
             self.set_text_color(*C_INK)
             tw = W - box - 4
             self.set_xy(M if rtl else M + box + 4, y + 0.4)
@@ -2264,7 +2303,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
         def table(self, rows):
             """جدول نتائج: عمود العنصر وعمود النتيجة بلون دلالي."""
             wv, wl = 52, W - 52
-            self.set_font(FONT, "", 9.5)
+            self.set_font(FONT, BOLD(), 9.5)
             self.set_fill_color(*C_INK)
             self.set_text_color(255, 255, 255)
             self.set_x(M)
@@ -2313,7 +2352,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
                 self.rect(210 - M - 2.2, y, 2.2, h, 'F')
             else:
                 self.rect(M, y, 2.2, h, 'F')
-            self.set_font(FONT, "", 9.5)
+            self.set_font(FONT, BOLD(), 9.5)
             self.set_text_color(*C_INK)
             self.set_xy(M + 7, y + 3.5)
             self.cell(W - 14, 5, fmt(T['impact']), ln=True, align=ALIGN)
@@ -2329,7 +2368,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
         def mini(self, x, y, w, value, label, color=C_INK):
             self.set_fill_color(*C_BG)
             self.rect(x, y, w, 20, 'F')
-            self.set_font(FONT, "", 15)
+            self.set_font(FONT, BOLD(), 15)
             self.set_text_color(*color)
             self.set_xy(x, y + 3)
             self.cell(w, 8, fmt(value), align="C")
@@ -2339,9 +2378,12 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
             self.cell(w, 5, fmt(label), align="C")
 
     pdf = Report()
-    pdf.alias_nb_pages()
     if rtl:
-        pdf.add_font("Amiri", "", str(FONT_PATH))
+        pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
+        if FONT_BOLD_PATH:
+            pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
+        if use_shaping:
+            pdf.set_text_shaping(True, direction="rtl")
     pdf.set_auto_page_break(True, margin=22)
 
     # ======================= الغلاف =======================
@@ -2355,7 +2397,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     pdf.set_draw_color(*C_LINE)
     pdf.line(M + 55, 46, 210 - M - 55, 46)
 
-    pdf.set_font(FONT, "", 23)
+    pdf.set_font(FONT, BOLD(), 23)
     pdf.set_text_color(*C_INK)
     pdf.cell(0, 12, fmt(T['title']), ln=True, align="C")
     pdf.set_font(FONT, "", 11)
@@ -2369,7 +2411,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     pdf.rect(M, y, W, 44, 'F')
     pdf.set_fill_color(*verdict_rgb)
     pdf.rect(M, y, W, 1.6, 'F')
-    pdf.set_font(FONT, "", 40)
+    pdf.set_font(FONT, BOLD(), 40)
     pdf.set_text_color(*verdict_rgb)
     pdf.set_xy(M, y + 7)
     pdf.cell(W, 18, f"{score}%", align="C")
@@ -2490,7 +2532,8 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     ok_d = tot - stats['bad_descs']
     pdf.table([
         ('عناوين ضمن الطول المثالي (50-60)' if rtl else
-         'Titles within optimal length (50-60)', f"{ok_t} / {tot}",
+         'Titles within optimal length (50-60)',
+         (f"{ok_t} من {tot}" if rtl else f"{ok_t} of {tot}"),
          'ok' if ok_t / tot > 0.7 else 'warn'),
         ('عناوين تحتاج إصلاحاً عاجلاً' if rtl else 'Titles needing urgent work',
          f"{stats.get('critical_titles', 0)} {T['u_title']}",
@@ -2506,7 +2549,8 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
          f"{stats.get('title_dup', 0)} {T['u_page']}",
          'warn' if stats.get('title_dup') else 'ok'),
         ('أوصاف ضمن الطول المثالي (120-150)' if rtl else
-         'Descriptions within optimal length (120-150)', f"{ok_d} / {tot}",
+         'Descriptions within optimal length (120-150)',
+         (f"{ok_d} من {tot}" if rtl else f"{ok_d} of {tot}"),
          'ok' if ok_d / tot > 0.7 else 'warn'),
         ('أوصاف تحتاج إصلاحاً عاجلاً' if rtl else 'Descriptions needing urgent work',
          f"{stats.get('critical_descs', 0)} {T['u_desc']}",
@@ -2523,7 +2567,8 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     pdf.section(n, 'urls')
     good_u = max(tot - stats.get('url_bad', 0), 0)
     pdf.table([
-        ('روابط سليمة الصياغة' if rtl else 'Well-formed URLs', f"{good_u} / {tot}",
+        ('روابط سليمة الصياغة' if rtl else 'Well-formed URLs',
+         (f"{good_u} من {tot}" if rtl else f"{good_u} of {tot}"),
          'ok' if good_u / tot > 0.8 else 'warn'),
         ('منتجات مستنسخة من منتج واحد' if rtl else 'Cloned products',
          f"{stats.get('url_clone', 0)} {T['u_product']}",
@@ -2725,6 +2770,12 @@ with st.sidebar:
                                 help="يلتقط المنتجات في الصفحات التالية من كل قسم.")
     do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True,
                                    help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
+    do_speed = st.checkbox("قياس سرعة الموقع", value=True,
+                           help="عبر PageSpeed Insights من جوجل. يضيف نحو دقيقة "
+                                "لكل فحص، ويُتخطى تلقائياً عند تعذّر الاتصال.")
+    psi_key = st.text_input("مفتاح PageSpeed (اختياري)", type="password",
+                            help="بدون مفتاح تعمل الخدمة بحصة محدودة. أنشئ مفتاحاً "
+                                 "مجانياً من Google Cloud Console عند الحاجة.")
     st.markdown("---")
     st.caption("الأداة معايرة على منصات سلة وزد وشوبيفاي.")
 
