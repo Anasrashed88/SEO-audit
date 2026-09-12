@@ -941,18 +941,60 @@ URL_MAX_PATH = 90
 
 URL_LABEL = {
     'ar': {'u_ok': 'سليم', 'u_clone': 'منتج مستنسخ', 'u_generic': 'رقم أو رمز بلا كلمات',
+           'u_wrongname': 'يشير لمنتج آخر',
            'u_underscore': 'شرطة سفلية بدل الواصلة', 'u_uppercase': 'حروف كبيرة',
            'u_long': 'طويل جداً', 'u_repeat': 'كلمة مكررة داخل الرابط',
            'u_wordy': 'كلمات كثيرة', 'u_na': '—'},
     'en': {'u_ok': 'Sound', 'u_clone': 'Cloned product', 'u_generic': 'ID or code, no words',
+           'u_wrongname': 'Points to a different product',
            'u_underscore': 'Underscores instead of hyphens', 'u_uppercase': 'Uppercase letters',
            'u_long': 'Too long', 'u_repeat': 'Repeated word in slug',
            'u_wordy': 'Too many words', 'u_na': '—'},
 }
 URL_CREDIT = {'u_ok': 1.0, 'u_underscore': 0.95, 'u_uppercase': 0.95, 'u_repeat': 0.95,
-              'u_wordy': 0.93, 'u_long': 0.90, 'u_generic': 0.80, 'u_clone': 0.70,
-              'u_na': 1.0}
+              'u_wordy': 0.93, 'u_long': 0.90, 'u_generic': 0.80, 'u_wrongname': 0.65,
+              'u_clone': 0.70, 'u_na': 1.0}
 URL_MAX_WORDS = 9
+
+
+def slug_tokens(text):
+    """كلمات الرابط أو الاسم بعد التطبيع، مع تجاهل الحروف المفردة."""
+    raw = re.split(r'[\s\-_/|،,.:؛…]+', str(text or '').lower())
+    out = []
+    for t in raw:
+        t = re.sub(r'[^0-9a-z\u0600-\u06FF]', '', t)
+        if len(t) < 2:
+            continue
+        out.append(normalize_ar_token(t) if re.search(r'[\u0600-\u06FF]', t) else t)
+    return out
+
+
+def script_of(text):
+    ar = len(re.findall(r'[\u0600-\u06FF]', str(text or '')))
+    la = len(re.findall(r'[A-Za-z]', str(text or '')))
+    if ar and not la:
+        return 'ar'
+    if la and not ar:
+        return 'la'
+    if ar or la:
+        return 'ar' if ar >= la else 'la'
+    return ''
+
+
+def build_generic_vocab(names, threshold=0.22):
+    """الكلمات الشائعة في أسماء المتجر (بوكس، علبة، عود...) ليست مميِّزة."""
+    from collections import Counter
+    c = Counter()
+    n = 0
+    for nm in names:
+        toks = set(slug_tokens(nm))
+        if toks:
+            n += 1
+            c.update(toks)
+    if n < 5:
+        return set()
+    return {t for t, k in c.items() if k / n >= threshold}
+
 
 def slug_of(url):
     path = unquote(urlparse(clean_url(url)).path)
@@ -977,6 +1019,12 @@ def analyze_url_quality(df, brand=''):
     out = df.copy()
     out['المسار'] = out['الرابط'].map(slug_of)
     known = {url_key(u) for u in out['الرابط']}
+
+    # الكلمات الشائعة في أسماء منتجات هذا المتجر تحديداً
+    prod_names = out.loc[out['نوع الصفحة'] == T_PRODUCT, 'اسم المنتج المعروض'] \
+        if 'اسم المنتج المعروض' in out.columns else []
+    generic_vocab = build_generic_vocab(list(prod_names)) if len(prod_names) else set()
+    brand_tokens = set(slug_tokens(brand))
 
     def grade(row):
         if not row['متاحة']:
@@ -1015,6 +1063,18 @@ def analyze_url_quality(df, brand=''):
             return 'u_repeat'
         if len(words) > URL_MAX_WORDS:
             return 'u_wordy'
+
+        # 4) هل يشير الرابط لمنتج مختلف عن المعروض في الصفحة؟
+        name = str(row.get('اسم المنتج المعروض') or '').strip()
+        if name and row.get('نوع الصفحة') == T_PRODUCT:
+            s_tok = [t for t in slug_tokens(slug) if not t.isdigit()]
+            n_tok = set(slug_tokens(name)) - brand_tokens
+            # تُقارن الكلمات فقط عند اتفاق الأبجدية: الرابط قد يكون نقلاً صوتياً
+            if s_tok and n_tok and script_of(slug) == script_of(name):
+                distinctive = [t for t in s_tok
+                               if t not in generic_vocab and t not in brand_tokens]
+                if distinctive and not (set(distinctive) & n_tok):
+                    return 'u_wrongname'
         return 'u_ok'
 
     out['جودة الرابط'] = out.apply(grade, axis=1)
@@ -1379,6 +1439,8 @@ def compute_summary(df, coverage=None, images_df=None):
         if 'جودة الوصف' in ok.columns else 0,
         'url_clone': int((ok['جودة الرابط'] == 'u_clone').sum())
         if 'جودة الرابط' in ok.columns else 0,
+        'url_wrongname': int((ok['جودة الرابط'] == 'u_wrongname').sum())
+        if 'جودة الرابط' in ok.columns else 0,
         'url_style': int(ok['جودة الرابط'].isin(
             ['u_underscore', 'u_uppercase', 'u_long', 'u_repeat', 'u_wordy']).sum())
         if 'جودة الرابط' in ok.columns else 0,
@@ -1555,6 +1617,24 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None)
         else:
             add(CHECK_PASS, "سلامة العناوين", "لا توجد عناوين رمزية أو قيم قوالب.")
 
+    # 6ج) مطابقة الرابط لاسم المنتج
+    prod = ok[ok['نوع الصفحة'] == T_PRODUCT] if n_ok else ok
+    if len(prod) >= 5 and 'جودة الرابط' in prod.columns:
+        wrong = int((prod['جودة الرابط'] == 'u_wrongname').sum())
+        noname = int((prod['اسم المنتج المعروض'].astype(str).str.strip() == '').sum()) \
+            if 'اسم المنتج المعروض' in prod.columns else 0
+        if noname == len(prod):
+            add(CHECK_WARN, "قراءة اسم المنتج",
+                "تعذّرت قراءة اسم المنتج من أي صفحة، فلم تُفحص مطابقة الروابط.",
+                "قالب المتجر لا يستخدم وسم H1 للاسم.")
+        elif wrong / len(prod) > 0.5:
+            add(CHECK_WARN, "مطابقة الروابط",
+                f"{wrong} رابط من {len(prod)} يحمل اسماً مختلفاً — نسبة مرتفعة.",
+                "افتح عيّنة وتأكد أن الأمر واقع فعلي لا خطأ في قراءة الاسم.")
+        else:
+            add(CHECK_PASS, "مطابقة الروابط",
+                f"{len(prod) - wrong} رابط من {len(prod)} يطابق اسم منتجه.")
+
     # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
     if n_ok:
         thin = summary.get('thin_pages', 0) / n_ok * 100
@@ -1621,6 +1701,7 @@ PDF_TXT = {
         'r_url_ok': 'روابط سليمة الصياغة ومطابقة لاسم المنتج',
         'r_url_clone': 'منتجات مستنسخة برابط يحمل بادئة النسخ',
         'r_dup_content': 'صفحات بنفس العنوان والوصف حرفياً',
+        'r_url_wrong': 'روابط تحمل اسم منتج مختلف عن المعروض',
         'r_url_style': 'روابط بصياغة غير مثالية: شرطة سفلية أو طول مفرط',
         'r_url_generic': 'روابط بأرقام أو رموز بلا كلمات',
         'r_formats': 'صيغ الصور المستخدمة',
@@ -1672,6 +1753,7 @@ PDF_TXT = {
         'r_url_ok': 'URLs well-formed and matching the product name',
         'r_url_clone': 'Cloned products (copy-of URL pattern)',
         'r_dup_content': 'Pages with identical title and description',
+        'r_url_wrong': 'URLs naming a different product than displayed',
         'r_url_style': 'URLs with imperfect formatting',
         'r_url_generic': 'URLs made of numbers or codes with no words',
         'r_formats': 'Image formats in use',
@@ -1774,6 +1856,10 @@ def build_diagnosis(score, stats, lang):
         if stats.get('dup_content'):
             points.append(f"{stats['dup_content']} صفحة تتشارك نفس العنوان والوصف "
                           "حرفياً، فتُعدّ محتوى مكرراً ويختار جوجل واحدة ويتجاهل الباقي.")
+        if stats.get('url_wrongname'):
+            points.append(f"{stats['url_wrongname']} رابط يحمل اسم منتج مختلف عن المنتج "
+                          "المعروض في الصفحة، غالباً لأن المنتج نُسخ ثم غُيّر اسمه دون "
+                          "تحديث الرابط. الزبون يصل لصفحة لا تطابق ما نقر عليه.")
         if stats.get('url_style'):
             points.append(f"{stats['url_style']} رابط بصياغة غير مثالية: شرطة سفلية "
                           "أو حروف كبيرة أو طول مفرط أو تكرار كلمة داخل الرابط.")
@@ -1857,6 +1943,10 @@ def build_diagnosis(score, stats, lang):
     if stats.get('dup_content'):
         points.append(f"{stats['dup_content']} pages share an identical title and "
                       "description, counting as duplicate content.")
+    if stats.get('url_wrongname'):
+        points.append(f"{stats['url_wrongname']} URLs carry a different product name than "
+                      "the page displays, usually because a product was cloned and "
+                      "renamed without updating its URL.")
     if stats.get('url_style'):
         points.append(f"{stats['url_style']} URLs have imperfect formatting: underscores, "
                       "uppercase letters, excessive length, or a repeated word.")
@@ -2027,6 +2117,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         (T['r_url_ok'], f"{max(stats['total_pages'] - stats.get('broken_pages', 0) - stats.get('url_bad', 0), 0)} / {max(stats['total_pages'] - stats.get('broken_pages', 0), 1)}"),
         (T['r_url_clone'], f"{stats.get('url_clone', 0)} {T['u_product']}"),
         (T['r_dup_content'], f"{stats.get('dup_content', 0)} {T['u_page']}"),
+        (T['r_url_wrong'], f"{stats.get('url_wrongname', 0)} {T['u_link']}"),
         (T['r_url_style'], f"{stats.get('url_style', 0)} {T['u_link']}"),
         (T['r_url_generic'], f"{stats.get('url_generic', 0)} {T['u_link']}"),
     ])
@@ -2439,14 +2530,16 @@ if nav == "🔍 فحص متجر جديد":
             if 'جودة الرابط' in ok.columns:
                 uc = ok['جودة الرابط'].value_counts()
                 items = [(UL[k], int(uc.get(k, 0))) for k in
-                         ['u_ok', 'u_underscore', 'u_uppercase', 'u_repeat',
-                          'u_wordy', 'u_long', 'u_generic', 'u_clone'] if uc.get(k, 0)]
+                         ['u_ok', 'u_underscore', 'u_uppercase', 'u_repeat', 'u_wordy',
+                          'u_long', 'u_generic', 'u_wrongname', 'u_clone']
+                         if uc.get(k, 0)]
                 if len(items) > 1:
                     st.markdown(bar_chart("جودة روابط الصفحات", items, {
                         UL['u_ok']: COLOR['ok'], UL['u_underscore']: COLOR['warn'],
                         UL['u_uppercase']: COLOR['warn'], UL['u_repeat']: COLOR['warn'],
                         UL['u_wordy']: COLOR['warn'], UL['u_long']: COLOR['warn'],
-                        UL['u_generic']: COLOR['bad'], UL['u_clone']: COLOR['bad']}),
+                        UL['u_generic']: COLOR['bad'], UL['u_wrongname']: COLOR['bad'],
+                        UL['u_clone']: COLOR['bad']}),
                         unsafe_allow_html=True)
             if summary.get('img_formats'):
                 items = [(k.upper(), v) for k, v in
@@ -2471,6 +2564,10 @@ if nav == "🔍 فحص متجر جديد":
             if summary.get('dup_content'):
                 out.append((f"<b>{summary['dup_content']}</b> صفحة بنفس العنوان والوصف "
                             "حرفياً — محتوى مكرر يختار جوجل منه واحدة فقط.", 'bad'))
+            if summary.get('url_wrongname'):
+                out.append((f"<b>{summary['url_wrongname']}</b> رابط يحمل اسم منتج مختلف "
+                            "عن المعروض في الصفحة — الزبون ينقر على منتج ويصل لآخر.",
+                            'bad'))
             if summary.get('url_style'):
                 out.append((f"<b>{summary['url_style']}</b> رابط بصياغة غير مثالية — "
                             "شرطة سفلية أو حروف كبيرة أو طول مفرط.", 'warn'))
