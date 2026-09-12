@@ -150,47 +150,34 @@ for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
 #  التنسيق
 # ==============================================================
 st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-html, body, [class*="css"] { font-family:'Tajawal', 'Segoe UI', Tahoma, sans-serif; }
+@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap');
+html, body, [class*="css"] { font-family:'Tajawal','Segoe UI',Tahoma,sans-serif; }
 .main .block-container { direction:rtl; text-align:right; padding-top:1.2rem; max-width:1500px; }
 h1,h2,h3,h4,h5,p,span,div,label { text-align:right; }
 section[data-testid="stSidebar"] { direction:rtl; text-align:right; background:#0f172a; }
 section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
-
-.brandbar { display:flex; align-items:center; justify-content:space-between;
-  border-bottom:2px solid #0f172a; padding:0 0 14px 0; margin-bottom:22px; }
+.brandbar { display:flex; align-items:center; justify-content:space-between; border-bottom:2px solid #0f172a; padding:0 0 14px 0; margin-bottom:22px; }
 .brandbar .name { font-size:24px; font-weight:700; color:#0f172a; line-height:1.2; }
 .brandbar .role { font-size:13px; color:#64748b; }
-.brandbar .tool  { font-size:13px; color:#64748b; text-align:left; }
-
-.hero { border:1px solid #e2e8f0; border-radius:14px; padding:22px 26px;
-  background:#f8fafc; display:flex; align-items:center; justify-content:space-between;
-  margin-bottom:18px; }
+.brandbar .tool { font-size:13px; color:#64748b; text-align:left; }
+.hero { border:1px solid #e2e8f0; border-radius:14px; padding:22px 26px; background:#f8fafc; display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
 .hero .score { font-size:46px; font-weight:700; line-height:1; }
 .hero .scorelbl { font-size:13px; color:#64748b; margin-top:6px; }
 .hero .store { font-size:17px; font-weight:500; color:#0f172a; text-align:left; }
 .hero .plat { font-size:12px; color:#64748b; text-align:left; margin-top:4px; }
-
-.mcard { border:1px solid #e2e8f0; border-radius:12px; padding:14px 10px;
-  text-align:center; background:#fff; height:100%; }
+.mcard { border:1px solid #e2e8f0; border-radius:12px; padding:14px 10px; text-align:center; background:#fff; height:100%; }
 .mcard .v { font-size:26px; font-weight:700; line-height:1.1; }
 .mcard .l { font-size:12px; color:#64748b; margin-top:4px; }
-
-.chart-card { border:1px solid #e2e8f0; border-radius:12px; padding:16px 18px;
-  background:#fff; margin-bottom:14px; }
+.chart-card { border:1px solid #e2e8f0; border-radius:12px; padding:16px 18px; background:#fff; margin-bottom:14px; }
 .chart-title { font-size:14px; font-weight:700; color:#0f172a; margin-bottom:12px; }
 .bar-row { display:flex; align-items:center; gap:10px; margin-bottom:7px; }
 .bar-label { flex:0 0 150px; font-size:12.5px; color:#334155; }
 .bar-track { flex:1; height:9px; background:#f1f5f9; border-radius:5px; overflow:hidden; }
-.bar-fill  { height:100%; border-radius:5px; }
+.bar-fill { height:100%; border-radius:5px; }
 .bar-value { flex:0 0 46px; font-size:12px; color:#475569; text-align:left; }
-
-.finding { border-right:4px solid; border-radius:8px; padding:11px 14px; margin-bottom:9px;
-  background:#fff; border-top:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0;
-  border-left:1px solid #e2e8f0; font-size:13.5px; color:#334155; }
+.finding { border-right:4px solid; border-radius:8px; padding:11px 14px; margin-bottom:9px; background:#fff; border-top:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0; border-left:1px solid #e2e8f0; font-size:13.5px; color:#334155; }
 .finding b { color:#0f172a; }
-
 .stTabs [data-baseweb="tab-list"] { gap:4px; direction:rtl; }
 .stTabs [data-baseweb="tab"] { font-size:14px; font-weight:500; padding:8px 16px; }
 div[data-testid="stDataFrame"] { direction:ltr; }
@@ -209,11 +196,13 @@ def logo_data_uri():
 def render_brandbar():
     logo = logo_data_uri()
     img = f'<img src="{logo}" style="height:40px">' if logo else ''
-    st.markdown(f"""<div class="brandbar">
-      <div><div class="name">أنس راشد</div><div class="role">خبير تحسين محركات البحث</div></div>
-      <div style="display:flex;align-items:center;gap:18px">
-        <div class="tool">مركز عمليات السيو<br>anasrashed.com</div>{img}
-      </div></div>""", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="brandbar">'
+        f'<div><div class="name">أنس راشد</div>'
+        f'<div class="role">خبير تحسين محركات البحث</div></div>'
+        f'<div style="display:flex;align-items:center;gap:18px">'
+        f'<div class="tool">مركز عمليات السيو<br>anasrashed.com</div>{img}</div></div>',
+        unsafe_allow_html=True)
 
 
 def metric_card(value, label, color=COLOR['accent']):
@@ -1658,12 +1647,14 @@ if nav == "🔍 فحص متجر جديد":
         sc = summary['score']
         sc_color = COLOR['bad'] if sc < 60 else COLOR['warn'] if sc < 80 else COLOR['ok']
         plat_txt = PLATFORM_LABEL.get(platform, '—')
-        st.markdown(f"""<div class="hero">
-          <div><div class="score" style="color:{sc_color}">{sc}%</div>
-               <div class="scorelbl">درجة التوافق مع محركات البحث</div></div>
-          <div><div class="store">{urlparse(st.session_state.current_url).netloc}</div>
-               <div class="plat">المنصة: {plat_txt} · {datetime.now().strftime('%Y-%m-%d')}</div>
-          </div></div>""", unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="hero">'
+            f'<div><div class="score" style="color:{sc_color}">{sc}%</div>'
+            f'<div class="scorelbl">درجة التوافق مع محركات البحث</div></div>'
+            f'<div><div class="store">{urlparse(st.session_state.current_url).netloc}</div>'
+            f'<div class="plat">المنصة: {plat_txt} · '
+            f'{datetime.now().strftime("%Y-%m-%d")}</div></div></div>',
+            unsafe_allow_html=True)
 
         if platform not in SUPPORTED_PLATFORMS:
             st.warning("لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. الأداة معايرة "
