@@ -20,13 +20,14 @@ from bidi.algorithm import get_display
 
 # ==============================================================
 #  مركز عمليات السيو الشامل للمتاجر الإلكترونية
-#  أنس راشد - anasrashed.com
+#  أنس راشد — anasrashed.com
 #
 #  مبدأ الفحص: يبدأ من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه
 #  الزائر. لا تدخل التقرير أي صفحة لا يمكن للزائر الوصول إليها.
 # ==============================================================
 
-st.set_page_config(page_title="مركز عمليات السيو | أنس راشد", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="مركز عمليات السيو | أنس راشد",
+                   layout="wide", page_icon="🚀", initial_sidebar_state="expanded")
 
 BASE_DIR = Path(__file__).parent
 FONT_PATH = BASE_DIR / "Amiri-Regular.ttf"
@@ -42,6 +43,7 @@ except Exception:
 MAX_PAGES_DEFAULT = 1500
 MAX_PAGINATION_DEPTH = 40
 MAX_CRAWL_LEVELS = 8
+MAX_REDIRECT_CHECKS = 300
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -50,7 +52,6 @@ HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 }
 
-# مفاتيح ثابتة لأنواع الصفحات (مستقلة عن لغة العرض)
 T_HOME, T_PRODUCT, T_CATEGORY = 'home', 'product', 'category'
 T_BLOG, T_INFO, T_UNKNOWN, T_BROKEN = 'blog', 'info', 'unknown', 'broken'
 PAGE_TYPE_ORDER = [T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_UNKNOWN, T_BROKEN]
@@ -69,39 +70,48 @@ STATUS_LABEL = {
         'missing': 'مفقود', 'very_short': 'قصير جداً', 'acceptable': 'مقبول',
         'optimal': 'مثالي', 'long': 'طويل', 'failed': 'تعذر الفحص',
         'good': 'جيد', 'thin': 'ضعيف جداً', 'na': 'غير متاح',
-        'alt_missing': 'مفقود', 'alt_weak': 'غير وصفي', 'alt_short': 'قصير',
-        'alt_optimal': 'مثالي', 'alt_long': 'طويل', 'alt_empty': 'لا يوجد (فارغ)',
+        'alt_missing': 'مفقود', 'alt_generic': 'غير وصفي', 'alt_stuffed': 'حشو كلمات',
+        'alt_long': 'يتجاوز 125 حرفاً', 'alt_duplicate': 'مكرر على عدة صور',
+        'alt_ok': 'سليم', 'alt_empty': 'لا يوجد (فارغ)',
         'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
     },
     'en': {
         'missing': 'Missing', 'very_short': 'Too short', 'acceptable': 'Acceptable',
         'optimal': 'Optimal', 'long': 'Too long', 'failed': 'Scan failed',
         'good': 'Good', 'thin': 'Thin content', 'na': 'N/A',
-        'alt_missing': 'Missing', 'alt_weak': 'Not descriptive', 'alt_short': 'Too short',
-        'alt_optimal': 'Optimal', 'alt_long': 'Too long', 'alt_empty': '(empty)',
+        'alt_missing': 'Missing', 'alt_generic': 'Not descriptive',
+        'alt_stuffed': 'Keyword stuffed', 'alt_long': 'Over 125 characters',
+        'alt_duplicate': 'Duplicated across images', 'alt_ok': 'Good',
+        'alt_empty': '(empty)',
         'canon_same': 'Self-referencing', 'canon_diff': 'Differs from page URL',
         'canon_missing': 'Missing',
     },
 }
 
-# حدود الطول وفق أفضل ممارسات محركات البحث (تُحسب بالحروف شاملة المسافات وعلامات الترقيم)
+# حدود الطول وفق أفضل ممارسات محركات البحث
+# (تُحسب بالحروف شاملة المسافات وعلامات الترقيم كافة)
 TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
 DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
-ALT_MAX, ALT_MIN_OPTIMAL, ALT_MIN_OK = 125, 25, 10
+ALT_MAX = 125                 # حد قارئات الشاشة العملي
+ALT_DUP_THRESHOLD = 3         # نفس النص على 3 صور أو أكثر يُعدّ تكراراً
 
 COL_EN = {
     'نوع الصفحة': 'Page Type', 'الرابط': 'URL', 'الرابط الكانوني': 'Canonical URL',
     'مصدر الاكتشاف': 'Discovered Via', 'متاحة': 'Reachable', 'كود الاستجابة': 'Status Code',
-    'درجة السيو': 'SEO Score', 'عنوان الميتا': 'Meta Title', 'حالة العنوان': 'Title Status',
-    'وصف الميتا': 'Meta Description', 'حالة الوصف': 'Description Status',
+    'درجة السيو': 'SEO Score', 'عنوان الميتا': 'Meta Title', 'طول العنوان': 'Title Length',
+    'حالة العنوان': 'Title Status', 'وصف الميتا': 'Meta Description',
+    'طول الوصف': 'Description Length', 'حالة الوصف': 'Description Status',
     'إجمالي الصور': 'Total Images', 'صور بدون Alt': 'Images Missing Alt',
-    'عدد الكلمات': 'Word Count', 'حالة المحتوى': 'Content Status', 'لغة الصفحة': 'Page Language',
-    'رابط الصفحة': 'Page URL', 'رابط الصورة': 'Image URL',
-    'النص البديل الحالي (Alt)': 'Current Alt Text', 'حالة النص البديل': 'Alt Status',
-    'طول العنوان': 'Title Length', 'طول الوصف': 'Description Length',
-    'طول النص البديل': 'Alt Length', 'صور Alt غير مطابق': 'Images With Weak Alt',
-    'حالة الكانونيكال': 'Canonical Status',
+    'صور Alt ضعيف': 'Images With Weak Alt', 'عدد الكلمات': 'Word Count',
+    'حالة المحتوى': 'Content Status', 'لغة الصفحة': 'Page Language',
+    'حالة الكانونيكال': 'Canonical Status', 'رابط الصفحة': 'Page URL',
+    'رابط الصورة': 'Image URL', 'النص البديل الحالي (Alt)': 'Current Alt Text',
+    'طول النص البديل': 'Alt Length', 'حالة النص البديل': 'Alt Status',
+    'الوجهة النهائية': 'Final Destination',
 }
+
+COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
+         'accent': '#0f172a', 'muted': '#94a3b8'}
 
 
 # ==============================================================
@@ -114,12 +124,14 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         domain TEXT, scan_date TEXT, score REAL, total_pages INTEGER,
         products_count INTEGER, categories_count INTEGER, info_pages_count INTEGER,
-        blog_pages_count INTEGER, data_json TEXT, images_json TEXT, coverage_json TEXT
+        blog_pages_count INTEGER, data_json TEXT, images_json TEXT,
+        coverage_json TEXT, platform TEXT
     )''')
     c.execute("PRAGMA table_info(audits)")
     existing = {row[1] for row in c.fetchall()}
     for col, coltype in [("blog_pages_count", "INTEGER DEFAULT 0"),
-                         ("images_json", "TEXT"), ("coverage_json", "TEXT")]:
+                         ("images_json", "TEXT"), ("coverage_json", "TEXT"),
+                         ("platform", "TEXT")]:
         if col not in existing:
             c.execute(f"ALTER TABLE audits ADD COLUMN {col} {coltype}")
     conn.commit()
@@ -129,20 +141,101 @@ def init_db():
 init_db()
 
 for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
-                     ('current_url', ""), ('coverage', None), ('report_lang', 'ar')]:
+                     ('current_url', ""), ('coverage', None), ('platform', 'unknown')]:
     if key not in st.session_state:
         st.session_state[key] = default
 
+
+# ==============================================================
+#  التنسيق
+# ==============================================================
 st.markdown("""
-    <style>
-    .main { direction: rtl; text-align: right; }
-    h1, h2, h3, h4, p, span, div { text-align: right; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    .metric-card { background-color:#1e293b; border:1px solid #334155; border-radius:10px;
-                   padding:12px; text-align:center; margin-bottom:10px; }
-    .metric-value { font-size:24px; font-weight:bold; color:#38bdf8; }
-    .metric-label { font-size:13px; color:#94a3b8; }
-    </style>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+html, body, [class*="css"] { font-family:'Tajawal', 'Segoe UI', Tahoma, sans-serif; }
+.main .block-container { direction:rtl; text-align:right; padding-top:1.2rem; max-width:1500px; }
+h1,h2,h3,h4,h5,p,span,div,label { text-align:right; }
+section[data-testid="stSidebar"] { direction:rtl; text-align:right; background:#0f172a; }
+section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
+
+.brandbar { display:flex; align-items:center; justify-content:space-between;
+  border-bottom:2px solid #0f172a; padding:0 0 14px 0; margin-bottom:22px; }
+.brandbar .name { font-size:24px; font-weight:700; color:#0f172a; line-height:1.2; }
+.brandbar .role { font-size:13px; color:#64748b; }
+.brandbar .tool  { font-size:13px; color:#64748b; text-align:left; }
+
+.hero { border:1px solid #e2e8f0; border-radius:14px; padding:22px 26px;
+  background:#f8fafc; display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:18px; }
+.hero .score { font-size:46px; font-weight:700; line-height:1; }
+.hero .scorelbl { font-size:13px; color:#64748b; margin-top:6px; }
+.hero .store { font-size:17px; font-weight:500; color:#0f172a; text-align:left; }
+.hero .plat { font-size:12px; color:#64748b; text-align:left; margin-top:4px; }
+
+.mcard { border:1px solid #e2e8f0; border-radius:12px; padding:14px 10px;
+  text-align:center; background:#fff; height:100%; }
+.mcard .v { font-size:26px; font-weight:700; line-height:1.1; }
+.mcard .l { font-size:12px; color:#64748b; margin-top:4px; }
+
+.chart-card { border:1px solid #e2e8f0; border-radius:12px; padding:16px 18px;
+  background:#fff; margin-bottom:14px; }
+.chart-title { font-size:14px; font-weight:700; color:#0f172a; margin-bottom:12px; }
+.bar-row { display:flex; align-items:center; gap:10px; margin-bottom:7px; }
+.bar-label { flex:0 0 150px; font-size:12.5px; color:#334155; }
+.bar-track { flex:1; height:9px; background:#f1f5f9; border-radius:5px; overflow:hidden; }
+.bar-fill  { height:100%; border-radius:5px; }
+.bar-value { flex:0 0 46px; font-size:12px; color:#475569; text-align:left; }
+
+.finding { border-right:4px solid; border-radius:8px; padding:11px 14px; margin-bottom:9px;
+  background:#fff; border-top:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0;
+  border-left:1px solid #e2e8f0; font-size:13.5px; color:#334155; }
+.finding b { color:#0f172a; }
+
+.stTabs [data-baseweb="tab-list"] { gap:4px; direction:rtl; }
+.stTabs [data-baseweb="tab"] { font-size:14px; font-weight:500; padding:8px 16px; }
+div[data-testid="stDataFrame"] { direction:ltr; }
+</style>
 """, unsafe_allow_html=True)
+
+
+def logo_data_uri():
+    try:
+        import base64
+        return "data:image/png;base64," + base64.b64encode(LOGO_PATH.read_bytes()).decode()
+    except Exception:
+        return ""
+
+
+def render_brandbar():
+    logo = logo_data_uri()
+    img = f'<img src="{logo}" style="height:40px">' if logo else ''
+    st.markdown(f"""<div class="brandbar">
+      <div><div class="name">أنس راشد</div><div class="role">خبير تحسين محركات البحث</div></div>
+      <div style="display:flex;align-items:center;gap:18px">
+        <div class="tool">مركز عمليات السيو<br>anasrashed.com</div>{img}
+      </div></div>""", unsafe_allow_html=True)
+
+
+def metric_card(value, label, color=COLOR['accent']):
+    return (f'<div class="mcard"><div class="v" style="color:{color}">{value}</div>'
+            f'<div class="l">{label}</div></div>')
+
+
+def bar_chart(title, items, colors=None):
+    total = sum(v for _, v in items) or 1
+    rows = ""
+    for label, val in items:
+        pct = val / total * 100
+        c = (colors or {}).get(label, COLOR['neutral'])
+        rows += (f'<div class="bar-row"><div class="bar-label">{label}</div>'
+                 f'<div class="bar-track"><div class="bar-fill" '
+                 f'style="width:{pct:.1f}%;background:{c}"></div></div>'
+                 f'<div class="bar-value">{val}</div></div>')
+    return f'<div class="chart-card"><div class="chart-title">{title}</div>{rows}</div>'
+
+
+def finding(text, level='warn'):
+    return f'<div class="finding" style="border-right-color:{COLOR[level]}">{text}</div>'
 
 
 # ==============================================================
@@ -176,81 +269,6 @@ def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
 
-# ==============================================================
-#  قياس الأطوال وتقييمها
-# ==============================================================
-def text_length(text):
-    """عدد الحروف بعد توحيد المسافات — يشمل المسافات والفواصل والنقاط
-    وكل علامات الترقيم، لأن محركات البحث تحسبها ضمن المساحة المعروضة."""
-    if not text:
-        return 0
-    return len(re.sub(r'\s+', ' ', str(text)).strip())
-
-
-def grade_length(length, min_ok, min_optimal, max_len):
-    if length == 0:
-        return 'missing'
-    if length < min_ok:
-        return 'very_short'
-    if length < min_optimal:
-        return 'acceptable'
-    if length <= max_len:
-        return 'optimal'
-    return 'long'
-
-
-GENERIC_ALT = {'image', 'img', 'photo', 'picture', 'icon', 'logo', 'product',
-               'صورة', 'صوره', 'منتج', 'شعار', 'photos', 'images', 'untitled',
-               'default', 'thumbnail', 'banner', 'slide'}
-
-
-def grade_alt(alt_text):
-    """تقييم النص البديل: الحضور وحده لا يكفي — يجب أن يكون وصفياً."""
-    txt = re.sub(r'\s+', ' ', str(alt_text or '')).strip()
-    if not txt:
-        return 'alt_missing', 0
-    length = len(txt)
-    low = txt.lower()
-    # نص غير وصفي: اسم ملف، أرقام فقط، أو كلمة عامة
-    if re.search(r'\.(jpg|jpeg|png|webp|gif|svg)$', low):
-        return 'alt_weak', length
-    if re.fullmatch(r'[\d\W_]+', txt):
-        return 'alt_weak', length
-    if low in GENERIC_ALT or all(w in GENERIC_ALT for w in low.split()):
-        return 'alt_weak', length
-    if length < ALT_MIN_OK:
-        return 'alt_weak', length
-    if length < ALT_MIN_OPTIMAL:
-        return 'alt_short', length
-    if length <= ALT_MAX:
-        return 'alt_optimal', length
-    return 'alt_long', length
-
-
-# ==============================================================
-#  كشف منصة المتجر
-# ==============================================================
-PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
-                  'shopify': 'شوبيفاي (Shopify)', 'unknown': 'غير معروفة'}
-SUPPORTED_PLATFORMS = ('salla', 'zid', 'shopify')
-
-
-def detect_platform(html, headers=None, url=""):
-    """يتعرف على منصة المتجر من بصماتها في HTML والترويسات."""
-    h = (html or "")[:200000].lower()
-    hdr = " ".join(f"{k}:{v}" for k, v in (headers or {}).items()).lower()
-    blob = h + " " + hdr + " " + (url or "").lower()
-
-    if any(s in blob for s in ['salla.sa', 'cdn.salla.network', 'salla-', 'window.salla']):
-        return 'salla'
-    if any(s in blob for s in ['zid.store', 'media.zid.sa', 'zidapi', 'x-zid', 'cdn.zid']):
-        return 'zid'
-    if any(s in blob for s in ['cdn.shopify.com', 'myshopify.com', 'shopify.theme',
-                               'x-shopify', 'shopify-features']):
-        return 'shopify'
-    return 'unknown'
-
-
 def safe_get(url, timeout=12, retries=2):
     for attempt in range(retries + 1):
         try:
@@ -264,7 +282,25 @@ def safe_get(url, timeout=12, retries=2):
     return None
 
 
-# الصفحات التي لا يفحصها الزائر بحثاً عن محتوى (سلة، حساب، بحث...)
+def resolve_final_url(url, timeout=10):
+    """وجهة الرابط بعد اتباع كل عمليات التحويل، دون تحميل الصفحة كاملة."""
+    try:
+        res = requests.head(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        if res.status_code >= 400 or res.status_code == 405:
+            raise ValueError
+        return clean_url(res.url), res.status_code
+    except Exception:
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=timeout,
+                               allow_redirects=True, stream=True)
+            final = clean_url(res.url)
+            code = res.status_code
+            res.close()
+            return final, code
+        except Exception:
+            return None, None
+
+
 EXCLUDE_PATH_PARTS = [
     '/cart', '/checkout', '/login', '/signin', '/register', '/signup', '/account',
     '/my-account', '/wishlist', '/favorites', '/compare', '/search', '/orders',
@@ -291,11 +327,115 @@ def is_crawlable(url, base_netloc):
 
 
 # ==============================================================
-#  تصنيف الصفحات (يعمل على المتاجر العربية والإنجليزية)
+#  القياس والتقييم
+# ==============================================================
+def text_length(text):
+    """عدد الحروف بعد توحيد المسافات — يشمل المسافات والفواصل والنقاط
+    وكل علامات الترقيم، لأن محركات البحث تحسبها ضمن المساحة المعروضة."""
+    if not text:
+        return 0
+    return len(re.sub(r'\s+', ' ', str(text)).strip())
+
+
+def grade_length(length, min_ok, min_optimal, max_len):
+    if length == 0:
+        return 'missing'
+    if length < min_ok:
+        return 'very_short'
+    if length < min_optimal:
+        return 'acceptable'
+    if length <= max_len:
+        return 'optimal'
+    return 'long'
+
+
+GENERIC_ALT = {'image', 'img', 'photo', 'picture', 'icon', 'logo', 'product', 'item',
+               'صورة', 'صوره', 'منتج', 'شعار', 'صور', 'photos', 'images', 'untitled',
+               'default', 'thumbnail', 'banner', 'slide', 'new', 'sale'}
+
+
+def grade_alt(alt_text):
+    """تقييم النص البديل بمعايير الجودة لا بالطول وحده.
+
+    الطول القصير ليس عيباً في ذاته: «عود مروكي محسن» نص بديل ممتاز.
+    ما يضر فعلاً هو الغياب، أو النص غير الوصفي (اسم ملف/كلمة عامة)،
+    أو حشو الكلمات المفتاحية، أو تجاوز حد قارئات الشاشة (125 حرفاً).
+    """
+    txt = re.sub(r'\s+', ' ', str(alt_text or '')).strip()
+    if not txt:
+        return 'alt_missing', 0
+    length = len(txt)
+    low = txt.lower()
+
+    if re.search(r'\.(jpg|jpeg|png|webp|gif|svg)$', low):
+        return 'alt_generic', length
+    if re.fullmatch(r'[\d\W_]+', txt):
+        return 'alt_generic', length
+    words = [w.strip('.,،؛:!?') for w in low.split() if w.strip('.,،؛:!?')]
+    if not words or all(w in GENERIC_ALT for w in words):
+        return 'alt_generic', length
+    if length > ALT_MAX:
+        return 'alt_long', length
+
+    commas = txt.count(',') + txt.count('،')
+    if commas >= 4 and len(words) / max(commas, 1) < 3:
+        return 'alt_stuffed', length
+    if len(words) >= 6 and len(set(words)) / len(words) < 0.5:
+        return 'alt_stuffed', length
+
+    return 'alt_ok', length
+
+
+ALT_CREDIT = {'alt_ok': 1.0, 'alt_duplicate': 0.4, 'alt_long': 0.6,
+              'alt_stuffed': 0.3, 'alt_generic': 0.0, 'alt_missing': 0.0}
+ALT_WEAK_STATES = ('alt_generic', 'alt_stuffed', 'alt_long', 'alt_duplicate')
+
+
+def apply_duplicate_alt(images_df):
+    """نفس النص البديل على عدة صور مختلفة لا يميّز أياً منها لمحركات البحث."""
+    if images_df is None or images_df.empty:
+        return images_df
+    df = images_df.copy()
+    ok_mask = df['حالة النص البديل'] == 'alt_ok'
+    counts = df.loc[ok_mask, 'النص البديل الحالي (Alt)'].value_counts()
+    dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
+    if dupes:
+        df.loc[ok_mask & df['النص البديل الحالي (Alt)'].isin(dupes),
+               'حالة النص البديل'] = 'alt_duplicate'
+    return df
+
+
+# ==============================================================
+#  كشف منصة المتجر
+# ==============================================================
+PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
+                  'shopify': 'شوبيفاي (Shopify)', 'unknown': 'غير معروفة'}
+PLATFORM_LABEL_EN = {'salla': 'Salla', 'zid': 'Zid',
+                     'shopify': 'Shopify', 'unknown': 'Unidentified'}
+SUPPORTED_PLATFORMS = ('salla', 'zid', 'shopify')
+
+
+def detect_platform(html, headers=None, url=""):
+    h = (html or "")[:200000].lower()
+    hdr = " ".join(f"{k}:{v}" for k, v in (headers or {}).items()).lower()
+    blob = h + " " + hdr + " " + (url or "").lower()
+    if any(s in blob for s in ['salla.sa', 'cdn.salla.network', 'window.salla', 'salla-']):
+        return 'salla'
+    if any(s in blob for s in ['zid.store', 'media.zid.sa', 'zidapi', 'x-zid', 'cdn.zid']):
+        return 'zid'
+    if any(s in blob for s in ['cdn.shopify.com', 'myshopify.com', 'shopify.theme',
+                               'x-shopify', 'shopify-features']):
+        return 'shopify'
+    return 'unknown'
+
+
+# ==============================================================
+#  تصنيف الصفحات
 # ==============================================================
 POLICY_KEYWORDS = [
     'سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى',
-    'اسئلة', 'أسئلة', 'من-نحن', 'اتصل', 'ضمان', 'الدفع',
+    'اسئلة', 'أسئلة', 'من-نحن', 'اتصل', 'ضمان', 'دفع', 'مقترحات', 'أحكام',
+    'الاستخدام', 'ارجاع', 'إرجاع', 'مرتجعات', 'تبديل', 'ضمانات',
     'pages', 'page', 'policies', 'policy', 'privacy', 'terms', 'conditions',
     'about', 'about-us', 'contact', 'contact-us', 'faq', 'faqs', 'help',
     'shipping', 'delivery', 'complaint', 'complaints', 'returns', 'return',
@@ -309,64 +449,40 @@ CATEGORY_SEGMENTS = ('category', 'categories', 'collection', 'collections',
                      'department', 'departments', 'قسم', 'اقسام', 'أقسام', 'تصنيف')
 
 
-def detect_page_type(url, base_url, soup=None):
-    base_clean = normalize_url(base_url)
-    url_clean = clean_url(url)
+AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
 
-    if url_key(url_clean) == url_key(base_clean) or urlparse(url_clean).path in ('', '/'):
-        return T_HOME
 
-    path = unquote(urlparse(url_clean).path.lower())
-    path_clean = path.strip('/')
-    segments = [s for s in path_clean.split('/') if s]
+def normalize_ar_token(tok):
+    """تجريد أداة التعريف وحروف العطف وتوحيد الهمزات، حتى تطابق
+    «والأحكام» الكلمة المفتاحية «احكام»."""
+    t = tok.strip('.,،؛:!?()[]')
+    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)      # التشكيل
+    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+    t = t.replace('ى', 'ي').replace('ة', 'ه')
+    for pre in AR_PREFIXES:
+        if t.startswith(pre) and len(t) > len(pre) + 1:
+            t = t[len(pre):]
+            break
+    return t
 
-    og_type = ""
-    if soup:
-        tag = soup.find('meta', attrs={'property': 'og:type'})
-        if tag and tag.get('content'):
-            og_type = tag['content'].lower()
 
-    # المنتجات أولاً — إشارات قاطعة قبل أي مطابقة بالكلمات
-    if 'product' in og_type:
-        return T_PRODUCT
-    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
-        return T_PRODUCT
-    if soup and _has_jsonld_type(soup, ('Product',)):
-        return T_PRODUCT
-    if ('products' in segments or 'product' in segments) and len(segments) >= 2:
-        return T_PRODUCT
-    if re.search(r'/p\d+', path) or '-p-' in path:
-        return T_PRODUCT
-    if any(re.match(r'^p\d+$', s) for s in segments):
-        return T_PRODUCT
+POLICY_KEYWORDS_NORM = None
 
-    # المدونة
-    if 'article' in og_type or 'blog' in og_type:
-        return T_BLOG
-    if soup and soup.find(attrs={'itemtype': re.compile(
-            r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}):
-        return T_BLOG
-    if soup and _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
-        return T_BLOG
-    if any(s in BLOG_SEGMENTS for s in segments):
-        return T_BLOG
 
-    if path_clean in CATALOG_ROOTS:
-        return T_CATEGORY
+def _policy_keywords_norm():
+    global POLICY_KEYWORDS_NORM
+    if POLICY_KEYWORDS_NORM is None:
+        POLICY_KEYWORDS_NORM = set()
+        for k in POLICY_KEYWORDS:
+            for part in k.split('-'):
+                POLICY_KEYWORDS_NORM.add(normalize_ar_token(part.lower()))
+    return POLICY_KEYWORDS_NORM
 
-    for seg in segments:
-        if any(seg == k or seg.startswith(k + '-') or k in seg.split('-')
-               for k in POLICY_KEYWORDS):
-            return T_INFO
 
-    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
-        return T_CATEGORY
-    if any(s in CATEGORY_SEGMENTS for s in segments):
-        return T_CATEGORY
-    if re.search(r'/c\d+', path) or any(re.match(r'^c\d+$', s) for s in segments):
-        return T_CATEGORY
-
-    return T_UNKNOWN
+def segment_is_policy(seg):
+    norm = _policy_keywords_norm()
+    parts = [normalize_ar_token(p.lower()) for p in seg.split('-') if p]
+    return any(p in norm for p in parts if len(p) > 2)
 
 
 def _has_jsonld_type(soup, wanted):
@@ -386,8 +502,63 @@ def _has_jsonld_type(soup, wanted):
     return False
 
 
+def detect_page_type(url, base_url, soup=None):
+    base_clean = normalize_url(base_url)
+    url_clean = clean_url(url)
+
+    if url_key(url_clean) == url_key(base_clean) or urlparse(url_clean).path in ('', '/'):
+        return T_HOME
+
+    path = unquote(urlparse(url_clean).path.lower())
+    path_clean = path.strip('/')
+    segments = [s for s in path_clean.split('/') if s]
+
+    og_type = ""
+    if soup:
+        tag = soup.find('meta', attrs={'property': 'og:type'})
+        if tag and tag.get('content'):
+            og_type = tag['content'].lower()
+
+    if 'product' in og_type:
+        return T_PRODUCT
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
+        return T_PRODUCT
+    if soup and _has_jsonld_type(soup, ('Product',)):
+        return T_PRODUCT
+    if ('products' in segments or 'product' in segments) and len(segments) >= 2:
+        return T_PRODUCT
+    if re.search(r'/p\d+', path) or '-p-' in path:
+        return T_PRODUCT
+    if any(re.match(r'^p\d+$', s) for s in segments):
+        return T_PRODUCT
+
+    # السياسات قبل المدونة: بعض المتاجر تنشر السياسات تحت مسار /blogs/
+    if any(segment_is_policy(seg) for seg in segments if seg not in BLOG_SEGMENTS):
+        return T_INFO
+
+    if 'article' in og_type or 'blog' in og_type:
+        return T_BLOG
+    if soup and soup.find(attrs={'itemtype': re.compile(
+            r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}):
+        return T_BLOG
+    if soup and _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
+        return T_BLOG
+    if any(s in BLOG_SEGMENTS for s in segments):
+        return T_BLOG
+
+    if path_clean in CATALOG_ROOTS:
+        return T_CATEGORY
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
+        return T_CATEGORY
+    if any(s in CATEGORY_SEGMENTS for s in segments):
+        return T_CATEGORY
+    if re.search(r'/c\d+', path) or any(re.match(r'^c\d+$', s) for s in segments):
+        return T_CATEGORY
+
+    return T_UNKNOWN
+
+
 def detect_page_language(soup, text_sample=""):
-    """لغة الصفحة من وسم <html lang> وإلا من نسبة الحروف العربية."""
     if soup:
         html_tag = soup.find('html')
         if html_tag and html_tag.get('lang'):
@@ -460,20 +631,18 @@ def strip_boilerplate(soup):
 
 
 # ==============================================================
-#  فحص صفحة واحدة + استخراج روابطها
+#  فحص صفحة واحدة
 # ==============================================================
 def broken_page_row(url, reason, source):
     return {
         'page_data': {
-            'نوع الصفحة': T_BROKEN, 'الرابط': unquote(url),
-            'مصدر الاكتشاف': source, 'متاحة': False, 'كود الاستجابة': str(reason),
-            'لغة الصفحة': '—', 'درجة السيو': None,
-            'عنوان الميتا': '', 'طول العنوان': 0, 'حالة العنوان': 'failed',
-            'وصف الميتا': '', 'طول الوصف': 0, 'حالة الوصف': 'failed',
-            'إجمالي الصور': 0, 'صور بدون Alt': 0, 'صور Alt غير مطابق': 0,
-            'عدد الكلمات': 0, 'حالة المحتوى': 'na',
-            'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '',
-            '_raw_url': url,
+            'نوع الصفحة': T_BROKEN, 'الرابط': unquote(url), 'مصدر الاكتشاف': source,
+            'متاحة': False, 'كود الاستجابة': str(reason), 'لغة الصفحة': '—',
+            'درجة السيو': None, 'عنوان الميتا': '', 'طول العنوان': 0,
+            'حالة العنوان': 'failed', 'وصف الميتا': '', 'طول الوصف': 0,
+            'حالة الوصف': 'failed', 'إجمالي الصور': 0, 'صور بدون Alt': 0,
+            'صور Alt ضعيف': 0, 'عدد الكلمات': 0, 'حالة المحتوى': 'na',
+            'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '', '_raw_url': url,
         },
         'images_data': [], 'links': set(),
     }
@@ -491,18 +660,16 @@ def _fetch_and_audit(url, base_url, source):
     res = safe_get(url)
     if res is None:
         return broken_page_row(clean_url(url), 'فشل اتصال', source)
-
     ctype = (res.headers.get('Content-Type') or '').lower()
     if res.status_code != 200:
         return broken_page_row(clean_url(res.url), f'خطأ {res.status_code}', source)
-    if 'html' not in ctype and ctype:
+    if ctype and 'html' not in ctype:
         return broken_page_row(clean_url(res.url), 'ليست صفحة HTML', source)
 
     final_url = clean_url(res.url)
     soup = make_soup(res.text)
     page_type = detect_page_type(final_url, base_url, soup)
 
-    # الروابط الخارجة (للزحف)
     base_netloc = urlparse(normalize_url(base_url)).netloc
     links = set()
     for a in soup.find_all('a', href=True):
@@ -521,8 +688,7 @@ def _fetch_and_audit(url, base_url, source):
             canonical = clean_url(urljoin(final_url, link['href']))
             break
     if not canonical:
-        canon_status = 'canon_missing'
-        canonical = final_url
+        canon_status, canonical = 'canon_missing', final_url
     elif url_key(canonical) == url_key(final_url):
         canon_status = 'canon_same'
     else:
@@ -541,7 +707,7 @@ def _fetch_and_audit(url, base_url, source):
     desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
     content_soup = strip_boilerplate(make_soup(res.text))
-    total_img = missing_alt = weak_alt = good_alt = 0
+    total_img = 0
     page_images = []
     for img in content_soup.find_all('img'):
         src = get_image_src(img)
@@ -549,19 +715,11 @@ def _fetch_and_audit(url, base_url, source):
             total_img += 1
             alt_text = (img.get('alt') or '').strip()
             alt_status, alt_len = grade_alt(alt_text)
-            if alt_status == 'alt_missing':
-                missing_alt += 1
-            elif alt_status in ('alt_weak', 'alt_short', 'alt_long'):
-                weak_alt += 1
-            else:
-                good_alt += 1
             page_images.append({
-                'رابط الصفحة': unquote(final_url),
-                'نوع الصفحة': page_type,
+                'رابط الصفحة': unquote(final_url), 'نوع الصفحة': page_type,
                 'رابط الصورة': urljoin(final_url, src),
                 'النص البديل الحالي (Alt)': alt_text,
-                'طول النص البديل': alt_len,
-                'حالة النص البديل': alt_status,
+                'طول النص البديل': alt_len, 'حالة النص البديل': alt_status,
             })
 
     for s in content_soup(['script', 'style', 'noscript']):
@@ -571,28 +729,14 @@ def _fetch_and_audit(url, base_url, source):
     content_status = 'good' if words >= 50 else 'thin'
     page_lang = detect_page_language(soup, (title + ' ' + body_text[:500]))
 
-    # درجة متدرجة: المثالي يأخذ الدرجة كاملة، والمقبول جزءاً منها
-    LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
-                  'long': 0.4, 'missing': 0.0}
-    score = 0.0
-    score += 25 * LEN_WEIGHT.get(title_status, 0)
-    score += 25 * LEN_WEIGHT.get(desc_status, 0)
-    if total_img == 0:
-        score += 25
-    else:
-        score += 25 * ((good_alt + 0.5 * weak_alt) / total_img)
-    score += 25 if content_status == 'good' else 0
-    score = max(0, min(100, round(score)))
-
     return {
         'page_data': {
-            'نوع الصفحة': page_type, 'الرابط': unquote(final_url),
-            'مصدر الاكتشاف': source, 'متاحة': True, 'كود الاستجابة': '200',
-            'لغة الصفحة': page_lang, 'درجة السيو': score,
+            'نوع الصفحة': page_type, 'الرابط': unquote(final_url), 'مصدر الاكتشاف': source,
+            'متاحة': True, 'كود الاستجابة': '200', 'لغة الصفحة': page_lang,
+            'درجة السيو': None,  # تُحسب بعد تقييم تكرار الـ Alt
             'عنوان الميتا': title, 'طول العنوان': title_len, 'حالة العنوان': title_status,
             'وصف الميتا': meta_desc, 'طول الوصف': desc_len, 'حالة الوصف': desc_status,
-            'إجمالي الصور': total_img, 'صور بدون Alt': missing_alt,
-            'صور Alt غير مطابق': weak_alt,
+            'إجمالي الصور': total_img, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
             'عدد الكلمات': words, 'حالة المحتوى': content_status,
             'حالة الكانونيكال': canon_status,
             'الرابط الكانوني': unquote(canonical) if canon_status == 'canon_diff' else '',
@@ -605,15 +749,55 @@ def _fetch_and_audit(url, base_url, source):
     }
 
 
+LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
+              'long': 0.4, 'missing': 0.0}
+
+
+def score_pages(df, images_df):
+    """تُحسب الدرجة بعد اكتمال تقييم الصور (لأن تكرار الـ Alt يحتاج نظرة شاملة)."""
+    if df.empty:
+        return df
+    per_page = {}
+    if images_df is not None and not images_df.empty:
+        for page, grp in images_df.groupby('رابط الصفحة'):
+            credit = grp['حالة النص البديل'].map(ALT_CREDIT).fillna(0).sum()
+            per_page[page] = {
+                'credit': credit, 'n': len(grp),
+                'missing': int((grp['حالة النص البديل'] == 'alt_missing').sum()),
+                'weak': int(grp['حالة النص البديل'].isin(ALT_WEAK_STATES).sum()),
+            }
+    out = df.copy()
+    scores, miss, weak = [], [], []
+    for _, r in out.iterrows():
+        if not r['متاحة']:
+            scores.append(None)
+            miss.append(0)
+            weak.append(0)
+            continue
+        s = 25 * LEN_WEIGHT.get(r['حالة العنوان'], 0)
+        s += 25 * LEN_WEIGHT.get(r['حالة الوصف'], 0)
+        info = per_page.get(r['الرابط'])
+        if not info or info['n'] == 0:
+            s += 25
+            miss.append(0)
+            weak.append(0)
+        else:
+            s += 25 * (info['credit'] / info['n'])
+            miss.append(info['missing'])
+            weak.append(info['weak'])
+        s += 25 if r['حالة المحتوى'] == 'good' else 0
+        scores.append(max(0, min(100, round(s))))
+    out['درجة السيو'] = scores
+    out['صور بدون Alt'] = miss
+    out['صور Alt ضعيف'] = weak
+    return out
+
+
 # ==============================================================
-#  الزحف من الواجهة (رؤية الزائر)
+#  الزحف من الواجهة
 # ==============================================================
 def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_CRAWL_LEVELS):
-    """يبدأ من الصفحة الرئيسية ويتبع الروابط الداخلية كما يفعل الزائر.
-    كل صفحة تُجلب مرة واحدة، وتُفحص وتُستخرج روابطها في نفس الطلب."""
     base_url = normalize_url(base_url)
-    base_netloc = urlparse(base_url).netloc
-
     pages, images = [], []
     seen = {url_key(base_url)}
     frontier = [base_url]
@@ -626,43 +810,38 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
         room = max_pages - len(pages)
         batch, frontier = frontier[:room], frontier[room:]
         next_frontier = []
-
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for res in ex.map(fetch_and_audit,
                               [(u, base_url, 'الزحف من الواجهة') for u in batch]):
-                pd_row = res['page_data']
-                pages.append(pd_row)
+                row = res['page_data']
+                pages.append(row)
                 images.extend(res['images_data'])
                 if res.get('platform_html') and platform == 'unknown':
                     platform = detect_platform(res['platform_html'],
                                                res.get('platform_headers'), base_url)
-                if pd_row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
-                    category_urls.append(pd_row.get('_raw_url', pd_row['الرابط']))
+                if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
+                    category_urls.append(row.get('_raw_url', row['الرابط']))
+                # الوجهة النهائية بعد التحويل تُعدّ مزارة أيضاً
+                seen.add(url_key(row.get('_raw_url', row['الرابط'])))
                 for link in res.get('links', ()):
                     k = url_key(link)
                     if k not in seen:
                         seen.add(k)
                         next_frontier.append(link)
-
         frontier = next_frontier + frontier
         if progress_cb:
             progress_cb(len(pages), len(frontier), level)
-
     return pages, images, category_urls, seen, platform
 
 
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
                                max_depth=MAX_PAGINATION_DEPTH):
-    """يتابع ترقيم صفحات الأقسام (?page=2,3...) لالتقاط المنتجات التي
-    لا تظهر في الصفحة الأولى — الزائر يصل إليها بالضغط على التالي."""
     base_url = normalize_url(base_url)
     base_netloc = urlparse(base_url).netloc
     roots = list(dict.fromkeys(
-        list(category_urls) + [f"{base_url}/{r}" for r in ['products', 'collections/all', 'shop']]
-    ))
-    new_urls = []
-    fetched = 0
-
+        list(category_urls) + [f"{base_url}/{r}" for r in
+                               ['products', 'collections/all', 'shop']]))
+    new_urls, fetched = [], 0
     for idx, cat in enumerate(roots):
         seen_here = set()
         for page in range(2, max_depth + 1):
@@ -671,14 +850,13 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
             if res is None or res.status_code != 200:
                 break
             soup = make_soup(res.text)
-            found_here = set()
+            found = set()
             for a in soup.find_all('a', href=True):
                 full = clean_url(urljoin(cat, a['href'].strip()))
-                if not is_crawlable(full, base_netloc):
-                    continue
-                if detect_page_type(full, base_url, None) == T_PRODUCT:
-                    found_here.add(full)
-            fresh = found_here - seen_here
+                if is_crawlable(full, base_netloc) and \
+                        detect_page_type(full, base_url, None) == T_PRODUCT:
+                    found.add(full)
+            fresh = found - seen_here
             if not fresh:
                 break
             seen_here |= fresh
@@ -689,7 +867,6 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
                     new_urls.append(u)
         if progress_cb:
             progress_cb(idx + 1, len(roots), len(new_urls), fetched)
-
     return new_urls
 
 
@@ -709,7 +886,7 @@ def audit_urls(urls, base_url, source, workers, progress_bar=None):
 
 
 # ==============================================================
-#  خريطة الموقع — للمقارنة فقط، لا تدخل أرقام الفحص
+#  خريطة الموقع — مقارنة تشخيصية
 # ==============================================================
 def discover_sitemaps_from_robots(base_url):
     found = []
@@ -767,59 +944,69 @@ def collect_sitemap_urls(base_url, max_depth=3):
                 if u and urlparse(u).netloc == base_netloc:
                     urls.add(u)
 
-    candidates = discover_sitemaps_from_robots(base_url) + [
-        f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
-        f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml",
-    ]
-    for c in candidates:
+    for c in (discover_sitemaps_from_robots(base_url) +
+              [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
+               f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml"]):
         walk(c, 0)
     return urls
 
 
-def build_coverage_report(visible_df, sitemap_urls, base_url):
-    """مقارنة بين ما يراه الزائر وما تعلنه خريطة الموقع — لكل أنواع الصفحات.
-    نتائجها تشخيصية فقط ولا تدخل في أرقام الفحص."""
+def build_coverage_report(visible_df, sitemap_urls, base_url, workers=4, progress_cb=None):
+    """مقارنة بين ما يراه الزائر وما تعلنه خريطة الموقع.
+
+    أي رابط في الخريطة لا يطابق صفحة مزارة يُتحقق من وجهته أولاً: قد يكون
+    مجرد تحويل إلى صفحة مفحوصة (وهذا هدر لميزانية الزحف، لا صفحة يتيمة).
+    """
     src_col = '_raw_url' if '_raw_url' in visible_df.columns else 'الرابط'
-    vis = {}
-    vis_types = {}
+    vis, vis_types = {}, {}
     for _, r in visible_df[visible_df['متاحة'] == True].iterrows():  # noqa: E712
         k = url_key(r[src_col])
         vis.setdefault(k, r[src_col])
         vis_types.setdefault(k, r['نوع الصفحة'])
 
-    sm = {}
-    sm_types = {}
+    sm, sm_types = {}, {}
     for u in sitemap_urls:
         k = url_key(u)
         sm.setdefault(k, u)
         sm_types.setdefault(k, detect_page_type(u, base_url, None))
 
     vis_keys, sm_keys = set(vis), set(sm)
-    only_visible = vis_keys - sm_keys
-    only_sitemap = sm_keys - vis_keys
+    unmatched = sorted(sm_keys - vis_keys)[:MAX_REDIRECT_CHECKS]
 
-    def rows(keys, src, types):
-        out = []
-        for k in sorted(keys):
-            out.append({'الرابط': unquote(src[k]), 'نوع الصفحة': types.get(k, T_UNKNOWN)})
-        return out
+    redirects, orphans = [], []
+    if unmatched:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            finals = list(ex.map(lambda k: resolve_final_url(sm[k]), unmatched))
+        for k, (final, code) in zip(unmatched, finals):
+            row = {'الرابط': unquote(sm[k]), 'نوع الصفحة': sm_types.get(k, T_UNKNOWN)}
+            if final and url_key(final) in vis_keys:
+                row['الوجهة النهائية'] = unquote(final)
+                redirects.append(row)
+            else:
+                row['كود الاستجابة'] = str(code or '—')
+                orphans.append(row)
+        if progress_cb:
+            progress_cb(len(unmatched))
 
-    orphans = rows(only_sitemap, sm, sm_types)
     orphan_by_type = {}
     for o in orphans:
         orphan_by_type[o['نوع الصفحة']] = orphan_by_type.get(o['نوع الصفحة'], 0) + 1
 
     vis_products = {k for k in vis_keys if vis_types.get(k) == T_PRODUCT}
     sm_products = {k for k in sm_keys if sm_types.get(k) == T_PRODUCT}
+    matched_products = vis_products & sm_products
 
     return {
         'visible_count': len(vis_products),
         'sitemap_count': len(sm_products),
-        'matched_count': len(vis_products & sm_products),
-        'visible_not_in_sitemap': rows(vis_products - sm_products, vis, vis_types),
+        'matched_count': len(matched_products),
+        'visible_not_in_sitemap': [
+            {'الرابط': unquote(vis[k]), 'نوع الصفحة': T_PRODUCT}
+            for k in sorted(vis_products - sm_products)],
         'sitemap_not_visible': orphans,
+        'sitemap_redirects': redirects,
         'orphan_by_type': orphan_by_type,
-        'indexed_pct': round(len(vis_products & sm_products) / len(vis_products) * 100, 1)
+        'indexed_pct': round(len(matched_products) / len(vis_products) * 100, 1)
         if vis_products else 100.0,
     }
 
@@ -834,8 +1021,8 @@ def dedupe_pages(df):
     src_col = '_raw_url' if '_raw_url' in df.columns else 'الرابط'
     df['_key'] = df[src_col].map(url_key)
     df['_canon'] = df.apply(
-        lambda r: url_key(r['الرابط الكانوني']) if str(r.get('الرابط الكانوني') or '').strip()
-        else r['_key'], axis=1)
+        lambda r: url_key(r['الرابط الكانوني'])
+        if str(r.get('الرابط الكانوني') or '').strip() else r['_key'], axis=1)
     df = df.drop_duplicates(subset=['_key'])
     avail = df[df['متاحة'] == True]  # noqa: E712
     dup_keys = set(avail[avail.duplicated(subset=['_canon'], keep='first')]['_key'])
@@ -843,8 +1030,11 @@ def dedupe_pages(df):
     return df.drop(columns=['_key', '_canon']).reset_index(drop=True)
 
 
-def compute_summary(df, coverage=None):
+def compute_summary(df, coverage=None, images_df=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
+    alt_counts = {}
+    if images_df is not None and not images_df.empty:
+        alt_counts = images_df['حالة النص البديل'].value_counts().to_dict()
     s = {
         'total_pages': len(df),
         'score': round(ok['درجة السيو'].mean(), 1) if not ok.empty else 0.0,
@@ -860,14 +1050,14 @@ def compute_summary(df, coverage=None):
         'bad_descs': int((~ok['حالة الوصف'].isin(['optimal'])).sum()),
         'critical_descs': int(ok['حالة الوصف'].isin(
             ['missing', 'very_short', 'long']).sum()),
-        'missing_alts': int(ok['صور بدون Alt'].sum()),
-        'weak_alts': int(ok['صور Alt غير مطابق'].sum())
-        if 'صور Alt غير مطابق' in ok.columns else 0,
         'total_images': int(ok['إجمالي الصور'].sum()),
-        'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum())
-        if 'حالة الكانونيكال' in ok.columns else 0,
-        'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum())
-        if 'حالة الكانونيكال' in ok.columns else 0,
+        'missing_alts': int(alt_counts.get('alt_missing', 0)),
+        'weak_alts': int(sum(alt_counts.get(k, 0) for k in ALT_WEAK_STATES)),
+        'good_alts': int(alt_counts.get('alt_ok', 0)),
+        'dup_alts': int(alt_counts.get('alt_duplicate', 0)),
+        'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum()),
+        'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum()),
+        'thin_pages': int((ok['حالة المحتوى'] == 'thin').sum()),
         'coverage_enabled': bool(coverage),
     }
     if coverage:
@@ -876,6 +1066,7 @@ def compute_summary(df, coverage=None):
             'sitemap_products': coverage['sitemap_count'],
             'not_indexed_count': len(coverage['visible_not_in_sitemap']),
             'hidden_count': len(coverage['sitemap_not_visible']),
+            'redirect_count': len(coverage.get('sitemap_redirects', [])),
             'orphan_by_type': coverage.get('orphan_by_type', {}),
             'indexed_pct': coverage['indexed_pct'],
         })
@@ -883,32 +1074,28 @@ def compute_summary(df, coverage=None):
 
 
 def localize_df(df, lang):
-    """تحويل المفاتيح الداخلية إلى نصوص معروضة بلغة التقرير."""
     if df is None or df.empty:
         return df
     out = df.copy()
-    if 'نوع الصفحة' in out.columns:
-        out['نوع الصفحة'] = out['نوع الصفحة'].map(
-            lambda v: PAGE_TYPE_LABEL[lang].get(v, v))
     if '_raw_url' in out.columns:
         out = out.drop(columns=['_raw_url'])
-    if 'حالة الكانونيكال' in out.columns:
-        out['حالة الكانونيكال'] = out['حالة الكانونيكال'].map(
-            lambda v: STATUS_LABEL[lang].get(v, v))
-    for col in ['حالة العنوان', 'حالة الوصف', 'حالة المحتوى', 'حالة النص البديل']:
+    if 'نوع الصفحة' in out.columns:
+        out['نوع الصفحة'] = out['نوع الصفحة'].map(lambda v: PAGE_TYPE_LABEL[lang].get(v, v))
+    for col in ['حالة العنوان', 'حالة الوصف', 'حالة المحتوى', 'حالة النص البديل',
+                'حالة الكانونيكال']:
         if col in out.columns:
             out[col] = out[col].map(lambda v: STATUS_LABEL[lang].get(v, v))
     if 'النص البديل الحالي (Alt)' in out.columns:
-        empty_label = STATUS_LABEL[lang]['alt_empty']
+        empty = STATUS_LABEL[lang]['alt_empty']
         out['النص البديل الحالي (Alt)'] = out['النص البديل الحالي (Alt)'].map(
-            lambda v: v if str(v).strip() else empty_label)
+            lambda v: v if str(v).strip() else empty)
     if lang == 'en':
         out = out.rename(columns={k: v for k, v in COL_EN.items() if k in out.columns})
     return out
 
 
 # ==============================================================
-#  تقرير العميل (PDF) — عربي أو إنجليزي
+#  تقرير العميل (PDF)
 # ==============================================================
 PDF_TXT = {
     'ar': {
@@ -917,10 +1104,10 @@ PDF_TXT = {
         'meta': 'المتجر المستهدف: {d}   |   تاريخ الفحص: {t}',
         'score': 'درجة التوافق العامة مع محركات البحث: {s}%',
         'scope': 'نطاق الفحص: الصفحات والمنتجات المعروضة فعلياً لزوار المتجر',
-        'tbl1': '1. جدول تدقيق بنية الصفحات والعناوين:',
-        'tbl_meta': '2. جدول تدقيق أطوال العناوين والأوصاف:',
-        'tbl2': '3. جدول تدقيق وسوم وصور المتجر:',
-        'tbl3': '4. جدول مقارنة المعروض بخريطة الموقع:',
+        'tbl1': '1. جدول بنية المتجر:',
+        'tbl2': '2. جدول تدقيق أطوال العناوين والأوصاف:',
+        'tbl3': '3. جدول تدقيق النصوص البديلة للصور:',
+        'tbl4': '4. جدول مقارنة المعروض بخريطة الموقع:',
         'diag': '{n}. التشخيص الاستشاري وخطة العمل:',
         'h_val': 'الحالة / العدد', 'h_item': 'عنصر الفحص والتدقيق',
         'r_total': 'إجمالي الصفحات المعروضة والمفحوصة', 'u_page': 'صفحة',
@@ -929,26 +1116,29 @@ PDF_TXT = {
         'r_blog': 'مقالات وصفحات المدونة', 'u_article': 'مقال',
         'r_info': 'الصفحات التعريفية والسياسات',
         'r_broken': 'روابط معطلة داخل المتجر', 'u_link': 'رابط',
-        'r_titles': 'عناوين الميتا المفقودة أو غير المتوافقة', 'u_title': 'عنوان',
-        'r_descs': 'أوصاف الميتا المفقودة أو غير المهيأة', 'u_desc': 'وصف',
+        'r_platform': 'منصة المتجر',
+        'r_titles_ok': 'عناوين ضمن الطول المثالي (50-60 حرفاً)',
+        'r_titles_crit': 'عناوين مفقودة أو قصيرة جداً أو تتجاوز 60 حرفاً',
+        'u_title': 'عنوان',
+        'r_descs_ok': 'أوصاف ضمن الطول المثالي (120-150 حرفاً)',
+        'r_descs_crit': 'أوصاف مفقودة أو قصيرة جداً أو تتجاوز 150 حرفاً',
+        'u_desc': 'وصف',
+        'r_canon': 'صفحات بلا وسم كانونيكال',
+        'r_thin': 'صفحات بمحتوى نصي ضعيف',
         'r_imgs': 'إجمالي صور المحتوى والمنتجات', 'u_img': 'صورة',
-        'r_noalt': 'صور تفتقر لوسم النص البديل', 'r_ratio': 'نسبة الصور غير المهيأة',
+        'r_noalt': 'صور بلا نص بديل إطلاقاً',
+        'r_generic': 'صور بنص بديل غير وصفي (اسم ملف أو كلمة عامة)',
+        'r_dup': 'صور تتشارك نفس النص البديل',
+        'r_altok': 'صور بنص بديل سليم',
         'r_imgstate': 'حالة تهيئة الصور لبحث صور جوجل',
         'img_none': 'لم يرصد الفحص صور محتوى', 'img_ok': 'مكتمل',
         'img_gap': 'فجوة واسعة', 'img_part': 'فجوة جزئية',
         'r_vis': 'منتجات معروضة لزوار المتجر',
         'r_sm': 'منتجات معلنة في خريطة الموقع',
         'r_notidx': 'منتجات معروضة ولا تظهر في الخريطة',
-        'r_hidden': 'روابط في الخريطة لا يصل إليها الزائر',
-        'r_idxpct': 'نسبة المنتجات المعروضة المدرجة في الخريطة',
-        'r_platform': 'منصة المتجر', 'r_titles_ok': 'عناوين ضمن الطول المثالي (50-60 حرف)',
-        'r_titles_crit': 'عناوين مفقودة أو قصيرة جداً أو تتجاوز 60 حرفاً',
-        'r_descs_ok': 'أوصاف ضمن الطول المثالي (120-150 حرف)',
-        'r_descs_crit': 'أوصاف مفقودة أو قصيرة جداً أو تتجاوز 150 حرفاً',
-        'r_alt_weak': 'صور بنص بديل غير وصفي أو خارج الطول المثالي',
-        'r_canon_missing': 'صفحات بلا وسم كانونيكال',
+        'r_redirect': 'روابط في الخريطة تعيد التوجيه لصفحات أخرى',
         'r_orphan': 'صفحات في الخريطة لا يصل إليها الزائر بأي رابط',
-        'note_len': 'يُحسب الطول بالحروف شاملاً المسافات وعلامات الترقيم كافة.',
+        'r_idxpct': 'نسبة المنتجات المعروضة المدرجة في الخريطة',
         'footer': 'anasrashed.com   |   anas@anasrashed.com',
     },
     'en': {
@@ -957,10 +1147,10 @@ PDF_TXT = {
         'meta': 'Store: {d}   |   Audit date: {t}',
         'score': 'Overall search engine compliance score: {s}%',
         'scope': 'Audit scope: pages and products actually visible to store visitors',
-        'tbl1': '1. Page structure and metadata audit:',
-        'tbl_meta': '2. Title and description length audit:',
-        'tbl2': '3. Image tags and alt text audit:',
-        'tbl3': '4. Visible catalogue vs sitemap comparison:',
+        'tbl1': '1. Store structure:',
+        'tbl2': '2. Title and description length audit:',
+        'tbl3': '3. Image alt text audit:',
+        'tbl4': '4. Visible catalogue vs sitemap comparison:',
         'diag': '{n}. Consultant diagnosis and action plan:',
         'h_val': 'Value / Count', 'h_item': 'Audited item',
         'r_total': 'Total visible pages audited', 'u_page': 'pages',
@@ -968,27 +1158,30 @@ PDF_TXT = {
         'r_categories': 'Category and collection pages', 'u_cat': 'categories',
         'r_blog': 'Blog posts and articles', 'u_article': 'articles',
         'r_info': 'Info and policy pages',
-        'r_broken': 'Broken links found inside the store', 'u_link': 'links',
-        'r_titles': 'Missing or non-compliant meta titles', 'u_title': 'titles',
-        'r_descs': 'Missing or non-optimised meta descriptions', 'u_desc': 'descriptions',
+        'r_broken': 'Broken links inside the store', 'u_link': 'links',
+        'r_platform': 'Store platform',
+        'r_titles_ok': 'Titles within optimal length (50-60 chars)',
+        'r_titles_crit': 'Titles missing, far too short, or over 60 characters',
+        'u_title': 'titles',
+        'r_descs_ok': 'Descriptions within optimal length (120-150 chars)',
+        'r_descs_crit': 'Descriptions missing, far too short, or over 150 characters',
+        'u_desc': 'descriptions',
+        'r_canon': 'Pages without a canonical tag',
+        'r_thin': 'Pages with thin text content',
         'r_imgs': 'Total content and product images', 'u_img': 'images',
-        'r_noalt': 'Images missing alt text', 'r_ratio': 'Share of images missing alt text',
+        'r_noalt': 'Images with no alt text at all',
+        'r_generic': 'Images with non-descriptive alt text (filename or generic word)',
+        'r_dup': 'Images sharing identical alt text',
+        'r_altok': 'Images with sound alt text',
         'r_imgstate': 'Readiness for Google Image search',
         'img_none': 'No content images detected', 'img_ok': 'Complete',
         'img_gap': 'Major gap', 'img_part': 'Partial gap',
         'r_vis': 'Products visible to visitors',
         'r_sm': 'Products declared in sitemap',
         'r_notidx': 'Visible products absent from sitemap',
-        'r_hidden': 'Sitemap URLs unreachable by visitors',
-        'r_idxpct': 'Visible products included in sitemap',
-        'r_platform': 'Store platform', 'r_titles_ok': 'Titles within optimal length (50-60 chars)',
-        'r_titles_crit': 'Titles missing, too short, or over 60 characters',
-        'r_descs_ok': 'Descriptions within optimal length (120-150 chars)',
-        'r_descs_crit': 'Descriptions missing, too short, or over 150 characters',
-        'r_alt_weak': 'Images with non-descriptive or off-length alt text',
-        'r_canon_missing': 'Pages without a canonical tag',
+        'r_redirect': 'Sitemap URLs redirecting elsewhere',
         'r_orphan': 'Sitemap pages with no link path for visitors',
-        'note_len': 'Lengths are counted in characters including spaces and all punctuation.',
+        'r_idxpct': 'Visible products included in sitemap',
         'footer': 'anasrashed.com   |   anas@anasrashed.com',
     },
 }
@@ -1001,81 +1194,90 @@ def shape_ar(text):
 def build_diagnosis(score, stats, lang):
     imgs = stats.get('total_images', 0)
     missing = stats.get('missing_alts', 0)
-    bad_t = stats.get('bad_titles', 0)
-    bad_d = stats.get('bad_descs', 0)
-    broken = stats.get('broken_pages', 0)
-    notidx = stats.get('not_indexed_count', 0)
-
+    generic = stats.get('weak_alts', 0)
     issues = []
+
     if lang == 'ar':
         if missing > 0 and imgs > 0:
-            issues.append(f"وجود {missing} صورة من أصل {imgs} بلا نص بديل "
-                          f"(بنسبة {round(missing / imgs * 100, 1)}%)، وهو ما يحد من "
-                          "ظهور المتجر في نتائج بحث الصور")
-        if bad_t > 0:
-            issues.append(f"{bad_t} عنوان ميتا خارج الطول المثالي (50-60 حرفاً)، "
-                          f"منها {stats.get('critical_titles', 0)} عنوان مفقود أو "
-                          "قصير جداً أو يتجاوز الحد فيُقتطع في نتائج البحث")
-        if bad_d > 0:
-            issues.append(f"{bad_d} وصف ميتا خارج الطول المثالي (120-150 حرفاً)، "
-                          f"منها {stats.get('critical_descs', 0)} وصف مفقود أو "
-                          "قصير جداً أو يتجاوز الحد")
-        if notidx > 0:
-            issues.append(f"{notidx} منتجاً معروضاً في المتجر لا يظهر في خريطة الموقع")
-        if stats.get('weak_alts', 0) > 0:
-            issues.append(f"{stats['weak_alts']} صورة بنص بديل موجود لكنه غير وصفي "
-                          "أو خارج الطول المفيد")
+            issues.append(f"{missing} صورة من أصل {imgs} بلا نص بديل إطلاقاً "
+                          f"(بنسبة {round(missing / imgs * 100, 1)}%)، وهو ما يحرم المتجر "
+                          "من الظهور في بحث صور جوجل")
+        if generic > 0:
+            issues.append(f"{generic} صورة نصها البديل موجود لكنه غير وصفي أو مكرر "
+                          "أو محشو بالكلمات، فلا يضيف قيمة لمحركات البحث")
+        if stats.get('bad_titles', 0) > 0:
+            issues.append(f"{stats['bad_titles']} عنوان ميتا خارج الطول المثالي "
+                          f"(50-60 حرفاً)، منها {stats.get('critical_titles', 0)} عنوان "
+                          "مفقود أو قصير جداً أو يُقتطع في نتائج البحث")
+        if stats.get('bad_descs', 0) > 0:
+            issues.append(f"{stats['bad_descs']} وصف ميتا خارج الطول المثالي "
+                          f"(120-150 حرفاً)، منها {stats.get('critical_descs', 0)} "
+                          "وصف مفقود أو قصير جداً أو يتجاوز الحد")
+        if stats.get('canon_missing', 0) > 0:
+            issues.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
+                          "ما يعرّض المتجر لتكرار المحتوى")
         if stats.get('hidden_count', 0) > 0:
             issues.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع "
                           "لا يصل إليها الزائر بأي رابط داخلي، فتفقد قيمتها")
-        if broken > 0:
-            issues.append(f"{broken} رابط معطل داخل المتجر يصل إليه الزائر")
+        if stats.get('redirect_count', 0) > 0:
+            issues.append(f"{stats['redirect_count']} رابط في خريطة الموقع يعيد التوجيه "
+                          "لصفحة أخرى، ما يستهلك ميزانية زحف المتجر بلا فائدة")
+        if stats.get('not_indexed_count', 0) > 0:
+            issues.append(f"{stats['not_indexed_count']} منتجاً معروضاً لا يظهر "
+                          "في خريطة الموقع")
+        if stats.get('broken_pages', 0) > 0:
+            issues.append(f"{stats['broken_pages']} رابط معطل يصل إليه الزائر")
+
         if not issues:
             return ("لم يرصد الفحص فجوات جوهرية في الصفحات المعروضة: العناوين والأوصاف "
-                    "ووسوم الصور ضمن المعايير الموصى بها. يوصى بمتابعة دورية عند إضافة "
-                    "منتجات أو أقسام جديدة.")
+                    "والنصوص البديلة وبنية الروابط ضمن المعايير الموصى بها. يوصى بمتابعة "
+                    "دورية عند إضافة منتجات أو أقسام جديدة.")
         body = "أظهر الفحص الفني: " + "، و".join(issues) + ". "
         if score < 60:
-            body += ("تشير النتيجة الإجمالية إلى فجوة واسعة في تهيئة المتجر لمحركات البحث. "
-                     "يوصى بإعادة كتابة البيانات الوصفية وإسناد نصوص بديلة لجميع صور "
-                     "المحتوى ضمن خطة عمل مرحلية.")
+            body += ("تشير النتيجة الإجمالية إلى فجوة واسعة في تهيئة المتجر لمحركات "
+                     "البحث. يوصى بإعادة كتابة البيانات الوصفية وإسناد نصوص بديلة "
+                     "وصفية لجميع صور المحتوى ضمن خطة عمل مرحلية.")
         elif score < 80:
-            body += ("المتجر مهيأ جزئياً، ومعالجة العناصر أعلاه من شأنها رفع درجة التوافق "
-                     "وتحسين فرص الظهور في نتائج البحث.")
+            body += ("المتجر مهيأ جزئياً، ومعالجة العناصر أعلاه من شأنها رفع درجة "
+                     "التوافق وتحسين فرص الظهور في نتائج البحث.")
         else:
-            body += ("المستوى العام جيد، وتبقى المعالجات المذكورة تحسينات تكميلية يمكن "
-                     "تنفيذها ضمن جولة مراجعة واحدة.")
+            body += ("المستوى العام جيد، وتبقى المعالجات المذكورة تحسينات تكميلية "
+                     "يمكن تنفيذها ضمن جولة مراجعة واحدة.")
         return body
 
     if missing > 0 and imgs > 0:
         issues.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) "
-                      "have no alt text, limiting visibility in Google Image search")
-    if bad_t > 0:
-        issues.append(f"{bad_t} meta titles fall outside the optimal 50-60 character range, "
-                      f"{stats.get('critical_titles', 0)} of them missing, far too short, "
-                      "or long enough to be truncated in search results")
-    if bad_d > 0:
-        issues.append(f"{bad_d} meta descriptions fall outside the optimal 120-150 character "
-                      f"range, {stats.get('critical_descs', 0)} of them critically so")
-    if notidx > 0:
-        issues.append(f"{notidx} products visible in the store are absent from the sitemap")
-    if stats.get('weak_alts', 0) > 0:
-        issues.append(f"{stats['weak_alts']} images carry alt text that is present but "
-                      "not descriptive or outside the useful length")
+                      "carry no alt text at all, excluding the store from Google Image search")
+    if generic > 0:
+        issues.append(f"{generic} images have alt text that is present but non-descriptive, "
+                      "duplicated, or keyword-stuffed")
+    if stats.get('bad_titles', 0) > 0:
+        issues.append(f"{stats['bad_titles']} meta titles fall outside the optimal 50-60 "
+                      f"character range, {stats.get('critical_titles', 0)} of them critically")
+    if stats.get('bad_descs', 0) > 0:
+        issues.append(f"{stats['bad_descs']} meta descriptions fall outside the optimal "
+                      f"120-150 character range, {stats.get('critical_descs', 0)} critically")
+    if stats.get('canon_missing', 0) > 0:
+        issues.append(f"{stats['canon_missing']} pages have no canonical tag, exposing "
+                      "the store to duplicate content")
     if stats.get('hidden_count', 0) > 0:
-        issues.append(f"{stats['hidden_count']} pages published in the sitemap have no "
-                      "internal link path for visitors and therefore lose their value")
-    if broken > 0:
-        issues.append(f"{broken} broken links are reachable by visitors")
+        issues.append(f"{stats['hidden_count']} sitemap pages have no internal link path "
+                      "for visitors and therefore lose their value")
+    if stats.get('redirect_count', 0) > 0:
+        issues.append(f"{stats['redirect_count']} sitemap URLs redirect elsewhere, "
+                      "consuming crawl budget without benefit")
+    if stats.get('broken_pages', 0) > 0:
+        issues.append(f"{stats['broken_pages']} broken links are reachable by visitors")
+
     if not issues:
         return ("The audit found no material gaps across the visible pages: titles, "
-                "descriptions and image alt text all fall within recommended standards. "
-                "Periodic review is advised whenever new products or categories are added.")
+                "descriptions, alt text and link structure all fall within recommended "
+                "standards. Periodic review is advised as new products are added.")
     body = "The technical audit found: " + "; ".join(issues) + ". "
     if score < 60:
         body += ("The overall score indicates a substantial gap in search engine readiness. "
-                 "Rewriting the metadata and assigning alt text to all content images is "
-                 "recommended as a phased programme of work.")
+                 "Rewriting metadata and assigning descriptive alt text to all content "
+                 "images is recommended as a phased programme of work.")
     elif score < 80:
         body += ("The store is partially optimised. Addressing the items above would raise "
                  "the compliance score and improve search visibility.")
@@ -1195,32 +1397,37 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     ])
 
     tot = max(stats['total_pages'] - stats.get('broken_pages', 0), 1)
-    draw_table(T['tbl_meta'], [
+    draw_table(T['tbl2'], [
         (T['r_titles_ok'], f"{tot - stats['bad_titles']} / {tot}"),
         (T['r_titles_crit'], f"{stats.get('critical_titles', 0)} {T['u_title']}"),
         (T['r_descs_ok'], f"{tot - stats['bad_descs']} / {tot}"),
         (T['r_descs_crit'], f"{stats.get('critical_descs', 0)} {T['u_desc']}"),
-        (T['r_canon_missing'], f"{stats.get('canon_missing', 0)} {T['u_page']}"),
+        (T['r_canon'], f"{stats.get('canon_missing', 0)} {T['u_page']}"),
+        (T['r_thin'], f"{stats.get('thin_pages', 0)} {T['u_page']}"),
     ])
 
     imgs = stats.get('total_images', 0)
     noalt = stats.get('missing_alts', 0)
-    ratio = round((noalt / imgs * 100), 1) if imgs else 0
-    state = (T['img_none'] if imgs == 0 else T['img_ok'] if noalt == 0
+    weak = stats.get('weak_alts', 0)
+    healthy = stats.get('good_alts', 0)
+    ratio = round(((noalt + weak) / imgs * 100), 1) if imgs else 0
+    state = (T['img_none'] if imgs == 0 else T['img_ok'] if (noalt + weak) == 0
              else T['img_gap'] if ratio > 50 else T['img_part'])
-    draw_table(T['tbl2'], [
+    draw_table(T['tbl3'], [
         (T['r_imgs'], f"{imgs} {T['u_img']}"),
         (T['r_noalt'], f"{noalt} {T['u_img']}"),
-        (T['r_alt_weak'], f"{stats.get('weak_alts', 0)} {T['u_img']}"),
-        (T['r_ratio'], f"{ratio}%"),
+        (T['r_generic'], f"{weak - stats.get('dup_alts', 0)} {T['u_img']}"),
+        (T['r_dup'], f"{stats.get('dup_alts', 0)} {T['u_img']}"),
+        (T['r_altok'], f"{healthy} {T['u_img']}"),
         (T['r_imgstate'], state),
     ])
 
     if stats.get('coverage_enabled'):
-        draw_table(T['tbl3'], [
+        draw_table(T['tbl4'], [
             (T['r_vis'], f"{stats.get('visible_products', 0)} {T['u_product']}"),
             (T['r_sm'], f"{stats.get('sitemap_products', 0)} {T['u_product']}"),
             (T['r_notidx'], f"{stats.get('not_indexed_count', 0)} {T['u_product']}"),
+            (T['r_redirect'], f"{stats.get('redirect_count', 0)} {T['u_link']}"),
             (T['r_orphan'], f"{stats.get('hidden_count', 0)} {T['u_page']}"),
             (T['r_idxpct'], f"{stats.get('indexed_pct', 0)}%"),
         ])
@@ -1277,14 +1484,16 @@ ZIP_NAMES = {
            T_HOME: "5_الصفحة_الرئيسية.csv", T_UNKNOWN: "6_غير_مصنفة.csv",
            T_BROKEN: "7_روابط_معطلة.csv", 'images': "8_تدقيق_الصور.csv",
            'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
-           'hidden': "10_روابط_الخريطة_غير_المعروضة.csv",
+           'orphan': "10_صفحات_يتيمة_في_الخريطة.csv",
+           'redirect': "11_روابط_الخريطة_المحوّلة.csv",
            'excel': "التقرير_الشامل.xlsx"},
     'en': {T_PRODUCT: "1_products.csv", T_CATEGORY: "2_categories.csv",
            T_BLOG: "3_blog.csv", T_INFO: "4_info_pages.csv",
            T_HOME: "5_homepage.csv", T_UNKNOWN: "6_unclassified.csv",
            T_BROKEN: "7_broken_links.csv", 'images': "8_image_alt_audit.csv",
            'notidx': "9_products_missing_from_sitemap.csv",
-           'hidden': "10_sitemap_urls_not_visible.csv",
+           'orphan': "10_orphan_sitemap_pages.csv",
+           'redirect': "11_redirecting_sitemap_urls.csv",
            'excel': "full_audit_report.xlsx"},
 }
 
@@ -1302,21 +1511,17 @@ def build_zip(df, images_df, coverage=None, lang='ar'):
             sub = ldf[ldf[type_col] == label] if type_col in ldf.columns else pd.DataFrame()
             if not sub.empty:
                 z.writestr(names[tkey], sub.to_csv(index=False, encoding='utf-8-sig'))
-
         if limg is not None and not limg.empty:
             z.writestr(names['images'], limg.to_csv(index=False, encoding='utf-8-sig'))
 
         if coverage:
-            col = 'رابط المنتج' if lang == 'ar' else 'Product URL'
-            if coverage.get('visible_not_in_sitemap'):
-                z.writestr(names['notidx'],
-                           pd.DataFrame({col: coverage['visible_not_in_sitemap']})
-                           .to_csv(index=False, encoding='utf-8-sig'))
-            if coverage.get('sitemap_not_visible'):
-                col2 = 'الرابط' if lang == 'ar' else 'URL'
-                z.writestr(names['hidden'],
-                           pd.DataFrame({col2: coverage['sitemap_not_visible']})
-                           .to_csv(index=False, encoding='utf-8-sig'))
+            for key, data in [('notidx', coverage.get('visible_not_in_sitemap')),
+                              ('orphan', coverage.get('sitemap_not_visible')),
+                              ('redirect', coverage.get('sitemap_redirects'))]:
+                if data:
+                    z.writestr(names[key],
+                               localize_df(pd.DataFrame(data), lang)
+                               .to_csv(index=False, encoding='utf-8-sig'))
 
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
@@ -1332,36 +1537,35 @@ def build_zip(df, images_df, coverage=None, lang='ar'):
 # ==============================================================
 #  الواجهة
 # ==============================================================
-st.sidebar.title("🧭 القائمة الرئيسية")
-nav = st.sidebar.radio("اختر الوجهة:", ["🔍 فحص متجر جديد", "📁 سجل المتاجر السابقة"])
+render_brandbar()
+
+with st.sidebar:
+    st.markdown("### 🧭 القائمة")
+    nav = st.radio("", ["🔍 فحص متجر جديد", "📁 سجل المتاجر"], label_visibility="collapsed")
+    st.markdown("---")
+    st.markdown("#### ⚙️ إعدادات الفحص")
+    max_pages = st.number_input("الحد الأقصى للصفحات", 50, 5000, MAX_PAGES_DEFAULT, 50)
+    workers = st.slider("المسارات المتوازية", 1, 8, 4)
+    do_pagination = st.checkbox("متابعة ترقيم الأقسام", value=True,
+                                help="يلتقط المنتجات في الصفحات التالية من كل قسم.")
+    do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True,
+                                   help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
+    st.markdown("---")
+    st.caption("الأداة معايرة على منصات سلة وزد وشوبيفاي.")
 
 if nav == "🔍 فحص متجر جديد":
-    st.title("🚀 مركز عمليات السيو الشامل للمتاجر")
-    st.write("الفحص يبدأ من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه الزائر. "
-             "لا تدخل التقرير أي صفحة لا يصل إليها الزائر فعلياً.")
-
-    c_url, c_btn = st.columns([4, 1])
-    with c_url:
-        input_url = st.text_input("أدخل رابط المتجر الإلكتروني:",
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        input_url = st.text_input("رابط المتجر الإلكتروني",
                                   value=st.session_state.current_url,
-                                  placeholder="https://midhal-oud.store")
-    with c_btn:
+                                  placeholder="https://example.store")
+    with c2:
         st.write("")
         st.write("")
-        start_btn = st.button("🔍 بدء الفحص")
-
-    with st.sidebar.expander("⚙️ إعدادات الفحص", expanded=False):
-        max_pages = st.number_input("الحد الأقصى للصفحات:", 50, 5000, MAX_PAGES_DEFAULT, 50)
-        workers = st.slider("عدد المسارات المتوازية:", 1, 8, 4)
-        do_pagination = st.checkbox("متابعة ترقيم صفحات الأقسام", value=True,
-                                    help="يلتقط المنتجات التي لا تظهر في الصفحة الأولى "
-                                         "من القسم — الزائر يصل إليها بزر التالي.")
-        do_sitemap_check = st.checkbox("مقارنة تشخيصية مع خريطة الموقع", value=True,
-                                       help="لا تؤثر على أرقام الفحص. تكشف المنتجات "
-                                            "المعروضة وغير المدرجة في الخريطة، والعكس.")
+        start_btn = st.button("بدء الفحص", type="primary", use_container_width=True)
 
     if st.session_state.audit_df is not None:
-        if st.sidebar.button("🔄 فحص متجر جديد (تفريغ الشاشة)"):
+        if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
             for k in ['audit_df', 'images_df', 'summary', 'coverage']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
@@ -1371,59 +1575,61 @@ if nav == "🔍 فحص متجر جديد":
         target = normalize_url(input_url)
         st.session_state.current_url = target
 
-        st.info("المرحلة 1: تصفح المتجر من الصفحة الرئيسية...")
-        bar1 = st.progress(0)
-        note1 = st.empty()
+        with st.status("جارٍ الفحص...", expanded=True) as status:
+            st.write("**المرحلة 1** — تصفح المتجر من الصفحة الرئيسية")
+            bar1 = st.progress(0)
+            note1 = st.empty()
 
-        def crawl_cb(done, pending, level):
-            bar1.progress(min(done / max(done + pending, 1), 1.0))
-            note1.caption(f"المستوى {level} — فُحصت {done} صفحة، "
-                          f"وفي الانتظار {pending} رابط.")
+            def crawl_cb(done, pending, level):
+                bar1.progress(min(done / max(done + pending, 1), 1.0))
+                note1.caption(f"المستوى {level} · فُحصت {done} صفحة · "
+                              f"{pending} رابط في الانتظار")
 
-        pages, imgs, cat_urls, seen, platform = crawl_store(
-            target, max_pages, workers, crawl_cb)
-        bar1.progress(1.0)
+            pages, imgs, cat_urls, seen, platform = crawl_store(
+                target, max_pages, workers, crawl_cb)
+            bar1.progress(1.0)
+            st.session_state.platform = platform
 
-        if platform in SUPPORTED_PLATFORMS:
-            st.success(f"المنصة المكتشفة: {PLATFORM_LABEL[platform]}")
-        else:
-            st.warning("لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. "
-                       "الأداة مُعايرة على هذه المنصات الثلاث، وقد تكون النتائج "
-                       "ناقصة على منصة أخرى — راجع تبويب التحقق اليدوي قبل "
-                       "إرسال التقرير لأي عميل.")
+            if do_pagination and cat_urls:
+                st.write("**المرحلة 2** — متابعة ترقيم صفحات الأقسام")
+                bar2 = st.progress(0)
+                note2 = st.empty()
 
-        if do_pagination and cat_urls:
-            st.info("المرحلة 2: متابعة ترقيم صفحات الأقسام...")
-            bar2 = st.progress(0)
-            note2 = st.empty()
+                def pag_cb(i, total, found, fetched):
+                    bar2.progress(min(i / max(total, 1), 1.0))
+                    note2.caption(f"{i}/{total} قسم · {found} منتج إضافي · "
+                                  f"{fetched} صفحة مجلوبة")
 
-            def pag_cb(i, total, found, fetched):
-                bar2.progress(min(i / max(total, 1), 1.0))
-                note2.caption(f"{i}/{total} قسم — {found} منتج إضافي من {fetched} صفحة.")
+                extra = harvest_paginated_products(target, cat_urls, seen, pag_cb)
+                if extra:
+                    st.write(f"**المرحلة 3** — فحص {len(extra)} منتج من الصفحات التالية")
+                    bar3 = st.progress(0)
+                    p2, i2 = audit_urls(extra, target, 'ترقيم الأقسام', workers, bar3)
+                    pages += p2
+                    imgs += i2
 
-            extra_urls = harvest_paginated_products(target, cat_urls, seen, pag_cb)
-            if extra_urls:
-                st.info(f"المرحلة 3: فحص {len(extra_urls)} منتج من الصفحات التالية...")
-                bar3 = st.progress(0)
-                p2, i2 = audit_urls(extra_urls, target, 'ترقيم الأقسام', workers, bar3)
-                pages += p2
-                imgs += i2
+            df = dedupe_pages(pd.DataFrame(pages))
+            images_df = pd.DataFrame(imgs)
+            if not images_df.empty:
+                images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
+                    .copy().reset_index(drop=True)
+                images_df = apply_duplicate_alt(images_df)
+            df = score_pages(df, images_df)
 
-        df = dedupe_pages(pd.DataFrame(pages))
-        images_df = pd.DataFrame(imgs)
-        if not images_df.empty:
-            images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
-                .copy().reset_index(drop=True)
-
-        coverage = None
-        if do_sitemap_check:
-            with st.spinner("مقارنة تشخيصية مع خريطة الموقع..."):
+            coverage = None
+            if do_sitemap_check:
+                st.write("**المرحلة 4** — مقارنة تشخيصية مع خريطة الموقع")
+                note4 = st.empty()
                 sm_urls = collect_sitemap_urls(target)
-                coverage = build_coverage_report(df, sm_urls, target)
+                note4.caption(f"{len(sm_urls)} رابط في الخريطة · جارٍ التحقق من "
+                              "وجهة الروابط غير المطابقة")
+                coverage = build_coverage_report(df, sm_urls, target, workers)
 
-        summary = compute_summary(df, coverage)
-        summary['platform'] = platform
-        summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+            summary = compute_summary(df, coverage, images_df)
+            summary['platform'] = platform
+            summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+            status.update(label="اكتمل الفحص", state="complete", expanded=False)
+
         st.session_state.audit_df = df
         st.session_state.images_df = images_df
         st.session_state.summary = summary
@@ -1433,12 +1639,12 @@ if nav == "🔍 فحص متجر جديد":
         conn.cursor().execute(
             '''INSERT INTO audits (domain, scan_date, score, total_pages, products_count,
                categories_count, info_pages_count, blog_pages_count, data_json,
-               images_json, coverage_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+               images_json, coverage_json, platform) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
             (target, datetime.now().strftime("%Y-%m-%d %H:%M"), summary['score'],
              summary['total_pages'], summary['products'], summary['categories'],
              summary['info_pages'], summary['blog_pages'], df.to_json(orient='records'),
              images_df.to_json(orient='records') if not images_df.empty else '',
-             json.dumps(coverage, ensure_ascii=False) if coverage else ''))
+             json.dumps(coverage, ensure_ascii=False) if coverage else '', platform))
         conn.commit()
         conn.close()
 
@@ -1447,156 +1653,306 @@ if nav == "🔍 فحص متجر جديد":
         images_df = st.session_state.images_df
         summary = st.session_state.summary
         coverage = st.session_state.coverage
+        platform = st.session_state.platform
 
-        st.success(f"اكتمل الفحص: {st.session_state.current_url}")
+        sc = summary['score']
+        sc_color = COLOR['bad'] if sc < 60 else COLOR['warn'] if sc < 80 else COLOR['ok']
+        plat_txt = PLATFORM_LABEL.get(platform, '—')
+        st.markdown(f"""<div class="hero">
+          <div><div class="score" style="color:{sc_color}">{sc}%</div>
+               <div class="scorelbl">درجة التوافق مع محركات البحث</div></div>
+          <div><div class="store">{urlparse(st.session_state.current_url).netloc}</div>
+               <div class="plat">المنصة: {plat_txt} · {datetime.now().strftime('%Y-%m-%d')}</div>
+          </div></div>""", unsafe_allow_html=True)
 
-        for col, (val, lbl) in zip(st.columns(7), [
-            (summary["total_pages"], "الصفحات المعروضة"),
-            (f'{summary["score"]}%', "نسبة التوافق"),
-            (summary["products"], "المنتجات"),
-            (summary["categories"], "الأقسام"),
-            (summary["blog_pages"], "المدونة"),
-            (summary["info_pages"], "التعريفية"),
-            (summary.get("broken_pages", 0), "روابط معطلة"),
-        ]):
+        if platform not in SUPPORTED_PLATFORMS:
+            st.warning("لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. الأداة معايرة "
+                       "على هذه المنصات الثلاث — راجع تبويب التحقق اليدوي قبل إرسال "
+                       "التقرير لأي عميل.")
+
+        cards = [
+            (summary["total_pages"], "الصفحات المعروضة", COLOR['accent']),
+            (summary["products"], "المنتجات", COLOR['accent']),
+            (summary["categories"], "الأقسام", COLOR['accent']),
+            (summary["blog_pages"], "المدونة",
+             COLOR['warn'] if summary["blog_pages"] == 0 else COLOR['accent']),
+            (summary["info_pages"], "التعريفية", COLOR['accent']),
+            (summary["missing_alts"], "صور بلا Alt",
+             COLOR['bad'] if summary["missing_alts"] else COLOR['ok']),
+            (summary.get("broken_pages", 0), "روابط معطلة",
+             COLOR['bad'] if summary.get("broken_pages") else COLOR['ok']),
+        ]
+        for col, (v, l, c) in zip(st.columns(7), cards):
             with col:
-                st.markdown(f'<div class="metric-card"><div class="metric-value">{val}</div>'
-                            f'<div class="metric-label">{lbl}</div></div>',
-                            unsafe_allow_html=True)
+                st.markdown(metric_card(v, l, c), unsafe_allow_html=True)
 
+        st.write("")
         view_df = localize_df(df, 'ar')
         view_imgs = localize_df(images_df, 'ar')
-        tabs = st.tabs(["📄 الصفحات", "🖼️ الصور", "🎯 مقارنة الخريطة", "🔬 التحقق اليدوي"])
+        tabs = st.tabs(["📊 نظرة عامة", "📄 الصفحات", "🖼️ الصور",
+                        "🗺️ خريطة الموقع", "🔬 التحقق اليدوي", "📥 التصدير"])
 
+        # ---------------- نظرة عامة ----------------
         with tabs[0]:
+            L = STATUS_LABEL['ar']
+            ok = df[df['متاحة'] == True]  # noqa: E712
+            g1, g2 = st.columns(2)
+
+            with g1:
+                items = [(PAGE_TYPE_LABEL['ar'][t], int((df['نوع الصفحة'] == t).sum()))
+                         for t in PAGE_TYPE_ORDER if (df['نوع الصفحة'] == t).any()]
+                st.markdown(bar_chart("توزيع أنواع الصفحات", items),
+                            unsafe_allow_html=True)
+
+                tcounts = ok['حالة العنوان'].value_counts()
+                items = [(L[k], int(tcounts.get(k, 0)))
+                         for k in ['optimal', 'acceptable', 'very_short', 'long', 'missing']
+                         if tcounts.get(k, 0)]
+                st.markdown(bar_chart("حالة عناوين الميتا", items, {
+                    L['optimal']: COLOR['ok'], L['acceptable']: COLOR['warn'],
+                    L['very_short']: COLOR['bad'], L['long']: COLOR['bad'],
+                    L['missing']: COLOR['bad']}), unsafe_allow_html=True)
+
+            with g2:
+                if images_df is not None and not images_df.empty:
+                    acounts = images_df['حالة النص البديل'].value_counts()
+                    items = [(L[k], int(acounts.get(k, 0)))
+                             for k in ['alt_ok', 'alt_duplicate', 'alt_long',
+                                       'alt_stuffed', 'alt_generic', 'alt_missing']
+                             if acounts.get(k, 0)]
+                    st.markdown(bar_chart("جودة النصوص البديلة للصور", items, {
+                        L['alt_ok']: COLOR['ok'], L['alt_duplicate']: COLOR['warn'],
+                        L['alt_long']: COLOR['warn'], L['alt_stuffed']: COLOR['bad'],
+                        L['alt_generic']: COLOR['bad'], L['alt_missing']: COLOR['bad']}),
+                        unsafe_allow_html=True)
+
+                dcounts = ok['حالة الوصف'].value_counts()
+                items = [(L[k], int(dcounts.get(k, 0)))
+                         for k in ['optimal', 'acceptable', 'very_short', 'long', 'missing']
+                         if dcounts.get(k, 0)]
+                st.markdown(bar_chart("حالة أوصاف الميتا", items, {
+                    L['optimal']: COLOR['ok'], L['acceptable']: COLOR['warn'],
+                    L['very_short']: COLOR['bad'], L['long']: COLOR['bad'],
+                    L['missing']: COLOR['bad']}), unsafe_allow_html=True)
+
+            st.markdown("#### أبرز النتائج")
+            out = []
+            if summary['missing_alts']:
+                out.append((f"<b>{summary['missing_alts']}</b> صورة بلا نص بديل إطلاقاً "
+                            f"من أصل {summary['total_images']} — أكبر فجوة قابلة "
+                            "للإصلاح في المتجر.", 'bad'))
+            if summary['weak_alts']:
+                out.append((f"<b>{summary['weak_alts']}</b> صورة نصها البديل موجود لكنه "
+                            "غير وصفي أو مكرر — يمر كسليم في الأدوات السطحية.", 'warn'))
+            if summary['critical_titles']:
+                out.append((f"<b>{summary['critical_titles']}</b> عنوان مفقود أو قصير جداً "
+                            "أو يُقتطع في نتائج البحث.", 'bad'))
+            if summary['critical_descs']:
+                out.append((f"<b>{summary['critical_descs']}</b> وصف ميتا خارج الحدود "
+                            "المفيدة.", 'warn'))
+            if summary['canon_missing']:
+                out.append((f"<b>{summary['canon_missing']}</b> صفحة بلا وسم كانونيكال — "
+                            "خطر تكرار المحتوى.", 'warn'))
+            if summary.get('hidden_count'):
+                bt = summary.get('orphan_by_type', {})
+                brk = "، ".join(f"{PAGE_TYPE_LABEL['ar'].get(k, k)}: {v}"
+                                for k, v in bt.items())
+                out.append((f"<b>{summary['hidden_count']}</b> صفحة يتيمة في خريطة الموقع "
+                            f"({brk}) — منشورة ولا يصل إليها أحد.", 'warn'))
+            if summary.get('redirect_count'):
+                out.append((f"<b>{summary['redirect_count']}</b> رابط في الخريطة يعيد "
+                            "التوجيه لصفحة أخرى — هدر لميزانية الزحف.", 'warn'))
+            if summary['broken_pages']:
+                out.append((f"<b>{summary['broken_pages']}</b> رابط معطل يصل إليه الزائر.",
+                            'bad'))
+            if summary['thin_pages']:
+                out.append((f"<b>{summary['thin_pages']}</b> صفحة بمحتوى نصي ضعيف "
+                            "(أقل من 50 كلمة).", 'warn'))
+            if not out:
+                out.append(("لم يرصد الفحص فجوات جوهرية في الصفحات المعروضة.", 'ok'))
+            for text, lvl in out:
+                st.markdown(finding(text, lvl), unsafe_allow_html=True)
+
+        # ---------------- الصفحات ----------------
+        with tabs[1]:
             present = [PAGE_TYPE_LABEL['ar'][t] for t in PAGE_TYPE_ORDER
                        if (df['نوع الصفحة'] == t).any()]
-            sel = st.selectbox("نوع الصفحة:", ["جميع الصفحات"] + present)
-            d = view_df if sel == "جميع الصفحات" else view_df[view_df['نوع الصفحة'] == sel]
+            f1, f2 = st.columns([2, 3])
+            with f1:
+                sel = st.selectbox("نوع الصفحة", ["الكل"] + present)
+            with f2:
+                only_issues = st.checkbox("عرض الصفحات التي بها مشاكل فقط", value=False)
+
+            d = view_df if sel == "الكل" else view_df[view_df['نوع الصفحة'] == sel]
+            if only_issues:
+                d = d[(d['حالة العنوان'] != STATUS_LABEL['ar']['optimal']) |
+                      (d['حالة الوصف'] != STATUS_LABEL['ar']['optimal']) |
+                      (d['صور بدون Alt'] > 0) | (d['متاحة'] == False)]  # noqa: E712
             d = d.copy().reset_index(drop=True)
             d.index = d.index + 1
-            st.dataframe(d, use_container_width=True)
+            st.dataframe(d, use_container_width=True, height=460,
+                         column_config={"الرابط": st.column_config.LinkColumn(
+                             "الرابط", width="large"),
+                             "درجة السيو": st.column_config.ProgressColumn(
+                                 "درجة السيو", min_value=0, max_value=100, format="%d")})
             langs = df[df['متاحة'] == True]['لغة الصفحة'].value_counts()  # noqa: E712
-            if not langs.empty:
-                st.caption("لغات الصفحات المرصودة: " +
-                           "، ".join(f"{k}: {v}" for k, v in langs.items()))
-            st.caption(f"معايير الطول: العنوان مثالي {TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرف "
-                       f"(مقبول من {TITLE_MIN_OK})، الوصف مثالي "
-                       f"{DESC_MIN_OPTIMAL}-{DESC_MAX} حرف (مقبول من {DESC_MIN_OK}). "
-                       "يُحسب الطول بالحروف شاملاً المسافات وعلامات الترقيم.")
+            st.caption(
+                f"معايير الطول — العنوان مثالي {TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرفاً "
+                f"(مقبول من {TITLE_MIN_OK})، الوصف مثالي {DESC_MIN_OPTIMAL}-{DESC_MAX} "
+                f"حرفاً (مقبول من {DESC_MIN_OK}). يُحسب الطول بالحروف شاملاً المسافات "
+                "وعلامات الترقيم. · لغات الصفحات: " +
+                "، ".join(f"{k}: {v}" for k, v in langs.items()))
 
-        with tabs[1]:
+        # ---------------- الصور ----------------
+        with tabs[2]:
             if view_imgs is not None and not view_imgs.empty:
-                f = st.selectbox("تصفية:", ["جميع الصور", "بدون Alt", "Alt غير مطابق",
-                                            "Alt مثالي"])
                 L = STATUS_LABEL['ar']
+                f = st.selectbox("تصفية", ["الكل", "بلا نص بديل", "نص بديل ضعيف",
+                                           "نص بديل سليم"])
                 v = view_imgs
-                if f == "بدون Alt":
+                if f == "بلا نص بديل":
                     v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_missing']]
-                elif f == "Alt غير مطابق":
+                elif f == "نص بديل ضعيف":
                     v = view_imgs[view_imgs['حالة النص البديل'].isin(
-                        [L['alt_weak'], L['alt_short'], L['alt_long']])]
-                elif f == "Alt مثالي":
-                    v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_optimal']]
+                        [L[k] for k in ALT_WEAK_STATES])]
+                elif f == "نص بديل سليم":
+                    v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_ok']]
                 v = v.copy().reset_index(drop=True)
                 v.index = v.index + 1
-                st.dataframe(v, use_container_width=True)
+                st.dataframe(v, use_container_width=True, height=460,
+                             column_config={
+                                 "رابط الصورة": st.column_config.ImageColumn(
+                                     "معاينة", width="small"),
+                                 "رابط الصفحة": st.column_config.LinkColumn(
+                                     "رابط الصفحة", width="medium")})
+                st.caption("معايير التقييم — النص البديل يُقيَّم بجودته لا بطوله: "
+                           "الغياب، أو النص غير الوصفي (اسم ملف أو كلمة عامة)، أو حشو "
+                           f"الكلمات، أو تكراره على {ALT_DUP_THRESHOLD} صور فأكثر، أو "
+                           f"تجاوزه {ALT_MAX} حرفاً (حد قارئات الشاشة).")
             else:
                 st.info("لا توجد صور محتوى مرصودة.")
 
-        with tabs[2]:
+        # ---------------- خريطة الموقع ----------------
+        with tabs[3]:
             if not coverage:
                 st.info("لم تُفعّل المقارنة مع خريطة الموقع في هذا الفحص.")
             else:
                 st.caption("هذه المقارنة تشخيصية ولا تؤثر على أرقام الفحص أعلاه.")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("منتجات معروضة للزائر", coverage['visible_count'])
-                c2.metric("منتجات في الخريطة", coverage['sitemap_count'])
-                c3.metric("معروضة وخارج الخريطة", len(coverage['visible_not_in_sitemap']))
-                c4.metric("نسبة الإدراج", f"{coverage['indexed_pct']}%")
+                m = st.columns(4)
+                m[0].metric("منتجات معروضة للزائر", coverage['visible_count'])
+                m[1].metric("منتجات في الخريطة", coverage['sitemap_count'])
+                m[2].metric("معروضة وخارج الخريطة",
+                            len(coverage['visible_not_in_sitemap']))
+                m[3].metric("نسبة الإدراج", f"{coverage['indexed_pct']}%")
+                st.write("")
 
                 if coverage['visible_not_in_sitemap']:
-                    st.error(f"{len(coverage['visible_not_in_sitemap'])} منتج يراه الزائر "
-                             "ولا يظهر في خريطة الموقع — محركات البحث قد لا تعلم بوجوده.")
+                    st.markdown(finding(
+                        f"<b>{len(coverage['visible_not_in_sitemap'])}</b> منتج يراه الزائر "
+                        "ولا يظهر في خريطة الموقع — محركات البحث قد لا تعلم بوجوده.",
+                        'bad'), unsafe_allow_html=True)
                     st.dataframe(localize_df(
                         pd.DataFrame(coverage['visible_not_in_sitemap']), 'ar'),
                         use_container_width=True)
                 else:
-                    st.success("جميع المنتجات المعروضة مدرجة في خريطة الموقع.")
+                    st.markdown(finding(
+                        "جميع المنتجات المعروضة مدرجة في خريطة الموقع.", 'ok'),
+                        unsafe_allow_html=True)
+
+                if coverage.get('sitemap_redirects'):
+                    st.markdown(finding(
+                        f"<b>{len(coverage['sitemap_redirects'])}</b> رابط في خريطة الموقع "
+                        "يعيد التوجيه لصفحة أخرى مفحوصة أصلاً. الصفحات نفسها سليمة، "
+                        "لكن إدراج الروابط القديمة في الخريطة يستهلك ميزانية الزحف "
+                        "ويُفضّل استبدالها بوجهاتها النهائية.", 'warn'),
+                        unsafe_allow_html=True)
+                    st.dataframe(localize_df(
+                        pd.DataFrame(coverage['sitemap_redirects']), 'ar'),
+                        use_container_width=True)
 
                 if coverage['sitemap_not_visible']:
-                    by_type = coverage.get('orphan_by_type', {})
-                    breakdown = "، ".join(
-                        f"{PAGE_TYPE_LABEL['ar'].get(k, k)}: {v}" for k, v in by_type.items())
-                    st.warning(
-                        f"{len(coverage['sitemap_not_visible'])} صفحة منشورة في خريطة الموقع "
-                        f"لا يصل إليها الزائر بأي رابط داخلي ({breakdown}). "
-                        "هذه صفحات يتيمة: تستهلك ميزانية الزحف ولا تستفيد من قوة الموقع. "
-                        "وهي مستبعدة من أرقام الفحص لأن الزائر لا يراها.")
+                    bt = coverage.get('orphan_by_type', {})
+                    brk = "، ".join(f"{PAGE_TYPE_LABEL['ar'].get(k, k)}: {v}"
+                                    for k, v in bt.items())
+                    st.markdown(finding(
+                        f"<b>{len(coverage['sitemap_not_visible'])}</b> صفحة يتيمة "
+                        f"({brk}): منشورة في خريطة الموقع ولا يصل إليها الزائر بأي رابط "
+                        "داخلي. لا تستفيد من قوة الموقع وهي مستبعدة من أرقام الفحص.",
+                        'warn'), unsafe_allow_html=True)
                     st.dataframe(localize_df(
                         pd.DataFrame(coverage['sitemap_not_visible']), 'ar'),
                         use_container_width=True)
 
-        with tabs[3]:
-            st.subheader("🔬 عيّنة للتحقق اليدوي")
-            st.write("افتح كل رابط وقارن العنوان والوصف بما هو مسجّل هنا.")
+        # ---------------- التحقق اليدوي ----------------
+        with tabs[4]:
+            st.markdown("#### عيّنة للمطابقة اليدوية")
+            st.caption("افتح كل رابط وقارن العنوان والوصف بما هو مسجّل هنا. "
+                       "تطابق العيّنة كاملة يعني أن محرك القراءة يعمل بشكل صحيح.")
             pool = df[(df['متاحة'] == True) & (df['نوع الصفحة'] == T_PRODUCT)]  # noqa: E712
             if pool.empty:
                 pool = df[df['متاحة'] == True]  # noqa: E712
             if pool.empty:
                 st.info("لا توجد صفحات متاحة للتحقق.")
             else:
-                sample = pool.sample(n=min(5, len(pool)),
-                                     random_state=int(time.time()) % 1000)
-                for _, row in sample.iterrows():
+                if st.button("🎲 عيّنة جديدة"):
+                    st.session_state['sample_seed'] = int(time.time())
+                seed = st.session_state.get('sample_seed', 42)
+                sample = pool.sample(n=min(5, len(pool)), random_state=seed)
+                L = STATUS_LABEL['ar']
+                for _, r in sample.iterrows():
                     with st.container(border=True):
-                        st.markdown(f"**الرابط:** [{unquote(row['الرابط'])}]({row['الرابط']})")
-                        st.write(f"العنوان ({row['طول العنوان']} حرف — "
-                                 f"{STATUS_LABEL['ar'][row['حالة العنوان']]}): "
-                                 f"{row['عنوان الميتا'] or '— مفقود —'}")
-                        st.write(f"الوصف ({row['طول الوصف']} حرف — "
-                                 f"{STATUS_LABEL['ar'][row['حالة الوصف']]}): "
-                                 f"{row['وصف الميتا'] or '— مفقود —'}")
-                        st.write(f"صور: {row['إجمالي الصور']} | "
-                                 f"بدون Alt: {row['صور بدون Alt']} | "
-                                 f"كلمات: {row['عدد الكلمات']} | "
-                                 f"لغة: {row['لغة الصفحة']}")
+                        st.markdown(f"**[{r['الرابط']}]({r['الرابط']})**")
+                        a, b, c = st.columns(3)
+                        a.metric("طول العنوان", r['طول العنوان'], L[r['حالة العنوان']])
+                        b.metric("طول الوصف", r['طول الوصف'], L[r['حالة الوصف']])
+                        c.metric("درجة الصفحة", f"{r['درجة السيو']}%")
+                        st.write(f"**العنوان:** {r['عنوان الميتا'] or '— مفقود —'}")
+                        st.write(f"**الوصف:** {r['وصف الميتا'] or '— مفقود —'}")
+                        st.caption(f"صور: {r['إجمالي الصور']} · بلا Alt: "
+                                   f"{r['صور بدون Alt']} · Alt ضعيف: {r['صور Alt ضعيف']} · "
+                                   f"كلمات: {r['عدد الكلمات']} · لغة: {r['لغة الصفحة']} · "
+                                   f"كانونيكال: {L[r['حالة الكانونيكال']]}")
 
-        st.subheader("📥 التحميل والتصدير")
-        lang_choice = st.radio("لغة الملفات المُصدَّرة:", ["العربية", "English"],
-                               horizontal=True, key="export_lang")
-        lang = 'ar' if lang_choice == "العربية" else 'en'
+        # ---------------- التصدير ----------------
+        with tabs[5]:
+            st.markdown("#### تصدير التقرير والبيانات")
+            lang_choice = st.radio("لغة الملفات", ["العربية", "English"], horizontal=True)
+            lang = 'ar' if lang_choice == "العربية" else 'en'
+            exp_summary = dict(summary)
+            exp_summary['platform_label'] = (PLATFORM_LABEL if lang == 'ar'
+                                             else PLATFORM_LABEL_EN).get(platform, '—')
+            netloc = urlparse(st.session_state.current_url).netloc or "store"
+            try:
+                pdf_bytes = generate_client_pdf(st.session_state.current_url,
+                                                summary['score'], exp_summary, lang)
+            except Exception as e:
+                pdf_bytes = None
+                st.error(f"تعذر توليد الـ PDF: {e}")
+            zip_bytes = build_zip(df, images_df, coverage, lang)
 
-        netloc = urlparse(st.session_state.current_url).netloc or "store"
-        try:
-            pdf_bytes = generate_client_pdf(st.session_state.current_url,
-                                            summary['score'], summary, lang)
-        except Exception as e:
-            pdf_bytes = None
-            st.error(f"تعذر توليد الـ PDF: {e}")
-        zip_bytes = build_zip(df, images_df, coverage, lang)
-
-        d1, d2 = st.columns(2)
-        with d1:
-            if pdf_bytes:
+            d1, d2 = st.columns(2)
+            with d1:
+                if pdf_bytes:
+                    st.download_button(
+                        "📄 تقرير العميل (PDF)" if lang == 'ar' else "📄 Client report (PDF)",
+                        pdf_bytes, f"SEO_Audit_{netloc}_{lang}.pdf", "application/pdf",
+                        use_container_width=True)
+            with d2:
                 st.download_button(
-                    "📄 تقرير العميل (PDF)" if lang == 'ar' else "📄 Client report (PDF)",
-                    pdf_bytes, f"SEO_Audit_{netloc}_{lang}.pdf", "application/pdf")
-        with d2:
-            st.download_button(
-                "📦 حزمة البيانات (ZIP)" if lang == 'ar' else "📦 Data package (ZIP)",
-                zip_bytes, f"Data_Package_{netloc}_{lang}.zip", "application/zip")
+                    "📦 حزمة البيانات (ZIP)" if lang == 'ar' else "📦 Data package (ZIP)",
+                    zip_bytes, f"Data_Package_{netloc}_{lang}.zip", "application/zip",
+                    use_container_width=True)
 
-elif nav == "📁 سجل المتاجر السابقة":
-    st.title("📁 سجل المتاجر المفحوصة")
-    st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على Streamlit Cloud.")
-
+else:
+    st.markdown("### 📁 سجل المتاجر المفحوصة")
+    st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على "
+               "Streamlit Cloud.")
     conn = sqlite3.connect(DB_FILE)
     hist = pd.read_sql_query(
         "SELECT id, domain as 'المتجر', scan_date as 'تاريخ الفحص', score as 'النسبة', "
-        "total_pages as 'الصفحات', products_count as 'المنتجات', categories_count as 'الأقسام', "
-        "blog_pages_count as 'المدونة', info_pages_count as 'التعريفية' "
-        "FROM audits ORDER BY id DESC", conn)
+        "platform as 'المنصة', total_pages as 'الصفحات', products_count as 'المنتجات', "
+        "categories_count as 'الأقسام', blog_pages_count as 'المدونة', "
+        "info_pages_count as 'التعريفية' FROM audits ORDER BY id DESC", conn)
     conn.close()
 
     if hist.empty:
@@ -1604,13 +1960,13 @@ elif nav == "📁 سجل المتاجر السابقة":
     else:
         st.dataframe(hist.drop(columns=['id']), use_container_width=True)
         sel_id = st.selectbox(
-            "اختر المتجر:", hist['id'].tolist(),
+            "اختر المتجر", hist['id'].tolist(),
             format_func=lambda x: f"{hist[hist['id']==x]['المتجر'].values[0]} "
                                   f"({hist[hist['id']==x]['تاريخ الفحص'].values[0]})")
-        if st.button("📥 استرجاع البيانات"):
+        if st.button("📥 استرجاع البيانات", type="primary"):
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("SELECT domain, data_json, images_json, coverage_json "
+            c.execute("SELECT domain, data_json, images_json, coverage_json, platform "
                       "FROM audits WHERE id = ?", (sel_id,))
             row = c.fetchone()
             conn.close()
@@ -1624,5 +1980,8 @@ elif nav == "📁 سجل المتاجر السابقة":
                 st.session_state.audit_df = rdf
                 st.session_state.images_df = rimg
                 st.session_state.coverage = rcov
-                st.session_state.summary = compute_summary(rdf, rcov)
-                st.success("تم الاسترجاع. انتقل إلى (فحص متجر جديد) لعرض النتائج والتحميل.")
+                st.session_state.platform = row[4] or 'unknown'
+                st.session_state.summary = compute_summary(rdf, rcov, rimg)
+                st.session_state.summary['platform_label'] = PLATFORM_LABEL.get(
+                    row[4] or 'unknown', '—')
+                st.success("تم الاسترجاع. انتقل إلى (فحص متجر جديد) لعرض النتائج.")
