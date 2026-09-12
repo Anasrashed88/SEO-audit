@@ -107,6 +107,7 @@ COL_EN = {
     'حالة الكانونيكال': 'Canonical Status', 'رابط الصفحة': 'Page URL',
     'رابط الصورة': 'Image URL', 'النص البديل الحالي (Alt)': 'Current Alt Text',
     'طول النص البديل': 'Alt Length', 'حالة النص البديل': 'Alt Status',
+    'عدد الصفحات': 'Appears On Pages',
     'الوجهة النهائية': 'Final Destination',
 }
 
@@ -295,6 +296,7 @@ EXCLUDE_PATH_PARTS = [
     '/my-account', '/wishlist', '/favorites', '/compare', '/search', '/orders',
     '/customer', '/password', '/thank-you', '/logout', '/tag/', '/tags/',
     '/سلة', '/حسابي', '/تسجيل', '/الدفع', '/بحث', '/المفضلة',
+    '/cdn-cgi/', '/email-protection', '/__', '/wp-admin', '/wp-json',
 ]
 BAD_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.avif', '.pdf',
                   '.zip', '.rar', '.xml', '.css', '.js', '.ico', '.mp4', '.webm',
@@ -338,9 +340,41 @@ def grade_length(length, min_ok, min_optimal, max_len):
     return 'long'
 
 
-GENERIC_ALT = {'image', 'img', 'photo', 'picture', 'icon', 'logo', 'product', 'item',
-               'صورة', 'صوره', 'منتج', 'شعار', 'صور', 'photos', 'images', 'untitled',
-               'default', 'thumbnail', 'banner', 'slide', 'new', 'sale'}
+AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
+
+
+def normalize_ar_token(tok):
+    """تجريد أداة التعريف وحروف العطف وتوحيد الهمزات، حتى تطابق
+    «والأحكام» الكلمة المفتاحية «احكام»."""
+    t = tok.strip('.,،؛:!?()[]')
+    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)      # التشكيل
+    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+    t = t.replace('ى', 'ي').replace('ة', 'ه')
+    for pre in AR_PREFIXES:
+        if t.startswith(pre) and len(t) > len(pre) + 1:
+            t = t[len(pre):]
+            break
+    return t
+
+
+GENERIC_ALT = {
+    'image', 'images', 'img', 'photo', 'photos', 'picture', 'pic', 'icon', 'logo',
+    'product', 'item', 'untitled', 'default', 'thumbnail', 'thumb', 'banner',
+    'slide', 'slider', 'cover', 'hero', 'main', 'mobile', 'desktop', 'tablet',
+    'new', 'sale', 'view', 'gallery', 'preview',
+    'صورة', 'صوره', 'صور', 'منتج', 'شعار', 'غلاف', 'رئيسية', 'جديد',
+}
+
+
+GENERIC_ALT_NORM = None
+
+
+def _generic_alt_norm():
+    global GENERIC_ALT_NORM
+    if GENERIC_ALT_NORM is None:
+        GENERIC_ALT_NORM = {normalize_ar_token(w) if re.search(r'[\u0600-\u06FF]', w)
+                            else w for w in GENERIC_ALT}
+    return GENERIC_ALT_NORM
 
 
 def grade_alt(alt_text):
@@ -360,8 +394,10 @@ def grade_alt(alt_text):
         return 'alt_generic', length
     if re.fullmatch(r'[\d\W_]+', txt):
         return 'alt_generic', length
-    words = [w.strip('.,،؛:!?') for w in low.split() if w.strip('.,،؛:!?')]
-    if not words or all(w in GENERIC_ALT for w in words):
+    words = [w.strip('.,،؛:!?|-()[]') for w in low.split()]
+    words = [normalize_ar_token(w) if re.search(r'[\u0600-\u06FF]', w) else w
+             for w in words if w]
+    if not words or all(w in _generic_alt_norm() for w in words):
         return 'alt_generic', length
     if length > ALT_MAX:
         return 'alt_long', length
@@ -381,17 +417,34 @@ ALT_WEAK_STATES = ('alt_generic', 'alt_stuffed', 'alt_long', 'alt_duplicate')
 
 
 def apply_duplicate_alt(images_df):
-    """نفس النص البديل على عدة صور مختلفة لا يميّز أياً منها لمحركات البحث."""
+    """نفس النص البديل على صور مختلفة لا يميّز أياً منها لمحركات البحث.
+
+    يُحسب التكرار على مستوى الصورة الفريدة لا على مستوى الصفوف: ظهور صورة
+    المنتج نفسها في الرئيسية وصفحة القسم وصفحة المنتج ليس تكراراً، بل هو
+    السلوك الطبيعي لأي متجر.
+    """
     if images_df is None or images_df.empty:
         return images_df
     df = images_df.copy()
-    ok_mask = df['حالة النص البديل'] == 'alt_ok'
-    counts = df.loc[ok_mask, 'النص البديل الحالي (Alt)'].value_counts()
+    uniq = df.drop_duplicates(subset=['رابط الصورة'])
+    ok = uniq[uniq['حالة النص البديل'] == 'alt_ok']
+    counts = ok['النص البديل الحالي (Alt)'].value_counts()
     dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
     if dupes:
-        df.loc[ok_mask & df['النص البديل الحالي (Alt)'].isin(dupes),
-               'حالة النص البديل'] = 'alt_duplicate'
+        mask = (df['حالة النص البديل'] == 'alt_ok') & \
+               df['النص البديل الحالي (Alt)'].isin(dupes)
+        df.loc[mask, 'حالة النص البديل'] = 'alt_duplicate'
     return df
+
+
+def unique_images(images_df):
+    """جدول الصور الفريدة مع عدد الصفحات التي تظهر فيها كل صورة."""
+    if images_df is None or images_df.empty:
+        return images_df
+    counts = images_df.groupby('رابط الصورة')['رابط الصفحة'].nunique()
+    out = images_df.drop_duplicates(subset=['رابط الصورة']).copy()
+    out['عدد الصفحات'] = out['رابط الصورة'].map(counts)
+    return out.reset_index(drop=True)
 
 
 # ==============================================================
@@ -436,23 +489,6 @@ BLOG_SEGMENTS = ('blog', 'blogs', 'articles', 'article', 'post', 'posts', 'news'
                  'مدونة', 'مقالات', 'اخبار', 'أخبار')
 CATEGORY_SEGMENTS = ('category', 'categories', 'collection', 'collections',
                      'department', 'departments', 'قسم', 'اقسام', 'أقسام', 'تصنيف')
-
-
-AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
-
-
-def normalize_ar_token(tok):
-    """تجريد أداة التعريف وحروف العطف وتوحيد الهمزات، حتى تطابق
-    «والأحكام» الكلمة المفتاحية «احكام»."""
-    t = tok.strip('.,،؛:!?()[]')
-    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)      # التشكيل
-    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
-    t = t.replace('ى', 'ي').replace('ة', 'ه')
-    for pre in AR_PREFIXES:
-        if t.startswith(pre) and len(t) > len(pre) + 1:
-            t = t[len(pre):]
-            break
-    return t
 
 
 POLICY_KEYWORDS_NORM = None
@@ -570,6 +606,9 @@ JUNK_KEYWORDS = [
     'stc-pay', 'stcpay', 'vat', 'tax', 'maroof', 'social', 'whatsapp', 'snapchat',
     'instagram', 'tiktok', 'twitter', 'pixel', 'spacer', 'avatar', 'arrow',
     'placeholder', 'blank',
+    # شعارات شركات الشحن ومزودي الخدمة
+    'zidship', 'aramex', 'smsa', 'redbox', 'naqel', 'servicelevel', 'courier',
+    'shipment', 'shipping-company', 'carrier', 'fastlo', 'imile',
 ]
 
 
@@ -1022,8 +1061,9 @@ def dedupe_pages(df):
 def compute_summary(df, coverage=None, images_df=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     alt_counts = {}
-    if images_df is not None and not images_df.empty:
-        alt_counts = images_df['حالة النص البديل'].value_counts().to_dict()
+    uimg = unique_images(images_df)
+    if uimg is not None and not uimg.empty:
+        alt_counts = uimg['حالة النص البديل'].value_counts().to_dict()
     s = {
         'total_pages': len(df),
         'score': round(ok['درجة السيو'].mean(), 1) if not ok.empty else 0.0,
@@ -1039,7 +1079,8 @@ def compute_summary(df, coverage=None, images_df=None):
         'bad_descs': int((~ok['حالة الوصف'].isin(['optimal'])).sum()),
         'critical_descs': int(ok['حالة الوصف'].isin(
             ['missing', 'very_short', 'long']).sum()),
-        'total_images': int(ok['إجمالي الصور'].sum()),
+        'total_images': int(len(uimg)) if uimg is not None and not uimg.empty else 0,
+        'image_slots': int(ok['إجمالي الصور'].sum()),
         'missing_alts': int(alt_counts.get('alt_missing', 0)),
         'weak_alts': int(sum(alt_counts.get(k, 0) for k in ALT_WEAK_STATES)),
         'good_alts': int(alt_counts.get('alt_ok', 0)),
@@ -1490,7 +1531,7 @@ ZIP_NAMES = {
 def build_zip(df, images_df, coverage=None, lang='ar'):
     names = ZIP_NAMES[lang]
     ldf = localize_df(df, lang)
-    limg = localize_df(images_df, lang)
+    limg = localize_df(unique_images(images_df), lang)
     type_col = COL_EN['نوع الصفحة'] if lang == 'en' else 'نوع الصفحة'
 
     buf = io.BytesIO()
@@ -1679,7 +1720,8 @@ if nav == "🔍 فحص متجر جديد":
 
         st.write("")
         view_df = localize_df(df, 'ar')
-        view_imgs = localize_df(images_df, 'ar')
+        uimgs = unique_images(images_df)
+        view_imgs = localize_df(uimgs, 'ar')
         tabs = st.tabs(["📊 نظرة عامة", "📄 الصفحات", "🖼️ الصور",
                         "🗺️ خريطة الموقع", "🔬 التحقق اليدوي", "📥 التصدير"])
 
@@ -1706,7 +1748,7 @@ if nav == "🔍 فحص متجر جديد":
 
             with g2:
                 if images_df is not None and not images_df.empty:
-                    acounts = images_df['حالة النص البديل'].value_counts()
+                    acounts = uimgs['حالة النص البديل'].value_counts()
                     items = [(L[k], int(acounts.get(k, 0)))
                              for k in ['alt_ok', 'alt_duplicate', 'alt_long',
                                        'alt_stuffed', 'alt_generic', 'alt_missing']
@@ -1816,7 +1858,10 @@ if nav == "🔍 فحص متجر جديد":
                                      "معاينة", width="small"),
                                  "رابط الصفحة": st.column_config.LinkColumn(
                                      "رابط الصفحة", width="medium")})
-                st.caption("معايير التقييم — النص البديل يُقيَّم بجودته لا بطوله: "
+                st.caption(f"الجدول يعرض {len(view_imgs)} صورة فريدة. عمود «عدد الصفحات» "
+                           "يبيّن كم صفحة تظهر فيها الصورة — ظهور الصورة نفسها في "
+                           "الرئيسية والقسم وصفحة المنتج أمر طبيعي وليس تكراراً. · "
+                           "معايير التقييم — النص البديل يُقيَّم بجودته لا بطوله: "
                            "الغياب، أو النص غير الوصفي (اسم ملف أو كلمة عامة)، أو حشو "
                            f"الكلمات، أو تكراره على {ALT_DUP_THRESHOLD} صور فأكثر، أو "
                            f"تجاوزه {ALT_MAX} حرفاً (حد قارئات الشاشة).")
