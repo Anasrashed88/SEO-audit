@@ -65,13 +65,29 @@ PAGE_TYPE_LABEL = {
 }
 
 STATUS_LABEL = {
-    'ar': {'ok': 'سليم', 'missing': 'مفقود', 'short': 'قصير جداً', 'long': 'طويل جداً',
-           'failed': 'تعذر الفحص', 'good': 'جيد', 'thin': 'ضعيف جداً', 'na': 'غير متاح',
-           'alt_ok': 'سليم ومكتمل', 'alt_missing': 'مفقود', 'alt_empty': 'لا يوجد (فارغ)'},
-    'en': {'ok': 'OK', 'missing': 'Missing', 'short': 'Too short', 'long': 'Too long',
-           'failed': 'Scan failed', 'good': 'Good', 'thin': 'Thin content', 'na': 'N/A',
-           'alt_ok': 'Present', 'alt_missing': 'Missing', 'alt_empty': '(empty)'},
+    'ar': {
+        'missing': 'مفقود', 'very_short': 'قصير جداً', 'acceptable': 'مقبول',
+        'optimal': 'مثالي', 'long': 'طويل', 'failed': 'تعذر الفحص',
+        'good': 'جيد', 'thin': 'ضعيف جداً', 'na': 'غير متاح',
+        'alt_missing': 'مفقود', 'alt_weak': 'غير وصفي', 'alt_short': 'قصير',
+        'alt_optimal': 'مثالي', 'alt_long': 'طويل', 'alt_empty': 'لا يوجد (فارغ)',
+        'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
+    },
+    'en': {
+        'missing': 'Missing', 'very_short': 'Too short', 'acceptable': 'Acceptable',
+        'optimal': 'Optimal', 'long': 'Too long', 'failed': 'Scan failed',
+        'good': 'Good', 'thin': 'Thin content', 'na': 'N/A',
+        'alt_missing': 'Missing', 'alt_weak': 'Not descriptive', 'alt_short': 'Too short',
+        'alt_optimal': 'Optimal', 'alt_long': 'Too long', 'alt_empty': '(empty)',
+        'canon_same': 'Self-referencing', 'canon_diff': 'Differs from page URL',
+        'canon_missing': 'Missing',
+    },
 }
+
+# حدود الطول وفق أفضل ممارسات محركات البحث (تُحسب بالحروف شاملة المسافات وعلامات الترقيم)
+TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
+DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
+ALT_MAX, ALT_MIN_OPTIMAL, ALT_MIN_OK = 125, 25, 10
 
 COL_EN = {
     'نوع الصفحة': 'Page Type', 'الرابط': 'URL', 'الرابط الكانوني': 'Canonical URL',
@@ -82,6 +98,9 @@ COL_EN = {
     'عدد الكلمات': 'Word Count', 'حالة المحتوى': 'Content Status', 'لغة الصفحة': 'Page Language',
     'رابط الصفحة': 'Page URL', 'رابط الصورة': 'Image URL',
     'النص البديل الحالي (Alt)': 'Current Alt Text', 'حالة النص البديل': 'Alt Status',
+    'طول العنوان': 'Title Length', 'طول الوصف': 'Description Length',
+    'طول النص البديل': 'Alt Length', 'صور Alt غير مطابق': 'Images With Weak Alt',
+    'حالة الكانونيكال': 'Canonical Status',
 }
 
 
@@ -155,6 +174,81 @@ def url_key(url):
 
 def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
+
+
+# ==============================================================
+#  قياس الأطوال وتقييمها
+# ==============================================================
+def text_length(text):
+    """عدد الحروف بعد توحيد المسافات — يشمل المسافات والفواصل والنقاط
+    وكل علامات الترقيم، لأن محركات البحث تحسبها ضمن المساحة المعروضة."""
+    if not text:
+        return 0
+    return len(re.sub(r'\s+', ' ', str(text)).strip())
+
+
+def grade_length(length, min_ok, min_optimal, max_len):
+    if length == 0:
+        return 'missing'
+    if length < min_ok:
+        return 'very_short'
+    if length < min_optimal:
+        return 'acceptable'
+    if length <= max_len:
+        return 'optimal'
+    return 'long'
+
+
+GENERIC_ALT = {'image', 'img', 'photo', 'picture', 'icon', 'logo', 'product',
+               'صورة', 'صوره', 'منتج', 'شعار', 'photos', 'images', 'untitled',
+               'default', 'thumbnail', 'banner', 'slide'}
+
+
+def grade_alt(alt_text):
+    """تقييم النص البديل: الحضور وحده لا يكفي — يجب أن يكون وصفياً."""
+    txt = re.sub(r'\s+', ' ', str(alt_text or '')).strip()
+    if not txt:
+        return 'alt_missing', 0
+    length = len(txt)
+    low = txt.lower()
+    # نص غير وصفي: اسم ملف، أرقام فقط، أو كلمة عامة
+    if re.search(r'\.(jpg|jpeg|png|webp|gif|svg)$', low):
+        return 'alt_weak', length
+    if re.fullmatch(r'[\d\W_]+', txt):
+        return 'alt_weak', length
+    if low in GENERIC_ALT or all(w in GENERIC_ALT for w in low.split()):
+        return 'alt_weak', length
+    if length < ALT_MIN_OK:
+        return 'alt_weak', length
+    if length < ALT_MIN_OPTIMAL:
+        return 'alt_short', length
+    if length <= ALT_MAX:
+        return 'alt_optimal', length
+    return 'alt_long', length
+
+
+# ==============================================================
+#  كشف منصة المتجر
+# ==============================================================
+PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
+                  'shopify': 'شوبيفاي (Shopify)', 'unknown': 'غير معروفة'}
+SUPPORTED_PLATFORMS = ('salla', 'zid', 'shopify')
+
+
+def detect_platform(html, headers=None, url=""):
+    """يتعرف على منصة المتجر من بصماتها في HTML والترويسات."""
+    h = (html or "")[:200000].lower()
+    hdr = " ".join(f"{k}:{v}" for k, v in (headers or {}).items()).lower()
+    blob = h + " " + hdr + " " + (url or "").lower()
+
+    if any(s in blob for s in ['salla.sa', 'cdn.salla.network', 'salla-', 'window.salla']):
+        return 'salla'
+    if any(s in blob for s in ['zid.store', 'media.zid.sa', 'zidapi', 'x-zid', 'cdn.zid']):
+        return 'zid'
+    if any(s in blob for s in ['cdn.shopify.com', 'myshopify.com', 'shopify.theme',
+                               'x-shopify', 'shopify-features']):
+        return 'shopify'
+    return 'unknown'
 
 
 def safe_get(url, timeout=12, retries=2):
@@ -371,13 +465,15 @@ def strip_boilerplate(soup):
 def broken_page_row(url, reason, source):
     return {
         'page_data': {
-            'نوع الصفحة': T_BROKEN, 'الرابط': url, 'الرابط الكانوني': url,
+            'نوع الصفحة': T_BROKEN, 'الرابط': unquote(url),
             'مصدر الاكتشاف': source, 'متاحة': False, 'كود الاستجابة': str(reason),
             'لغة الصفحة': '—', 'درجة السيو': None,
-            'عنوان الميتا': '', 'حالة العنوان': 'failed',
-            'وصف الميتا': '', 'حالة الوصف': 'failed',
-            'إجمالي الصور': 0, 'صور بدون Alt': 0,
+            'عنوان الميتا': '', 'طول العنوان': 0, 'حالة العنوان': 'failed',
+            'وصف الميتا': '', 'طول الوصف': 0, 'حالة الوصف': 'failed',
+            'إجمالي الصور': 0, 'صور بدون Alt': 0, 'صور Alt غير مطابق': 0,
             'عدد الكلمات': 0, 'حالة المحتوى': 'na',
+            'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '',
+            '_raw_url': url,
         },
         'images_data': [], 'links': set(),
     }
@@ -417,55 +513,55 @@ def _fetch_and_audit(url, base_url, source):
         if is_crawlable(full, base_netloc):
             links.add(full)
 
-    canonical = final_url
+    canonical = ''
     for link in soup.find_all('link', href=True):
         rel = link.get('rel') or []
         rel = [r.lower() for r in (rel if isinstance(rel, list) else [rel])]
         if 'canonical' in rel:
-            cand = clean_url(urljoin(final_url, link['href']))
-            if cand and urlparse(cand).netloc == urlparse(final_url).netloc:
-                canonical = cand
+            canonical = clean_url(urljoin(final_url, link['href']))
             break
+    if not canonical:
+        canon_status = 'canon_missing'
+        canonical = final_url
+    elif url_key(canonical) == url_key(final_url):
+        canon_status = 'canon_same'
+    else:
+        canon_status = 'canon_diff'
 
     title_tag = soup.find('title')
-    title = title_tag.get_text(strip=True) if title_tag else ''
-    if not title:
-        title_status = 'missing'
-    elif len(title) < 30:
-        title_status = 'short'
-    elif len(title) > 65:
-        title_status = 'long'
-    else:
-        title_status = 'ok'
+    title = re.sub(r'\s+', ' ', title_tag.get_text(strip=True)).strip() if title_tag else ''
+    title_len = text_length(title)
+    title_status = grade_length(title_len, TITLE_MIN_OK, TITLE_MIN_OPTIMAL, TITLE_MAX)
 
     desc_tag = (soup.find('meta', attrs={'name': 'description'})
                 or soup.find('meta', attrs={'property': 'og:description'}))
     meta_desc = desc_tag['content'].strip() if desc_tag and desc_tag.get('content') else ''
-    if not meta_desc:
-        desc_status = 'missing'
-    elif len(meta_desc) < 70:
-        desc_status = 'short'
-    elif len(meta_desc) > 165:
-        desc_status = 'long'
-    else:
-        desc_status = 'ok'
+    meta_desc = re.sub(r'\s+', ' ', meta_desc).strip()
+    desc_len = text_length(meta_desc)
+    desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
     content_soup = strip_boilerplate(make_soup(res.text))
-    total_img = missing_alt = 0
+    total_img = missing_alt = weak_alt = good_alt = 0
     page_images = []
     for img in content_soup.find_all('img'):
         src = get_image_src(img)
         if src and is_relevant_seo_image(img, src):
             total_img += 1
             alt_text = (img.get('alt') or '').strip()
-            if not alt_text:
+            alt_status, alt_len = grade_alt(alt_text)
+            if alt_status == 'alt_missing':
                 missing_alt += 1
+            elif alt_status in ('alt_weak', 'alt_short', 'alt_long'):
+                weak_alt += 1
+            else:
+                good_alt += 1
             page_images.append({
-                'رابط الصفحة': final_url,
+                'رابط الصفحة': unquote(final_url),
                 'نوع الصفحة': page_type,
                 'رابط الصورة': urljoin(final_url, src),
                 'النص البديل الحالي (Alt)': alt_text,
-                'حالة النص البديل': 'alt_ok' if alt_text else 'alt_missing',
+                'طول النص البديل': alt_len,
+                'حالة النص البديل': alt_status,
             })
 
     for s in content_soup(['script', 'style', 'noscript']):
@@ -475,29 +571,37 @@ def _fetch_and_audit(url, base_url, source):
     content_status = 'good' if words >= 50 else 'thin'
     page_lang = detect_page_language(soup, (title + ' ' + body_text[:500]))
 
-    score = 100
-    if title_status != 'ok':
-        score -= 25
-    if desc_status != 'ok':
-        score -= 25
-    if total_img > 0 and missing_alt > 0:
-        score -= int((missing_alt / total_img) * 25)
-    if content_status != 'good':
-        score -= 25
-    score = max(0, score)
+    # درجة متدرجة: المثالي يأخذ الدرجة كاملة، والمقبول جزءاً منها
+    LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
+                  'long': 0.4, 'missing': 0.0}
+    score = 0.0
+    score += 25 * LEN_WEIGHT.get(title_status, 0)
+    score += 25 * LEN_WEIGHT.get(desc_status, 0)
+    if total_img == 0:
+        score += 25
+    else:
+        score += 25 * ((good_alt + 0.5 * weak_alt) / total_img)
+    score += 25 if content_status == 'good' else 0
+    score = max(0, min(100, round(score)))
 
     return {
         'page_data': {
-            'نوع الصفحة': page_type, 'الرابط': final_url, 'الرابط الكانوني': canonical,
+            'نوع الصفحة': page_type, 'الرابط': unquote(final_url),
             'مصدر الاكتشاف': source, 'متاحة': True, 'كود الاستجابة': '200',
             'لغة الصفحة': page_lang, 'درجة السيو': score,
-            'عنوان الميتا': title, 'حالة العنوان': title_status,
-            'وصف الميتا': meta_desc, 'حالة الوصف': desc_status,
+            'عنوان الميتا': title, 'طول العنوان': title_len, 'حالة العنوان': title_status,
+            'وصف الميتا': meta_desc, 'طول الوصف': desc_len, 'حالة الوصف': desc_status,
             'إجمالي الصور': total_img, 'صور بدون Alt': missing_alt,
+            'صور Alt غير مطابق': weak_alt,
             'عدد الكلمات': words, 'حالة المحتوى': content_status,
+            'حالة الكانونيكال': canon_status,
+            'الرابط الكانوني': unquote(canonical) if canon_status == 'canon_diff' else '',
+            '_raw_url': final_url,
         },
         'images_data': page_images,
         'links': links,
+        'platform_html': res.text[:60000] if page_type == T_HOME else '',
+        'platform_headers': dict(res.headers) if page_type == T_HOME else {},
     }
 
 
@@ -514,6 +618,7 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
     seen = {url_key(base_url)}
     frontier = [base_url]
     category_urls = []
+    platform = 'unknown'
     level = 0
 
     while frontier and len(pages) < max_pages and level < max_levels:
@@ -528,9 +633,12 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
                 pd_row = res['page_data']
                 pages.append(pd_row)
                 images.extend(res['images_data'])
+                if res.get('platform_html') and platform == 'unknown':
+                    platform = detect_platform(res['platform_html'],
+                                               res.get('platform_headers'), base_url)
                 if pd_row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
-                    category_urls.append(pd_row['الرابط'])
-                for link in res['links']:
+                    category_urls.append(pd_row.get('_raw_url', pd_row['الرابط']))
+                for link in res.get('links', ()):
                     k = url_key(link)
                     if k not in seen:
                         seen.add(k)
@@ -540,7 +648,7 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
         if progress_cb:
             progress_cb(len(pages), len(frontier), level)
 
-    return pages, images, category_urls, seen
+    return pages, images, category_urls, seen, platform
 
 
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
@@ -668,27 +776,51 @@ def collect_sitemap_urls(base_url, max_depth=3):
     return urls
 
 
-def build_coverage_report(visible_products, sitemap_urls, base_url):
-    """مقارنة بين ما يراه الزائر وما تعلنه خريطة الموقع.
+def build_coverage_report(visible_df, sitemap_urls, base_url):
+    """مقارنة بين ما يراه الزائر وما تعلنه خريطة الموقع — لكل أنواع الصفحات.
     نتائجها تشخيصية فقط ولا تدخل في أرقام الفحص."""
+    src_col = '_raw_url' if '_raw_url' in visible_df.columns else 'الرابط'
     vis = {}
-    for u in visible_products:
-        vis.setdefault(url_key(u), u)
+    vis_types = {}
+    for _, r in visible_df[visible_df['متاحة'] == True].iterrows():  # noqa: E712
+        k = url_key(r[src_col])
+        vis.setdefault(k, r[src_col])
+        vis_types.setdefault(k, r['نوع الصفحة'])
 
-    sm_products = {}
+    sm = {}
+    sm_types = {}
     for u in sitemap_urls:
-        if detect_page_type(u, base_url, None) == T_PRODUCT:
-            sm_products.setdefault(url_key(u), u)
+        k = url_key(u)
+        sm.setdefault(k, u)
+        sm_types.setdefault(k, detect_page_type(u, base_url, None))
 
-    vis_keys, sm_keys = set(vis), set(sm_products)
+    vis_keys, sm_keys = set(vis), set(sm)
+    only_visible = vis_keys - sm_keys
+    only_sitemap = sm_keys - vis_keys
+
+    def rows(keys, src, types):
+        out = []
+        for k in sorted(keys):
+            out.append({'الرابط': unquote(src[k]), 'نوع الصفحة': types.get(k, T_UNKNOWN)})
+        return out
+
+    orphans = rows(only_sitemap, sm, sm_types)
+    orphan_by_type = {}
+    for o in orphans:
+        orphan_by_type[o['نوع الصفحة']] = orphan_by_type.get(o['نوع الصفحة'], 0) + 1
+
+    vis_products = {k for k in vis_keys if vis_types.get(k) == T_PRODUCT}
+    sm_products = {k for k in sm_keys if sm_types.get(k) == T_PRODUCT}
+
     return {
-        'visible_count': len(vis_keys),
-        'sitemap_count': len(sm_keys),
-        'matched_count': len(vis_keys & sm_keys),
-        'visible_not_in_sitemap': sorted(vis[k] for k in (vis_keys - sm_keys)),
-        'sitemap_not_visible': sorted(sm_products[k] for k in (sm_keys - vis_keys)),
-        'indexed_pct': round(len(vis_keys & sm_keys) / len(vis_keys) * 100, 1)
-        if vis_keys else 100.0,
+        'visible_count': len(vis_products),
+        'sitemap_count': len(sm_products),
+        'matched_count': len(vis_products & sm_products),
+        'visible_not_in_sitemap': rows(vis_products - sm_products, vis, vis_types),
+        'sitemap_not_visible': orphans,
+        'orphan_by_type': orphan_by_type,
+        'indexed_pct': round(len(vis_products & sm_products) / len(vis_products) * 100, 1)
+        if vis_products else 100.0,
     }
 
 
@@ -699,8 +831,11 @@ def dedupe_pages(df):
     if df.empty:
         return df
     df = df.copy()
-    df['_key'] = df['الرابط'].map(url_key)
-    df['_canon'] = df['الرابط الكانوني'].map(url_key)
+    src_col = '_raw_url' if '_raw_url' in df.columns else 'الرابط'
+    df['_key'] = df[src_col].map(url_key)
+    df['_canon'] = df.apply(
+        lambda r: url_key(r['الرابط الكانوني']) if str(r.get('الرابط الكانوني') or '').strip()
+        else r['_key'], axis=1)
     df = df.drop_duplicates(subset=['_key'])
     avail = df[df['متاحة'] == True]  # noqa: E712
     dup_keys = set(avail[avail.duplicated(subset=['_canon'], keep='first')]['_key'])
@@ -719,10 +854,20 @@ def compute_summary(df, coverage=None):
         'blog_pages': int((df['نوع الصفحة'] == T_BLOG).sum()),
         'unclassified': int((df['نوع الصفحة'] == T_UNKNOWN).sum()),
         'broken_pages': int((df['متاحة'] == False).sum()),  # noqa: E712
-        'bad_titles': int((ok['حالة العنوان'] != 'ok').sum()),
-        'bad_descs': int((ok['حالة الوصف'] != 'ok').sum()),
+        'bad_titles': int((~ok['حالة العنوان'].isin(['optimal'])).sum()),
+        'critical_titles': int(ok['حالة العنوان'].isin(
+            ['missing', 'very_short', 'long']).sum()),
+        'bad_descs': int((~ok['حالة الوصف'].isin(['optimal'])).sum()),
+        'critical_descs': int(ok['حالة الوصف'].isin(
+            ['missing', 'very_short', 'long']).sum()),
         'missing_alts': int(ok['صور بدون Alt'].sum()),
+        'weak_alts': int(ok['صور Alt غير مطابق'].sum())
+        if 'صور Alt غير مطابق' in ok.columns else 0,
         'total_images': int(ok['إجمالي الصور'].sum()),
+        'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum())
+        if 'حالة الكانونيكال' in ok.columns else 0,
+        'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum())
+        if 'حالة الكانونيكال' in ok.columns else 0,
         'coverage_enabled': bool(coverage),
     }
     if coverage:
@@ -731,6 +876,7 @@ def compute_summary(df, coverage=None):
             'sitemap_products': coverage['sitemap_count'],
             'not_indexed_count': len(coverage['visible_not_in_sitemap']),
             'hidden_count': len(coverage['sitemap_not_visible']),
+            'orphan_by_type': coverage.get('orphan_by_type', {}),
             'indexed_pct': coverage['indexed_pct'],
         })
     return s
@@ -744,6 +890,11 @@ def localize_df(df, lang):
     if 'نوع الصفحة' in out.columns:
         out['نوع الصفحة'] = out['نوع الصفحة'].map(
             lambda v: PAGE_TYPE_LABEL[lang].get(v, v))
+    if '_raw_url' in out.columns:
+        out = out.drop(columns=['_raw_url'])
+    if 'حالة الكانونيكال' in out.columns:
+        out['حالة الكانونيكال'] = out['حالة الكانونيكال'].map(
+            lambda v: STATUS_LABEL[lang].get(v, v))
     for col in ['حالة العنوان', 'حالة الوصف', 'حالة المحتوى', 'حالة النص البديل']:
         if col in out.columns:
             out[col] = out[col].map(lambda v: STATUS_LABEL[lang].get(v, v))
@@ -767,8 +918,9 @@ PDF_TXT = {
         'score': 'درجة التوافق العامة مع محركات البحث: {s}%',
         'scope': 'نطاق الفحص: الصفحات والمنتجات المعروضة فعلياً لزوار المتجر',
         'tbl1': '1. جدول تدقيق بنية الصفحات والعناوين:',
-        'tbl2': '2. جدول تدقيق وسوم وصور المتجر:',
-        'tbl3': '3. جدول مقارنة المعروض بخريطة الموقع:',
+        'tbl_meta': '2. جدول تدقيق أطوال العناوين والأوصاف:',
+        'tbl2': '3. جدول تدقيق وسوم وصور المتجر:',
+        'tbl3': '4. جدول مقارنة المعروض بخريطة الموقع:',
         'diag': '{n}. التشخيص الاستشاري وخطة العمل:',
         'h_val': 'الحالة / العدد', 'h_item': 'عنصر الفحص والتدقيق',
         'r_total': 'إجمالي الصفحات المعروضة والمفحوصة', 'u_page': 'صفحة',
@@ -789,6 +941,14 @@ PDF_TXT = {
         'r_notidx': 'منتجات معروضة ولا تظهر في الخريطة',
         'r_hidden': 'روابط في الخريطة لا يصل إليها الزائر',
         'r_idxpct': 'نسبة المنتجات المعروضة المدرجة في الخريطة',
+        'r_platform': 'منصة المتجر', 'r_titles_ok': 'عناوين ضمن الطول المثالي (50-60 حرف)',
+        'r_titles_crit': 'عناوين مفقودة أو قصيرة جداً أو تتجاوز 60 حرفاً',
+        'r_descs_ok': 'أوصاف ضمن الطول المثالي (120-150 حرف)',
+        'r_descs_crit': 'أوصاف مفقودة أو قصيرة جداً أو تتجاوز 150 حرفاً',
+        'r_alt_weak': 'صور بنص بديل غير وصفي أو خارج الطول المثالي',
+        'r_canon_missing': 'صفحات بلا وسم كانونيكال',
+        'r_orphan': 'صفحات في الخريطة لا يصل إليها الزائر بأي رابط',
+        'note_len': 'يُحسب الطول بالحروف شاملاً المسافات وعلامات الترقيم كافة.',
         'footer': 'anasrashed.com   |   anas@anasrashed.com',
     },
     'en': {
@@ -798,8 +958,9 @@ PDF_TXT = {
         'score': 'Overall search engine compliance score: {s}%',
         'scope': 'Audit scope: pages and products actually visible to store visitors',
         'tbl1': '1. Page structure and metadata audit:',
-        'tbl2': '2. Image tags and alt text audit:',
-        'tbl3': '3. Visible catalogue vs sitemap comparison:',
+        'tbl_meta': '2. Title and description length audit:',
+        'tbl2': '3. Image tags and alt text audit:',
+        'tbl3': '4. Visible catalogue vs sitemap comparison:',
         'diag': '{n}. Consultant diagnosis and action plan:',
         'h_val': 'Value / Count', 'h_item': 'Audited item',
         'r_total': 'Total visible pages audited', 'u_page': 'pages',
@@ -820,6 +981,14 @@ PDF_TXT = {
         'r_notidx': 'Visible products absent from sitemap',
         'r_hidden': 'Sitemap URLs unreachable by visitors',
         'r_idxpct': 'Visible products included in sitemap',
+        'r_platform': 'Store platform', 'r_titles_ok': 'Titles within optimal length (50-60 chars)',
+        'r_titles_crit': 'Titles missing, too short, or over 60 characters',
+        'r_descs_ok': 'Descriptions within optimal length (120-150 chars)',
+        'r_descs_crit': 'Descriptions missing, too short, or over 150 characters',
+        'r_alt_weak': 'Images with non-descriptive or off-length alt text',
+        'r_canon_missing': 'Pages without a canonical tag',
+        'r_orphan': 'Sitemap pages with no link path for visitors',
+        'note_len': 'Lengths are counted in characters including spaces and all punctuation.',
         'footer': 'anasrashed.com   |   anas@anasrashed.com',
     },
 }
@@ -844,11 +1013,21 @@ def build_diagnosis(score, stats, lang):
                           f"(بنسبة {round(missing / imgs * 100, 1)}%)، وهو ما يحد من "
                           "ظهور المتجر في نتائج بحث الصور")
         if bad_t > 0:
-            issues.append(f"{bad_t} عنوان ميتا مفقود أو خارج الطول الموصى به")
+            issues.append(f"{bad_t} عنوان ميتا خارج الطول المثالي (50-60 حرفاً)، "
+                          f"منها {stats.get('critical_titles', 0)} عنوان مفقود أو "
+                          "قصير جداً أو يتجاوز الحد فيُقتطع في نتائج البحث")
         if bad_d > 0:
-            issues.append(f"{bad_d} وصف ميتا مفقود أو غير مهيأ")
+            issues.append(f"{bad_d} وصف ميتا خارج الطول المثالي (120-150 حرفاً)، "
+                          f"منها {stats.get('critical_descs', 0)} وصف مفقود أو "
+                          "قصير جداً أو يتجاوز الحد")
         if notidx > 0:
             issues.append(f"{notidx} منتجاً معروضاً في المتجر لا يظهر في خريطة الموقع")
+        if stats.get('weak_alts', 0) > 0:
+            issues.append(f"{stats['weak_alts']} صورة بنص بديل موجود لكنه غير وصفي "
+                          "أو خارج الطول المفيد")
+        if stats.get('hidden_count', 0) > 0:
+            issues.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع "
+                          "لا يصل إليها الزائر بأي رابط داخلي، فتفقد قيمتها")
         if broken > 0:
             issues.append(f"{broken} رابط معطل داخل المتجر يصل إليه الزائر")
         if not issues:
@@ -872,11 +1051,20 @@ def build_diagnosis(score, stats, lang):
         issues.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) "
                       "have no alt text, limiting visibility in Google Image search")
     if bad_t > 0:
-        issues.append(f"{bad_t} meta titles are missing or outside the recommended length")
+        issues.append(f"{bad_t} meta titles fall outside the optimal 50-60 character range, "
+                      f"{stats.get('critical_titles', 0)} of them missing, far too short, "
+                      "or long enough to be truncated in search results")
     if bad_d > 0:
-        issues.append(f"{bad_d} meta descriptions are missing or not optimised")
+        issues.append(f"{bad_d} meta descriptions fall outside the optimal 120-150 character "
+                      f"range, {stats.get('critical_descs', 0)} of them critically so")
     if notidx > 0:
         issues.append(f"{notidx} products visible in the store are absent from the sitemap")
+    if stats.get('weak_alts', 0) > 0:
+        issues.append(f"{stats['weak_alts']} images carry alt text that is present but "
+                      "not descriptive or outside the useful length")
+    if stats.get('hidden_count', 0) > 0:
+        issues.append(f"{stats['hidden_count']} pages published in the sitemap have no "
+                      "internal link path for visitors and therefore lose their value")
     if broken > 0:
         issues.append(f"{broken} broken links are reachable by visitors")
     if not issues:
@@ -1003,8 +1191,16 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         (T['r_blog'], f"{stats.get('blog_pages', 0)} {T['u_article']}"),
         (T['r_info'], f"{stats['info_pages']} {T['u_page']}"),
         (T['r_broken'], f"{stats.get('broken_pages', 0)} {T['u_link']}"),
-        (T['r_titles'], f"{stats['bad_titles']} {T['u_title']}"),
-        (T['r_descs'], f"{stats['bad_descs']} {T['u_desc']}"),
+        (T['r_platform'], stats.get('platform_label', '—')),
+    ])
+
+    tot = max(stats['total_pages'] - stats.get('broken_pages', 0), 1)
+    draw_table(T['tbl_meta'], [
+        (T['r_titles_ok'], f"{tot - stats['bad_titles']} / {tot}"),
+        (T['r_titles_crit'], f"{stats.get('critical_titles', 0)} {T['u_title']}"),
+        (T['r_descs_ok'], f"{tot - stats['bad_descs']} / {tot}"),
+        (T['r_descs_crit'], f"{stats.get('critical_descs', 0)} {T['u_desc']}"),
+        (T['r_canon_missing'], f"{stats.get('canon_missing', 0)} {T['u_page']}"),
     ])
 
     imgs = stats.get('total_images', 0)
@@ -1015,6 +1211,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     draw_table(T['tbl2'], [
         (T['r_imgs'], f"{imgs} {T['u_img']}"),
         (T['r_noalt'], f"{noalt} {T['u_img']}"),
+        (T['r_alt_weak'], f"{stats.get('weak_alts', 0)} {T['u_img']}"),
         (T['r_ratio'], f"{ratio}%"),
         (T['r_imgstate'], state),
     ])
@@ -1024,12 +1221,12 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
             (T['r_vis'], f"{stats.get('visible_products', 0)} {T['u_product']}"),
             (T['r_sm'], f"{stats.get('sitemap_products', 0)} {T['u_product']}"),
             (T['r_notidx'], f"{stats.get('not_indexed_count', 0)} {T['u_product']}"),
-            (T['r_hidden'], f"{stats.get('hidden_count', 0)} {T['u_link']}"),
+            (T['r_orphan'], f"{stats.get('hidden_count', 0)} {T['u_page']}"),
             (T['r_idxpct'], f"{stats.get('indexed_pct', 0)}%"),
         ])
-        diag_n = "4"
+        diag_n = "5"
     else:
-        diag_n = "3"
+        diag_n = "4"
 
     bw = 180
     bx = (210 - bw) / 2
@@ -1183,8 +1380,17 @@ if nav == "🔍 فحص متجر جديد":
             note1.caption(f"المستوى {level} — فُحصت {done} صفحة، "
                           f"وفي الانتظار {pending} رابط.")
 
-        pages, imgs, cat_urls, seen = crawl_store(target, max_pages, workers, crawl_cb)
+        pages, imgs, cat_urls, seen, platform = crawl_store(
+            target, max_pages, workers, crawl_cb)
         bar1.progress(1.0)
+
+        if platform in SUPPORTED_PLATFORMS:
+            st.success(f"المنصة المكتشفة: {PLATFORM_LABEL[platform]}")
+        else:
+            st.warning("لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. "
+                       "الأداة مُعايرة على هذه المنصات الثلاث، وقد تكون النتائج "
+                       "ناقصة على منصة أخرى — راجع تبويب التحقق اليدوي قبل "
+                       "إرسال التقرير لأي عميل.")
 
         if do_pagination and cat_urls:
             st.info("المرحلة 2: متابعة ترقيم صفحات الأقسام...")
@@ -1213,11 +1419,11 @@ if nav == "🔍 فحص متجر جديد":
         if do_sitemap_check:
             with st.spinner("مقارنة تشخيصية مع خريطة الموقع..."):
                 sm_urls = collect_sitemap_urls(target)
-                visible_products = df[(df['نوع الصفحة'] == T_PRODUCT) &
-                                      (df['متاحة'] == True)]['الرابط'].tolist()  # noqa: E712
-                coverage = build_coverage_report(visible_products, sm_urls, target)
+                coverage = build_coverage_report(df, sm_urls, target)
 
         summary = compute_summary(df, coverage)
+        summary['platform'] = platform
+        summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
         st.session_state.audit_df = df
         st.session_state.images_df = images_df
         st.session_state.summary = summary
@@ -1274,15 +1480,24 @@ if nav == "🔍 فحص متجر جديد":
             if not langs.empty:
                 st.caption("لغات الصفحات المرصودة: " +
                            "، ".join(f"{k}: {v}" for k, v in langs.items()))
+            st.caption(f"معايير الطول: العنوان مثالي {TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرف "
+                       f"(مقبول من {TITLE_MIN_OK})، الوصف مثالي "
+                       f"{DESC_MIN_OPTIMAL}-{DESC_MAX} حرف (مقبول من {DESC_MIN_OK}). "
+                       "يُحسب الطول بالحروف شاملاً المسافات وعلامات الترقيم.")
 
         with tabs[1]:
             if view_imgs is not None and not view_imgs.empty:
-                f = st.selectbox("تصفية:", ["جميع الصور", "بدون Alt فقط", "سليمة فقط"])
+                f = st.selectbox("تصفية:", ["جميع الصور", "بدون Alt", "Alt غير مطابق",
+                                            "Alt مثالي"])
+                L = STATUS_LABEL['ar']
                 v = view_imgs
-                if f == "بدون Alt فقط":
-                    v = view_imgs[view_imgs['حالة النص البديل'] == STATUS_LABEL['ar']['alt_missing']]
-                elif f == "سليمة فقط":
-                    v = view_imgs[view_imgs['حالة النص البديل'] == STATUS_LABEL['ar']['alt_ok']]
+                if f == "بدون Alt":
+                    v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_missing']]
+                elif f == "Alt غير مطابق":
+                    v = view_imgs[view_imgs['حالة النص البديل'].isin(
+                        [L['alt_weak'], L['alt_short'], L['alt_long']])]
+                elif f == "Alt مثالي":
+                    v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_optimal']]
                 v = v.copy().reset_index(drop=True)
                 v.index = v.index + 1
                 st.dataframe(v, use_container_width=True)
@@ -1303,18 +1518,24 @@ if nav == "🔍 فحص متجر جديد":
                 if coverage['visible_not_in_sitemap']:
                     st.error(f"{len(coverage['visible_not_in_sitemap'])} منتج يراه الزائر "
                              "ولا يظهر في خريطة الموقع — محركات البحث قد لا تعلم بوجوده.")
-                    st.dataframe(pd.DataFrame(
-                        {'رابط المنتج': coverage['visible_not_in_sitemap']}),
+                    st.dataframe(localize_df(
+                        pd.DataFrame(coverage['visible_not_in_sitemap']), 'ar'),
                         use_container_width=True)
                 else:
                     st.success("جميع المنتجات المعروضة مدرجة في خريطة الموقع.")
 
                 if coverage['sitemap_not_visible']:
-                    st.warning(f"{len(coverage['sitemap_not_visible'])} رابط في خريطة الموقع "
-                               "لا يصل إليه الزائر — منتجات مخفية أو محذوفة أو غير مرتبطة "
-                               "بأي قسم. هذه الروابط مستبعدة من الفحص.")
-                    st.dataframe(pd.DataFrame({'الرابط': coverage['sitemap_not_visible']}),
-                                 use_container_width=True)
+                    by_type = coverage.get('orphan_by_type', {})
+                    breakdown = "، ".join(
+                        f"{PAGE_TYPE_LABEL['ar'].get(k, k)}: {v}" for k, v in by_type.items())
+                    st.warning(
+                        f"{len(coverage['sitemap_not_visible'])} صفحة منشورة في خريطة الموقع "
+                        f"لا يصل إليها الزائر بأي رابط داخلي ({breakdown}). "
+                        "هذه صفحات يتيمة: تستهلك ميزانية الزحف ولا تستفيد من قوة الموقع. "
+                        "وهي مستبعدة من أرقام الفحص لأن الزائر لا يراها.")
+                    st.dataframe(localize_df(
+                        pd.DataFrame(coverage['sitemap_not_visible']), 'ar'),
+                        use_container_width=True)
 
         with tabs[3]:
             st.subheader("🔬 عيّنة للتحقق اليدوي")
@@ -1330,9 +1551,11 @@ if nav == "🔍 فحص متجر جديد":
                 for _, row in sample.iterrows():
                     with st.container(border=True):
                         st.markdown(f"**الرابط:** [{unquote(row['الرابط'])}]({row['الرابط']})")
-                        st.write(f"العنوان ({len(str(row['عنوان الميتا']))} حرف): "
+                        st.write(f"العنوان ({row['طول العنوان']} حرف — "
+                                 f"{STATUS_LABEL['ar'][row['حالة العنوان']]}): "
                                  f"{row['عنوان الميتا'] or '— مفقود —'}")
-                        st.write(f"الوصف ({len(str(row['وصف الميتا']))} حرف): "
+                        st.write(f"الوصف ({row['طول الوصف']} حرف — "
+                                 f"{STATUS_LABEL['ar'][row['حالة الوصف']]}): "
                                  f"{row['وصف الميتا'] or '— مفقود —'}")
                         st.write(f"صور: {row['إجمالي الصور']} | "
                                  f"بدون Alt: {row['صور بدون Alt']} | "
