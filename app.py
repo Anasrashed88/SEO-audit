@@ -109,6 +109,7 @@ COL_EN = {
     'طول النص البديل': 'Alt Length', 'حالة النص البديل': 'Alt Status',
     'عدد الصفحات': 'Appears On Pages',
     'الوجهة النهائية': 'Final Destination',
+    'جودة العنوان': 'Title Quality', 'جودة الوصف': 'Description Quality',
 }
 
 COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
@@ -143,7 +144,7 @@ init_db()
 
 for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
                      ('current_url', ""), ('coverage', None), ('platform', 'unknown'),
-                     ('selfcheck', None)]:
+                     ('selfcheck', None), ('brand', '')]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -787,6 +788,139 @@ def _fetch_and_audit(url, base_url, source):
     }
 
 
+
+# ==============================================================
+#  الجودة البنيوية للعناوين والأوصاف
+#  الطول وحده لا يكفي: «[]» ليس عنواناً قصيراً بل عنوان مفقود.
+# ==============================================================
+PLACEHOLDER_PATTERNS = [
+    r'^\s*\[\s*[\.\-_]*\s*\]\s*$',      # [] [.] [-] [_]
+    r'\{\{.*?\}\}', r'\{%.*?%\}',          # قوالب Liquid/Jinja
+    r'%[sd]\b', r'<%.*?%>',
+    r'\b(undefined|null|nan|none|lorem ipsum|test|xxx|todo|tbd)\b',
+    r'^\s*(page|product|item|title|default)\s*\d*\s*$',
+]
+
+
+def meaningful_text(t):
+    """النص بعد تجريد كل ما ليس حرفاً أو رقماً — لكشف العناوين الرمزية."""
+    return re.sub(r'[^0-9A-Za-z\u0600-\u06FF]+', '', str(t or ''))
+
+
+def is_placeholder(t):
+    low = str(t or '').strip().lower()
+    if not low:
+        return False
+    return any(re.search(pat, low) for pat in PLACEHOLDER_PATTERNS)
+
+
+def detect_brand(titles):
+    """اسم المتجر من اللاحقة المتكررة بعد الفاصل في العناوين."""
+    from collections import Counter
+    c = Counter()
+    valid = [t for t in titles if isinstance(t, str) and t.strip()]
+    for t in valid:
+        for sep in ['|', '–', '—', '-', '•', '·']:
+            if sep in t:
+                tail = t.rsplit(sep, 1)[-1].strip()
+                if 2 <= len(tail) <= 40:
+                    c[tail] += 1
+                break
+    if c and valid:
+        top, n = c.most_common(1)[0]
+        if n >= max(3, 0.25 * len(valid)):
+            return top
+    return ''
+
+
+QUALITY_LABEL = {
+    'ar': {'q_ok': 'سليم', 'q_symbols': 'رموز بلا نص', 'q_placeholder': 'قيمة قالب افتراضية',
+           'q_brand_only': 'اسم المتجر فقط', 'q_duplicate': 'مكرر على عدة صفحات',
+           'q_one_word': 'كلمة واحدة بلا وصف', 'q_same_as_title': 'نسخة من العنوان',
+           'q_na': '—'},
+    'en': {'q_ok': 'Sound', 'q_symbols': 'Symbols only', 'q_placeholder': 'Template placeholder',
+           'q_brand_only': 'Store name only', 'q_duplicate': 'Duplicated across pages',
+           'q_one_word': 'Single word, no description', 'q_same_as_title': 'Copy of the title',
+           'q_na': '—'},
+}
+# البنود التي تُعدّ العنصر مفقوداً فعلياً
+QUALITY_FATAL = ('q_symbols', 'q_placeholder')
+QUALITY_CREDIT = {'q_ok': 1.0, 'q_duplicate': 0.3, 'q_brand_only': 0.2,
+                  'q_one_word': 0.3, 'q_same_as_title': 0.4,
+                  'q_symbols': 0.0, 'q_placeholder': 0.0, 'q_na': 1.0}
+TEXT_DUP_THRESHOLD = 3
+
+
+def analyze_text_quality(df):
+    """يضيف تقييم الجودة البنيوية ويصحّح حالة الطول عند العناوين الرمزية."""
+    if df.empty:
+        return df, ''
+    out = df.copy()
+    ok_mask = out['متاحة'] == True  # noqa: E712
+    brand = detect_brand(out.loc[ok_mask, 'عنوان الميتا'].tolist())
+
+    def strip_brand(t):
+        v = str(t or '')
+        if brand:
+            for sep in ['|', '–', '—', '-', '•', '·']:
+                v = v.replace(f"{sep} {brand}", '').replace(f"{sep}{brand}", '')
+            v = v.replace(brand, '')
+        return v.strip(' |-–—•·')
+
+    tvals = out.loc[ok_mask, 'عنوان الميتا'].map(lambda x: str(x or '').strip())
+    dup_titles = {v for v, n in tvals[tvals != ''].value_counts().items()
+                  if n >= TEXT_DUP_THRESHOLD}
+    dvals = out.loc[ok_mask, 'وصف الميتا'].map(lambda x: str(x or '').strip())
+    dup_descs = {v for v, n in dvals[dvals != ''].value_counts().items()
+                 if n >= TEXT_DUP_THRESHOLD}
+
+    def qt(row):
+        if not row['متاحة']:
+            return 'q_na'
+        t = str(row['عنوان الميتا'] or '').strip()
+        if not t:
+            return 'q_na'
+        if is_placeholder(t):
+            return 'q_placeholder'
+        if not meaningful_text(t):
+            return 'q_symbols'
+        if brand and not meaningful_text(strip_brand(t)):
+            return 'q_brand_only'
+        if t in dup_titles:
+            return 'q_duplicate'
+        if len(meaningful_text(strip_brand(t)).strip()) and \
+                len(strip_brand(t).split()) < 2:
+            return 'q_one_word'
+        return 'q_ok'
+
+    def qd(row):
+        if not row['متاحة']:
+            return 'q_na'
+        d = str(row['وصف الميتا'] or '').strip()
+        if not d:
+            return 'q_na'
+        if is_placeholder(d):
+            return 'q_placeholder'
+        if not meaningful_text(d):
+            return 'q_symbols'
+        if d == str(row['عنوان الميتا'] or '').strip():
+            return 'q_same_as_title'
+        if d in dup_descs:
+            return 'q_duplicate'
+        return 'q_ok'
+
+    out['جودة العنوان'] = out.apply(qt, axis=1)
+    out['جودة الوصف'] = out.apply(qd, axis=1)
+
+    # عنوان رمزي أو قيمة قالب = مفقود فعلياً، لا «قصير جداً»
+    for col_q, col_s, col_len in [('جودة العنوان', 'حالة العنوان', 'طول العنوان'),
+                                  ('جودة الوصف', 'حالة الوصف', 'طول الوصف')]:
+        fatal = out[col_q].isin(QUALITY_FATAL)
+        out.loc[fatal, col_s] = 'missing'
+        out.loc[fatal, col_len] = 0
+    return out, brand
+
+
 LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
               'long': 0.4, 'missing': 0.0}
 
@@ -812,8 +946,10 @@ def score_pages(df, images_df):
             miss.append(0)
             weak.append(0)
             continue
-        s = 25 * LEN_WEIGHT.get(r['حالة العنوان'], 0)
-        s += 25 * LEN_WEIGHT.get(r['حالة الوصف'], 0)
+        s = 25 * LEN_WEIGHT.get(r['حالة العنوان'], 0) * \
+            QUALITY_CREDIT.get(r.get('جودة العنوان', 'q_na'), 1.0)
+        s += 25 * LEN_WEIGHT.get(r['حالة الوصف'], 0) * \
+            QUALITY_CREDIT.get(r.get('جودة الوصف', 'q_na'), 1.0)
         info = per_page.get(r['الرابط'])
         if not info or info['n'] == 0:
             s += 25
@@ -1097,6 +1233,16 @@ def compute_summary(df, coverage=None, images_df=None):
         'weak_alts': int(sum(alt_counts.get(k, 0) for k in ALT_WEAK_STATES)),
         'good_alts': int(alt_counts.get('alt_ok', 0)),
         'dup_alts': int(alt_counts.get('alt_duplicate', 0)),
+        'title_symbols': int(ok['جودة العنوان'].isin(QUALITY_FATAL).sum())
+        if 'جودة العنوان' in ok.columns else 0,
+        'title_brand_only': int((ok['جودة العنوان'] == 'q_brand_only').sum())
+        if 'جودة العنوان' in ok.columns else 0,
+        'title_dup': int((ok['جودة العنوان'] == 'q_duplicate').sum())
+        if 'جودة العنوان' in ok.columns else 0,
+        'desc_dup': int((ok['جودة الوصف'] == 'q_duplicate').sum())
+        if 'جودة الوصف' in ok.columns else 0,
+        'desc_same': int((ok['جودة الوصف'] == 'q_same_as_title').sum())
+        if 'جودة الوصف' in ok.columns else 0,
         'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum()),
         'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum()),
         'thin_pages': int((ok['حالة المحتوى'] == 'thin').sum()),
@@ -1127,6 +1273,9 @@ def localize_df(df, lang):
                 'حالة الكانونيكال']:
         if col in out.columns:
             out[col] = out[col].map(lambda v: STATUS_LABEL[lang].get(v, v))
+    for col in ['جودة العنوان', 'جودة الوصف']:
+        if col in out.columns:
+            out[col] = out[col].map(lambda v: QUALITY_LABEL[lang].get(v, v))
     if 'النص البديل الحالي (Alt)' in out.columns:
         empty = STATUS_LABEL[lang]['alt_empty']
         out['النص البديل الحالي (Alt)'] = out['النص البديل الحالي (Alt)'].map(
@@ -1237,6 +1386,20 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None)
         else:
             add(CHECK_PASS, "قراءة العناوين",
                 f"العناوين مقروءة في {n_ok - no_title} صفحة من {n_ok}.")
+
+    # 6ب) العناوين الرمزية وقيم القوالب
+    if n_ok and 'جودة العنوان' in ok.columns:
+        sym = int(ok['جودة العنوان'].isin(QUALITY_FATAL).sum())
+        if sym / n_ok > 0.3:
+            add(CHECK_FAIL, "سلامة العناوين",
+                f"{sym} عنوان من أصل {n_ok} مجرد رموز أو قيمة قالب افتراضية.",
+                "قالب المتجر لا يولّد عناوين ميتا. تأكد من ذلك يدوياً قبل الإرسال.")
+        elif sym:
+            add(CHECK_WARN, "سلامة العناوين",
+                f"{sym} عنوان مجرد رموز أو قيمة قالب (مثل [] أو {{{{ }}}}).",
+                "عُوملت كعناوين مفقودة في الأرقام.")
+        else:
+            add(CHECK_PASS, "سلامة العناوين", "لا توجد عناوين رمزية أو قيم قوالب.")
 
     # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
     if n_ok:
@@ -1407,6 +1570,19 @@ def build_diagnosis(score, stats, lang):
         if weak:
             points.append(f"{weak} صورة نصها البديل موجود لكنه غير وصفي أو مكرر، "
                           "فلا يضيف قيمة لمحركات البحث.")
+        if stats.get('title_symbols'):
+            points.append(f"{stats['title_symbols']} عنوان ميتا مجرد رموز أو قيمة قالب "
+                          "افتراضية (مثل [] أو {{ }})، أي أن الصفحة بلا عنوان فعلي "
+                          "في نتائج البحث.")
+        if stats.get('title_brand_only'):
+            points.append(f"{stats['title_brand_only']} عنوان لا يحمل سوى اسم المتجر "
+                          "بلا أي وصف للمنتج، فلا يطابق أي بحث للزبون.")
+        if stats.get('title_dup'):
+            points.append(f"{stats['title_dup']} صفحة تتشارك نفس عنوان الميتا، "
+                          "فلا تميّز محركات البحث بينها.")
+        if stats.get('desc_same'):
+            points.append(f"{stats['desc_same']} وصف ميتا نسخة حرفية من العنوان، "
+                          "فيضيع سطر إضافي مجاني في نتيجة البحث.")
         if crit_t:
             points.append(f"{crit_t} عنوان ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
                           f"{TITLE_MIN_OK} حرفاً أو يتجاوز {TITLE_MAX} حرفاً فيُقتطع "
@@ -1464,6 +1640,17 @@ def build_diagnosis(score, stats, lang):
     if weak:
         points.append(f"{weak} images have alt text that is present but non-descriptive "
                       "or duplicated, adding no value for search engines.")
+    if stats.get('title_symbols'):
+        points.append(f"{stats['title_symbols']} meta titles are only symbols or "
+                      "template placeholders, leaving those pages with no real title.")
+    if stats.get('title_brand_only'):
+        points.append(f"{stats['title_brand_only']} titles contain nothing but the store "
+                      "name, matching no customer search.")
+    if stats.get('title_dup'):
+        points.append(f"{stats['title_dup']} pages share an identical meta title.")
+    if stats.get('desc_same'):
+        points.append(f"{stats['desc_same']} descriptions are a verbatim copy of the "
+                      "title, wasting a free line in the search result.")
     if crit_t:
         points.append(f"{crit_t} meta titles need urgent work: missing, under "
                       f"{TITLE_MIN_OK} characters, or over {TITLE_MAX} and truncated "
@@ -1872,7 +2059,9 @@ if nav == "🔍 فحص متجر جديد":
                 images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
                     .copy().reset_index(drop=True)
                 images_df = apply_duplicate_alt(images_df)
+            df, brand = analyze_text_quality(df)
             df = score_pages(df, images_df)
+            st.session_state.brand = brand
 
             coverage = None
             if do_sitemap_check:
@@ -2016,6 +2205,18 @@ if nav == "🔍 فحص متجر جديد":
                     L['very_short']: COLOR['bad'], L['long']: COLOR['bad'],
                     L['missing']: COLOR['bad']}), unsafe_allow_html=True)
 
+            QL = QUALITY_LABEL['ar']
+            qc = ok['جودة العنوان'].value_counts()
+            items = [(QL[k], int(qc.get(k, 0))) for k in
+                     ['q_ok', 'q_duplicate', 'q_brand_only', 'q_one_word',
+                      'q_placeholder', 'q_symbols'] if qc.get(k, 0)]
+            if items and len(items) > 1:
+                st.markdown(bar_chart("الجودة البنيوية لعناوين الميتا", items, {
+                    QL['q_ok']: COLOR['ok'], QL['q_duplicate']: COLOR['warn'],
+                    QL['q_brand_only']: COLOR['bad'], QL['q_one_word']: COLOR['warn'],
+                    QL['q_placeholder']: COLOR['bad'], QL['q_symbols']: COLOR['bad']}),
+                    unsafe_allow_html=True)
+
             st.markdown("#### أبرز النتائج")
             out = []
             if summary['missing_alts']:
@@ -2025,6 +2226,19 @@ if nav == "🔍 فحص متجر جديد":
             if summary['weak_alts']:
                 out.append((f"<b>{summary['weak_alts']}</b> صورة نصها البديل موجود لكنه "
                             "غير وصفي أو مكرر — يمر كسليم في الأدوات السطحية.", 'warn'))
+            if summary.get('title_symbols'):
+                out.append((f"<b>{summary['title_symbols']}</b> عنوان ميتا مجرد رموز أو "
+                            "قيمة قالب افتراضية — الصفحة بلا عنوان فعلي في نتائج البحث.",
+                            'bad'))
+            if summary.get('title_brand_only'):
+                out.append((f"<b>{summary['title_brand_only']}</b> عنوان لا يحمل سوى اسم "
+                            "المتجر بلا وصف للمنتج.", 'bad'))
+            if summary.get('title_dup'):
+                out.append((f"<b>{summary['title_dup']}</b> صفحة تتشارك نفس عنوان "
+                            "الميتا.", 'warn'))
+            if summary.get('desc_same'):
+                out.append((f"<b>{summary['desc_same']}</b> وصف ميتا نسخة حرفية من "
+                            "العنوان.", 'warn'))
             if summary['critical_titles']:
                 out.append((f"<b>{summary['critical_titles']}</b> عنوان مفقود أو قصير جداً "
                             "أو يُقتطع في نتائج البحث.", 'bad'))
@@ -2088,8 +2302,11 @@ if nav == "🔍 فحص متجر جديد":
 
             d = view_df if sel == "الكل" else view_df[view_df['نوع الصفحة'] == sel]
             if only_issues:
+                QL = QUALITY_LABEL['ar']
                 d = d[(d['حالة العنوان'] != STATUS_LABEL['ar']['optimal']) |
                       (d['حالة الوصف'] != STATUS_LABEL['ar']['optimal']) |
+                      (~d['جودة العنوان'].isin([QL['q_ok'], QL['q_na']])) |
+                      (~d['جودة الوصف'].isin([QL['q_ok'], QL['q_na']])) |
                       (d['صور بدون Alt'] > 0) | (d['متاحة'] == False)]  # noqa: E712
             d = d.copy().reset_index(drop=True)
             d.index = d.index + 1
@@ -2212,8 +2429,11 @@ if nav == "🔍 فحص متجر جديد":
                         a.metric("طول العنوان", r['طول العنوان'], L[r['حالة العنوان']])
                         b.metric("طول الوصف", r['طول الوصف'], L[r['حالة الوصف']])
                         c.metric("درجة الصفحة", f"{r['درجة السيو']}%")
-                        st.write(f"**العنوان:** {r['عنوان الميتا'] or '— مفقود —'}")
-                        st.write(f"**الوصف:** {r['وصف الميتا'] or '— مفقود —'}")
+                        QL = QUALITY_LABEL['ar']
+                        tq = QL.get(r.get('جودة العنوان', 'q_na'), '—')
+                        dq = QL.get(r.get('جودة الوصف', 'q_na'), '—')
+                        st.write(f"**العنوان** ({tq}): {r['عنوان الميتا'] or '— مفقود —'}")
+                        st.write(f"**الوصف** ({dq}): {r['وصف الميتا'] or '— مفقود —'}")
                         st.caption(f"صور: {r['إجمالي الصور']} · بلا Alt: "
                                    f"{r['صور بدون Alt']} · Alt ضعيف: {r['صور Alt ضعيف']} · "
                                    f"كلمات: {r['عدد الكلمات']} · لغة: {r['لغة الصفحة']} · "
