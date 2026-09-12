@@ -1386,99 +1386,133 @@ def shape_ar(text):
 
 
 def build_diagnosis(score, stats, lang):
+    """يُرجع (مقدمة، قائمة نقاط، خلاصة).
+
+    القاعدة: العدد الرئيسي لكل بند هو ما يحتاج إصلاحاً فعلياً، لا كل ما
+    يخرج عن المثالي. «مقبول» فرصة تحسين وليس عيباً، فيُذكر منفصلاً.
+    """
     imgs = stats.get('total_images', 0)
     missing = stats.get('missing_alts', 0)
-    generic = stats.get('weak_alts', 0)
-    issues = []
+    weak = stats.get('weak_alts', 0)
+    crit_t = stats.get('critical_titles', 0)
+    crit_d = stats.get('critical_descs', 0)
+    imp_t = max(stats.get('bad_titles', 0) - crit_t, 0)   # مقبول: قابل للتحسين
+    imp_d = max(stats.get('bad_descs', 0) - crit_d, 0)
+    points = []
 
     if lang == 'ar':
-        if missing > 0 and imgs > 0:
-            issues.append(f"{missing} صورة من أصل {imgs} بلا نص بديل إطلاقاً "
-                          f"(بنسبة {round(missing / imgs * 100, 1)}%)، وهو ما يحرم المتجر "
-                          "من الظهور في بحث صور جوجل")
-        if generic > 0:
-            issues.append(f"{generic} صورة نصها البديل موجود لكنه غير وصفي أو مكرر "
-                          "أو محشو بالكلمات، فلا يضيف قيمة لمحركات البحث")
-        if stats.get('bad_titles', 0) > 0:
-            issues.append(f"{stats['bad_titles']} عنوان ميتا خارج الطول المثالي "
-                          f"(50-60 حرفاً)، منها {stats.get('critical_titles', 0)} عنوان "
-                          "مفقود أو قصير جداً أو يُقتطع في نتائج البحث")
-        if stats.get('bad_descs', 0) > 0:
-            issues.append(f"{stats['bad_descs']} وصف ميتا خارج الطول المثالي "
-                          f"(120-150 حرفاً)، منها {stats.get('critical_descs', 0)} "
-                          "وصف مفقود أو قصير جداً أو يتجاوز الحد")
-        if stats.get('canon_missing', 0) > 0:
-            issues.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
-                          "ما يعرّض المتجر لتكرار المحتوى")
-        if stats.get('hidden_count', 0) > 0:
-            issues.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع "
-                          "لا يصل إليها الزائر بأي رابط داخلي، فتفقد قيمتها")
-        if stats.get('redirect_count', 0) > 0:
-            issues.append(f"{stats['redirect_count']} رابط في خريطة الموقع يعيد التوجيه "
-                          "لصفحة أخرى، ما يستهلك ميزانية زحف المتجر بلا فائدة")
-        if stats.get('not_indexed_count', 0) > 0:
-            issues.append(f"{stats['not_indexed_count']} منتجاً معروضاً لا يظهر "
-                          "في خريطة الموقع")
-        if stats.get('broken_pages', 0) > 0:
-            issues.append(f"{stats['broken_pages']} رابط معطل يصل إليه الزائر")
+        if missing and imgs:
+            points.append(f"{missing} صورة من أصل {imgs} بلا نص بديل إطلاقاً "
+                          f"({round(missing / imgs * 100, 1)}%)، فلا تظهر في بحث صور جوجل.")
+        if weak:
+            points.append(f"{weak} صورة نصها البديل موجود لكنه غير وصفي أو مكرر، "
+                          "فلا يضيف قيمة لمحركات البحث.")
+        if crit_t:
+            points.append(f"{crit_t} عنوان ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
+                          f"{TITLE_MIN_OK} حرفاً أو يتجاوز {TITLE_MAX} حرفاً فيُقتطع "
+                          "في نتائج البحث.")
+        if imp_t:
+            points.append(f"{imp_t} عنوان ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
+                          f"({TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرفاً) لاستغلال كامل "
+                          "المساحة المعروضة.")
+        if crit_d:
+            points.append(f"{crit_d} وصف ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
+                          f"{DESC_MIN_OK} حرفاً أو يتجاوز {DESC_MAX} حرفاً.")
+        if imp_d:
+            points.append(f"{imp_d} وصف ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
+                          f"({DESC_MIN_OPTIMAL}-{DESC_MAX} حرفاً).")
+        if stats.get('canon_missing'):
+            points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
+                          "ما يعرّض المتجر لتكرار المحتوى.")
+        if stats.get('hidden_count'):
+            points.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع لا يصل "
+                          "إليها الزائر بأي رابط داخلي، فتفقد قيمتها.")
+        if stats.get('redirect_count'):
+            points.append(f"{stats['redirect_count']} رابط في خريطة الموقع يعيد التوجيه "
+                          "لصفحة أخرى، ما يستهلك ميزانية زحف المتجر بلا فائدة.")
+        if stats.get('not_indexed_count'):
+            points.append(f"{stats['not_indexed_count']} منتجاً معروضاً في المتجر "
+                          "لا يظهر في خريطة الموقع.")
+        if stats.get('broken_pages'):
+            points.append(f"{stats['broken_pages']} رابط معطل داخل المتجر يصل إليه الزائر.")
+        if stats.get('thin_pages'):
+            points.append(f"{stats['thin_pages']} صفحة بمحتوى نصي أقل من 50 كلمة.")
 
-        if not issues:
-            return ("لم يرصد الفحص فجوات جوهرية في الصفحات المعروضة: العناوين والأوصاف "
-                    "والنصوص البديلة وبنية الروابط ضمن المعايير الموصى بها. يوصى بمتابعة "
-                    "دورية عند إضافة منتجات أو أقسام جديدة.")
-        body = "أظهر الفحص الفني: " + "، و".join(issues) + ". "
+        if not points:
+            return ("لم يرصد الفحص فجوات جوهرية في الصفحات المعروضة:", [
+                "العناوين والأوصاف ضمن الأطوال الموصى بها.",
+                "النصوص البديلة للصور مكتملة ووصفية.",
+                "بنية الروابط وخريطة الموقع متسقة مع ما يراه الزائر."],
+                "يوصى بمراجعة دورية عند إضافة منتجات أو أقسام جديدة.")
+
+        intro = "رصد الفحص الفني النقاط التالية، مرتبة حسب أثرها على الظهور في البحث:"
         if score < 60:
-            body += ("تشير النتيجة الإجمالية إلى فجوة واسعة في تهيئة المتجر لمحركات "
+            close = ("تشير النتيجة الإجمالية إلى فجوة واسعة في تهيئة المتجر لمحركات "
                      "البحث. يوصى بإعادة كتابة البيانات الوصفية وإسناد نصوص بديلة "
                      "وصفية لجميع صور المحتوى ضمن خطة عمل مرحلية.")
         elif score < 80:
-            body += ("المتجر مهيأ جزئياً، ومعالجة العناصر أعلاه من شأنها رفع درجة "
+            close = ("المتجر مهيأ جزئياً، ومعالجة البنود أعلاه من شأنها رفع درجة "
                      "التوافق وتحسين فرص الظهور في نتائج البحث.")
         else:
-            body += ("المستوى العام جيد، وتبقى المعالجات المذكورة تحسينات تكميلية "
-                     "يمكن تنفيذها ضمن جولة مراجعة واحدة.")
-        return body
+            close = ("المستوى العام جيد، والبنود أعلاه تحسينات تكميلية يمكن تنفيذها "
+                     "ضمن جولة مراجعة واحدة.")
+        return intro, points, close
 
-    if missing > 0 and imgs > 0:
-        issues.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) "
-                      "carry no alt text at all, excluding the store from Google Image search")
-    if generic > 0:
-        issues.append(f"{generic} images have alt text that is present but non-descriptive, "
-                      "duplicated, or keyword-stuffed")
-    if stats.get('bad_titles', 0) > 0:
-        issues.append(f"{stats['bad_titles']} meta titles fall outside the optimal 50-60 "
-                      f"character range, {stats.get('critical_titles', 0)} of them critically")
-    if stats.get('bad_descs', 0) > 0:
-        issues.append(f"{stats['bad_descs']} meta descriptions fall outside the optimal "
-                      f"120-150 character range, {stats.get('critical_descs', 0)} critically")
-    if stats.get('canon_missing', 0) > 0:
-        issues.append(f"{stats['canon_missing']} pages have no canonical tag, exposing "
-                      "the store to duplicate content")
-    if stats.get('hidden_count', 0) > 0:
-        issues.append(f"{stats['hidden_count']} sitemap pages have no internal link path "
-                      "for visitors and therefore lose their value")
-    if stats.get('redirect_count', 0) > 0:
-        issues.append(f"{stats['redirect_count']} sitemap URLs redirect elsewhere, "
-                      "consuming crawl budget without benefit")
-    if stats.get('broken_pages', 0) > 0:
-        issues.append(f"{stats['broken_pages']} broken links are reachable by visitors")
+    if missing and imgs:
+        points.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) "
+                      "carry no alt text at all and cannot appear in Google Image search.")
+    if weak:
+        points.append(f"{weak} images have alt text that is present but non-descriptive "
+                      "or duplicated, adding no value for search engines.")
+    if crit_t:
+        points.append(f"{crit_t} meta titles need urgent work: missing, under "
+                      f"{TITLE_MIN_OK} characters, or over {TITLE_MAX} and truncated "
+                      "in search results.")
+    if imp_t:
+        points.append(f"{imp_t} titles are acceptable and could be raised to the optimal "
+                      f"{TITLE_MIN_OPTIMAL}-{TITLE_MAX} character range.")
+    if crit_d:
+        points.append(f"{crit_d} meta descriptions need urgent work: missing, under "
+                      f"{DESC_MIN_OK} characters, or over {DESC_MAX}.")
+    if imp_d:
+        points.append(f"{imp_d} descriptions are acceptable and could be raised to the "
+                      f"optimal {DESC_MIN_OPTIMAL}-{DESC_MAX} character range.")
+    if stats.get('canon_missing'):
+        points.append(f"{stats['canon_missing']} pages have no canonical tag, exposing "
+                      "the store to duplicate content.")
+    if stats.get('hidden_count'):
+        points.append(f"{stats['hidden_count']} pages published in the sitemap have no "
+                      "internal link path for visitors and lose their value.")
+    if stats.get('redirect_count'):
+        points.append(f"{stats['redirect_count']} sitemap URLs redirect elsewhere, "
+                      "consuming crawl budget without benefit.")
+    if stats.get('not_indexed_count'):
+        points.append(f"{stats['not_indexed_count']} visible products are absent "
+                      "from the sitemap.")
+    if stats.get('broken_pages'):
+        points.append(f"{stats['broken_pages']} broken links are reachable by visitors.")
+    if stats.get('thin_pages'):
+        points.append(f"{stats['thin_pages']} pages carry fewer than 50 words of text.")
 
-    if not issues:
-        return ("The audit found no material gaps across the visible pages: titles, "
-                "descriptions, alt text and link structure all fall within recommended "
-                "standards. Periodic review is advised as new products are added.")
-    body = "The technical audit found: " + "; ".join(issues) + ". "
+    if not points:
+        return ("The audit found no material gaps across the visible pages:", [
+            "Titles and descriptions fall within recommended lengths.",
+            "Image alt text is complete and descriptive.",
+            "Link structure and sitemap match what visitors can reach."],
+            "Periodic review is advised as new products are added.")
+
+    intro = "The technical audit identified the following, ordered by search impact:"
     if score < 60:
-        body += ("The overall score indicates a substantial gap in search engine readiness. "
-                 "Rewriting metadata and assigning descriptive alt text to all content "
-                 "images is recommended as a phased programme of work.")
+        close = ("The overall score indicates a substantial gap in search engine "
+                 "readiness. Rewriting metadata and assigning descriptive alt text to "
+                 "all content images is recommended as a phased programme of work.")
     elif score < 80:
-        body += ("The store is partially optimised. Addressing the items above would raise "
-                 "the compliance score and improve search visibility.")
+        close = ("The store is partially optimised. Addressing the items above would "
+                 "raise the compliance score and improve search visibility.")
     else:
-        body += ("The overall standard is good; the remaining items are incremental "
-                 "improvements that can be handled in a single review cycle.")
-    return body
+        close = ("The overall standard is good; the items above are incremental "
+                 "improvements that fit into a single review cycle.")
+    return intro, points, close
 
 
 def generate_client_pdf(domain, score, stats, lang='ar'):
@@ -1637,34 +1671,64 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     pdf.cell(bw, 6, fmt(T['diag'].format(n=diag_n)), ln=True, align=align_text)
     pdf.ln(1)
 
-    text = build_diagnosis(score, stats, lang)
+    intro, points, close = build_diagnosis(score, stats, lang)
     pdf.set_font(font_name, "", 9)
     maxw = bw - 10
-    lines, cur = [], ""
-    for word in text.split():
-        trial = (cur + " " + word).strip()
-        if pdf.get_string_width(fmt(trial)) <= maxw:
-            cur = trial
-        else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+
+    def wrap(txt, width):
+        out, cur = [], ""
+        for word in str(txt).split():
+            trial = (cur + " " + word).strip()
+            if pdf.get_string_width(fmt(trial)) <= width:
+                cur = trial
+            else:
+                if cur:
+                    out.append(cur)
+                cur = word
+        if cur:
+            out.append(cur)
+        return out
+
+    bullet_indent = 6
+    blocks = [('p', l) for l in wrap(intro, maxw)]
+    for pt in points:
+        wl = wrap(pt, maxw - bullet_indent)
+        for k, line in enumerate(wl):
+            blocks.append(('b' if k == 0 else 'c', line))
+        blocks.append(('s', ''))
+    blocks += [('p', l) for l in wrap(close, maxw)]
 
     lh = 4.8
-    bh = len(lines) * lh + 6
-    if pdf.get_y() + bh > 265:
+    bh = sum(lh if t != 's' else 2.0 for t, _ in blocks) + 7
+    if pdf.get_y() + bh > 262:
         pdf.add_page()
     by = pdf.get_y()
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(226, 232, 240)
     pdf.rect(bx, by, bw, bh, 'DF')
-    pdf.set_xy(bx + 5, by + 3)
-    pdf.set_text_color(71, 85, 105)
-    for line in lines:
-        pdf.set_x(bx + 5)
-        pdf.cell(maxw, lh, fmt(line), ln=True, align=align_text)
+
+    y = by + 3.5
+    for kind, line in blocks:
+        if kind == 's':
+            y += 2.0
+            continue
+        if kind == 'b':
+            pdf.set_xy(bx + 5, y)
+            pdf.set_text_color(15, 23, 42)
+            if rtl:
+                pdf.cell(maxw, lh, fmt("• " + line), align="R")
+            else:
+                pdf.cell(maxw, lh, "- " + line, align="L")
+        else:
+            pdf.set_text_color(71, 85, 105)
+            if rtl:
+                pdf.set_xy(bx + 5, y)
+                pdf.cell(maxw - (bullet_indent if kind == 'c' else 0), lh,
+                         fmt(line), align="R")
+            else:
+                pdf.set_xy(bx + 5 + (bullet_indent if kind == 'c' else 0), y)
+                pdf.cell(maxw, lh, line, align="L")
+        y += lh
 
     return bytes(pdf.output())
 
