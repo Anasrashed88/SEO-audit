@@ -142,7 +142,8 @@ def init_db():
 init_db()
 
 for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
-                     ('current_url', ""), ('coverage', None), ('platform', 'unknown')]:
+                     ('current_url', ""), ('coverage', None), ('platform', 'unknown'),
+                     ('selfcheck', None)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -179,6 +180,15 @@ section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
 .bar-value { flex:0 0 46px; font-size:12px; color:#475569; text-align:left; }
 .finding { border-right:4px solid; border-radius:8px; padding:11px 14px; margin-bottom:9px; background:#fff; border-top:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0; border-left:1px solid #e2e8f0; font-size:13.5px; color:#334155; }
 .finding b { color:#0f172a; }
+.chk { display:flex; gap:12px; align-items:flex-start; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; margin-bottom:8px; background:#fff; }
+.chk .dot { flex:0 0 10px; height:10px; border-radius:50%; margin-top:6px; }
+.chk .t { font-size:13.5px; font-weight:700; color:#0f172a; }
+.chk .m { font-size:13px; color:#475569; margin-top:2px; }
+.chk .a { font-size:12.5px; color:#b45309; margin-top:5px; }
+.verdict { border-radius:12px; padding:16px 20px; margin-bottom:16px; font-size:15px; font-weight:500; }
+.v-ready { background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; }
+.v-review { background:#fffbeb; border:1px solid #fde68a; color:#92400e; }
+.v-blocked { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
 .stTabs [data-baseweb="tab-list"] { gap:4px; direction:rtl; }
 .stTabs [data-baseweb="tab"] { font-size:14px; font-weight:500; padding:8px 16px; }
 div[data-testid="stDataFrame"] { direction:ltr; }
@@ -859,7 +869,9 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
         frontier = next_frontier + frontier
         if progress_cb:
             progress_cb(len(pages), len(frontier), level)
-    return pages, images, category_urls, seen, platform
+    truncated = bool(frontier)   # بقيت روابط لم تُفحص
+    meta = {'truncated': truncated, 'pending': len(frontier), 'levels': level}
+    return pages, images, category_urls, seen, platform, meta
 
 
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
@@ -1122,6 +1134,158 @@ def localize_df(df, lang):
     if lang == 'en':
         out = out.rename(columns={k: v for k, v in COL_EN.items() if k in out.columns})
     return out
+
+
+
+# ==============================================================
+#  الفحص الذاتي — الأداة تحكم على موثوقية نتائجها قبل العميل
+# ==============================================================
+CHECK_FAIL, CHECK_WARN, CHECK_PASS = 'fail', 'warn', 'pass'
+
+
+def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None):
+    """يفحص نتائج الفحص نفسها بحثاً عن علامات عدم الموثوقية.
+
+    الهدف ليس إثبات صحة الأرقام — بل رصد الحالات التي تشير إلى أن الزاحف
+    لم يرَ المتجر كما يراه الزائر، قبل أن يصل التقرير إلى عميل.
+    """
+    checks = []
+
+    def add(level, title, msg, action=""):
+        checks.append({'level': level, 'title': title, 'msg': msg, 'action': action})
+
+    ok = df[df['متاحة'] == True] if not df.empty else df  # noqa: E712
+    n_ok = len(ok)
+    uimg = unique_images(images_df)
+    n_img = 0 if uimg is None or uimg.empty else len(uimg)
+
+    # 1) المنصة
+    if platform in SUPPORTED_PLATFORMS:
+        add(CHECK_PASS, "منصة المتجر",
+            f"تم التعرف على المنصة: {PLATFORM_LABEL[platform]}.")
+    else:
+        add(CHECK_FAIL, "منصة المتجر",
+            "لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. الأداة معايرة على "
+            "هذه المنصات الثلاث فقط.",
+            "افتح المتجر وتأكد من منصته يدوياً قبل الاعتماد على أي رقم.")
+
+    # 2) حجم الزحف
+    if n_ok == 0:
+        add(CHECK_FAIL, "حجم الزحف", "لم تُفحص أي صفحة بنجاح.",
+            "تحقق من أن الرابط صحيح وأن المتجر لا يحجب الزحف.")
+    elif n_ok < 5:
+        add(CHECK_FAIL, "حجم الزحف",
+            f"{n_ok} صفحة فقط — رقم صغير جداً لمتجر إلكتروني.",
+            "على الأرجح القائمة مبنية بـ JavaScript فلم يجد الزاحف روابط. "
+            "هذا المتجر خارج نطاق الأداة.")
+    else:
+        add(CHECK_PASS, "حجم الزحف", f"{n_ok} صفحة مفحوصة بنجاح.")
+
+    # 3) وجود منتجات
+    n_prod = summary.get('products', 0)
+    if n_ok >= 5 and n_prod == 0:
+        add(CHECK_FAIL, "اكتشاف المنتجات",
+            "لم يُعثر على أي صفحة منتج رغم نجاح الزحف.",
+            "بنية روابط هذا المتجر غير معتادة — راجع تبويب الصفحات يدوياً.")
+    elif n_prod:
+        add(CHECK_PASS, "اكتشاف المنتجات", f"{n_prod} صفحة منتج.")
+
+    # 4) نسبة غير المصنفة
+    if n_ok:
+        ratio = summary.get('unclassified', 0) / n_ok * 100
+        if ratio > 25:
+            add(CHECK_FAIL, "دقة التصنيف",
+                f"{round(ratio, 1)}% من الصفحات لم تُصنّف آلياً.",
+                "قواعد التصنيف لا تناسب بنية هذا المتجر. راجع تبويب الصفحات.")
+        elif ratio > 10:
+            add(CHECK_WARN, "دقة التصنيف",
+                f"{round(ratio, 1)}% من الصفحات غير مصنّفة.",
+                "راجعها في تبويب الصفحات قبل الإرسال.")
+        else:
+            add(CHECK_PASS, "دقة التصنيف",
+                f"{round(ratio, 1)}% فقط غير مصنّفة.")
+
+    # 5) رصد الصور على صفحات المنتجات (كاشف JavaScript الأهم)
+    prod_pages = ok[ok['نوع الصفحة'] == T_PRODUCT] if n_ok else ok
+    if len(prod_pages) >= 3:
+        with_imgs = int((prod_pages['إجمالي الصور'] > 0).sum())
+        pct = with_imgs / len(prod_pages) * 100
+        if pct == 0:
+            add(CHECK_FAIL, "رصد صور المنتجات",
+                "لم تُرصد أي صورة على صفحات المنتجات.",
+                "معرض الصور مبني بـ JavaScript. أرقام الصور في التقرير غير صحيحة.")
+        elif pct < 60:
+            add(CHECK_WARN, "رصد صور المنتجات",
+                f"{round(pct, 1)}% فقط من صفحات المنتجات تحتوي صوراً مرصودة.",
+                "افتح صفحة منتج وقارن عدد الصور الفعلي بالمسجّل.")
+        else:
+            add(CHECK_PASS, "رصد صور المنتجات",
+                f"{round(pct, 1)}% من صفحات المنتجات بها صور مرصودة "
+                f"({n_img} صورة فريدة).")
+
+    # 6) قراءة البيانات الوصفية
+    if n_ok:
+        no_title = int((ok['طول العنوان'] == 0).sum())
+        if no_title == n_ok:
+            add(CHECK_FAIL, "قراءة العناوين",
+                "كل الصفحات بلا عنوان — مؤشر على فشل في قراءة الصفحات.",
+                "لا ترسل التقرير. افتح أي صفحة وتحقق من وجود وسم title.")
+        elif no_title / n_ok > 0.5:
+            add(CHECK_WARN, "قراءة العناوين",
+                f"{no_title} صفحة بلا عنوان من أصل {n_ok}.",
+                "تحقق من عيّنة في تبويب التحقق اليدوي.")
+        else:
+            add(CHECK_PASS, "قراءة العناوين",
+                f"العناوين مقروءة في {n_ok - no_title} صفحة من {n_ok}.")
+
+    # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
+    if n_ok:
+        thin = summary.get('thin_pages', 0) / n_ok * 100
+        if thin > 50:
+            add(CHECK_FAIL, "قراءة المحتوى",
+                f"{round(thin, 1)}% من الصفحات بمحتوى نصي شبه فارغ.",
+                "المتجر يبني محتواه بـ JavaScript — النتائج غير معتمدة.")
+        elif thin > 20:
+            add(CHECK_WARN, "قراءة المحتوى",
+                f"{round(thin, 1)}% من الصفحات بمحتوى نصي ضعيف.",
+                "تأكد أن هذا واقع المتجر لا خلل في القراءة.")
+        else:
+            add(CHECK_PASS, "قراءة المحتوى", "المحتوى النصي مقروء بشكل طبيعي.")
+
+    # 8) اكتمال الزحف
+    if crawl_meta and crawl_meta.get('truncated'):
+        add(CHECK_WARN, "اكتمال الزحف",
+            f"توقف الزحف مع بقاء {crawl_meta.get('pending', 0)} رابط غير مفحوص.",
+            "ارفع الحد الأقصى للصفحات من الإعدادات وأعد الفحص.")
+    else:
+        add(CHECK_PASS, "اكتمال الزحف", "غُطّيت كل الروابط المكتشفة.")
+
+    # 9) اتساق المعروض مع خريطة الموقع
+    if coverage and coverage.get('sitemap_count'):
+        vis, sm = coverage['visible_count'], coverage['sitemap_count']
+        if sm and vis / sm < 0.6:
+            add(CHECK_WARN, "تغطية المنتجات",
+                f"{vis} منتج معروض مقابل {sm} في خريطة الموقع.",
+                "قد يستخدم المتجر تمريراً لانهائياً بدل ترقيم الصفحات، "
+                "فلم يصل الزاحف لكل المنتجات.")
+        else:
+            add(CHECK_PASS, "تغطية المنتجات",
+                f"{vis} منتج معروض مقابل {sm} في الخريطة — متسق.")
+
+    # 10) الروابط المعطلة
+    if n_ok:
+        br = summary.get('broken_pages', 0)
+        if br / max(len(df), 1) > 0.15:
+            add(CHECK_WARN, "الروابط المعطلة",
+                f"{br} رابط معطل — نسبة مرتفعة قد تعني حجباً جزئياً للزاحف.",
+                "افتح عيّنة منها في المتصفح للتأكد أنها معطلة فعلاً.")
+        else:
+            add(CHECK_PASS, "الروابط المعطلة", f"{br} رابط معطل — ضمن المعقول.")
+
+    fails = sum(1 for c in checks if c['level'] == CHECK_FAIL)
+    warns = sum(1 for c in checks if c['level'] == CHECK_WARN)
+    verdict = ('blocked' if fails else 'review' if warns else 'ready')
+    return {'checks': checks, 'fails': fails, 'warns': warns, 'verdict': verdict}
 
 
 # ==============================================================
@@ -1596,7 +1760,7 @@ if nav == "🔍 فحص متجر جديد":
 
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
-            for k in ['audit_df', 'images_df', 'summary', 'coverage']:
+            for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
@@ -1615,7 +1779,7 @@ if nav == "🔍 فحص متجر جديد":
                 note1.caption(f"المستوى {level} · فُحصت {done} صفحة · "
                               f"{pending} رابط في الانتظار")
 
-            pages, imgs, cat_urls, seen, platform = crawl_store(
+            pages, imgs, cat_urls, seen, platform, crawl_meta = crawl_store(
                 target, max_pages, workers, crawl_cb)
             bar1.progress(1.0)
             st.session_state.platform = platform
@@ -1656,6 +1820,8 @@ if nav == "🔍 فحص متجر جديد":
                 coverage = build_coverage_report(df, sm_urls, target, workers)
 
             summary = compute_summary(df, coverage, images_df)
+            selfcheck = run_self_checks(df, images_df, coverage, platform,
+                                        summary, crawl_meta)
             summary['platform'] = platform
             summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
             status.update(label="اكتمل الفحص", state="complete", expanded=False)
@@ -1664,6 +1830,7 @@ if nav == "🔍 فحص متجر جديد":
         st.session_state.images_df = images_df
         st.session_state.summary = summary
         st.session_state.coverage = coverage
+        st.session_state.selfcheck = selfcheck
 
         conn = sqlite3.connect(DB_FILE)
         conn.cursor().execute(
@@ -1722,7 +1889,24 @@ if nav == "🔍 فحص متجر جديد":
         view_df = localize_df(df, 'ar')
         uimgs = unique_images(images_df)
         view_imgs = localize_df(uimgs, 'ar')
-        tabs = st.tabs(["📊 نظرة عامة", "📄 الصفحات", "🖼️ الصور",
+        selfcheck = st.session_state.get('selfcheck')
+        vmap = {'ready': ('v-ready', '✅ جاهز للإرسال',
+                          'اجتازت النتائج كل فحوص الموثوقية. يمكنك إرسال التقرير.'),
+                'review': ('v-review', '⚠️ يحتاج مراجعة قبل الإرسال',
+                           'بعض المؤشرات تحتاج نظرة سريعة منك قبل إرسال التقرير لعميل.'),
+                'blocked': ('v-blocked', '⛔ لا ترسل هذا التقرير',
+                            'رصدت الأداة خللاً يجعل أرقامها غير موثوقة لهذا المتجر.')}
+        if selfcheck:
+            cls, head, sub = vmap[selfcheck['verdict']]
+            extra = (f" · {selfcheck['fails']} فحص فاشل"
+                     if selfcheck['fails'] else "")
+            extra += (f" · {selfcheck['warns']} تنبيه" if selfcheck['warns'] else "")
+            st.markdown(f'<div class="verdict {cls}"><b>{head}</b>{extra}<br>'
+                        f'<span style="font-size:13.5px;font-weight:400">{sub} '
+                        f'التفاصيل في تبويب «فحص الثقة».</span></div>',
+                        unsafe_allow_html=True)
+
+        tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "📄 الصفحات", "🖼️ الصور",
                         "🗺️ خريطة الموقع", "🔬 التحقق اليدوي", "📥 التصدير"])
 
         # ---------------- نظرة عامة ----------------
@@ -1806,8 +1990,30 @@ if nav == "🔍 فحص متجر جديد":
             for text, lvl in out:
                 st.markdown(finding(text, lvl), unsafe_allow_html=True)
 
-        # ---------------- الصفحات ----------------
+        # ---------------- فحص الثقة ----------------
         with tabs[1]:
+            st.markdown("#### فحوص موثوقية النتائج")
+            st.caption("هذه الفحوص لا تقيس جودة سيو المتجر، بل تقيس مدى ثقة الأداة "
+                       "في أرقامها هي. أي فحص فاشل يعني أن الزاحف لم يرَ المتجر كما "
+                       "يراه الزائر.")
+            if not selfcheck:
+                st.info("لا توجد نتائج فحص ذاتي لهذه الجلسة.")
+            else:
+                dots = {CHECK_PASS: COLOR['ok'], CHECK_WARN: COLOR['warn'],
+                        CHECK_FAIL: COLOR['bad']}
+                order = {CHECK_FAIL: 0, CHECK_WARN: 1, CHECK_PASS: 2}
+                for c in sorted(selfcheck['checks'], key=lambda x: order[x['level']]):
+                    act = (f'<div class="a">الإجراء المقترح: {c["action"]}</div>'
+                           if c['action'] else '')
+                    st.markdown(
+                        f'<div class="chk"><div class="dot" '
+                        f'style="background:{dots[c["level"]]}"></div>'
+                        f'<div><div class="t">{c["title"]}</div>'
+                        f'<div class="m">{c["msg"]}</div>{act}</div></div>',
+                        unsafe_allow_html=True)
+
+        # ---------------- الصفحات ----------------
+        with tabs[2]:
             present = [PAGE_TYPE_LABEL['ar'][t] for t in PAGE_TYPE_ORDER
                        if (df['نوع الصفحة'] == t).any()]
             f1, f2 = st.columns([2, 3])
@@ -1837,7 +2043,7 @@ if nav == "🔍 فحص متجر جديد":
                 "، ".join(f"{k}: {v}" for k, v in langs.items()))
 
         # ---------------- الصور ----------------
-        with tabs[2]:
+        with tabs[3]:
             if view_imgs is not None and not view_imgs.empty:
                 L = STATUS_LABEL['ar']
                 f = st.selectbox("تصفية", ["الكل", "بلا نص بديل", "نص بديل ضعيف",
@@ -1869,7 +2075,7 @@ if nav == "🔍 فحص متجر جديد":
                 st.info("لا توجد صور محتوى مرصودة.")
 
         # ---------------- خريطة الموقع ----------------
-        with tabs[3]:
+        with tabs[4]:
             if not coverage:
                 st.info("لم تُفعّل المقارنة مع خريطة الموقع في هذا الفحص.")
             else:
@@ -1920,7 +2126,7 @@ if nav == "🔍 فحص متجر جديد":
                         use_container_width=True)
 
         # ---------------- التحقق اليدوي ----------------
-        with tabs[4]:
+        with tabs[5]:
             st.markdown("#### عيّنة للمطابقة اليدوية")
             st.caption("افتح كل رابط وقارن العنوان والوصف بما هو مسجّل هنا. "
                        "تطابق العيّنة كاملة يعني أن محرك القراءة يعمل بشكل صحيح.")
@@ -1950,7 +2156,7 @@ if nav == "🔍 فحص متجر جديد":
                                    f"كانونيكال: {L[r['حالة الكانونيكال']]}")
 
         # ---------------- التصدير ----------------
-        with tabs[5]:
+        with tabs[6]:
             st.markdown("#### تصدير التقرير والبيانات")
             lang_choice = st.radio("لغة الملفات", ["العربية", "English"], horizontal=True)
             lang = 'ar' if lang_choice == "العربية" else 'en'
@@ -1966,13 +2172,31 @@ if nav == "🔍 فحص متجر جديد":
                 st.error(f"تعذر توليد الـ PDF: {e}")
             zip_bytes = build_zip(df, images_df, coverage, lang)
 
+            gate_ok = True
+            if selfcheck and selfcheck['verdict'] == 'blocked':
+                st.markdown(
+                    '<div class="verdict v-blocked"><b>⛔ تقرير العميل محجوب</b><br>'
+                    '<span style="font-size:13.5px;font-weight:400">رصدت الأداة خللاً '
+                    'يجعل أرقامها غير موثوقة لهذا المتجر. راجع تبويب «فحص الثقة» أولاً.'
+                    '</span></div>', unsafe_allow_html=True)
+                gate_ok = st.checkbox(
+                    "راجعت الفحوص الفاشلة وأتحمل مسؤولية إرسال هذا التقرير",
+                    value=False)
+            elif selfcheck and selfcheck['verdict'] == 'review':
+                st.warning("توجد تنبيهات على موثوقية النتائج. راجع تبويب «فحص الثقة» "
+                           "قبل إرسال التقرير لعميل.")
+
             d1, d2 = st.columns(2)
             with d1:
-                if pdf_bytes:
+                if pdf_bytes and gate_ok:
                     st.download_button(
                         "📄 تقرير العميل (PDF)" if lang == 'ar' else "📄 Client report (PDF)",
                         pdf_bytes, f"SEO_Audit_{netloc}_{lang}.pdf", "application/pdf",
                         use_container_width=True)
+                elif pdf_bytes:
+                    st.button("📄 تقرير العميل (PDF)", disabled=True,
+                              use_container_width=True,
+                              help="مُعطّل حتى تقرّ بمراجعة الفحوص الفاشلة.")
             with d2:
                 st.download_button(
                     "📦 حزمة البيانات (ZIP)" if lang == 'ar' else "📦 Data package (ZIP)",
