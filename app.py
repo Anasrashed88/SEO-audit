@@ -145,7 +145,8 @@ COL_EN = {
     'اسم منظم': 'Declared Name', 'صور معلنة': 'Declared Images',
     'رقم المنتج': 'SKU', 'عدد معلن': 'Declared Count',
     'الاسم المعلن': 'Declared Name', 'الاسم المعروض': 'Displayed Name',
-    'صور مرصودة': 'Images Detected',
+    'صور مرصودة': 'Images Detected', 'القسم': 'Category',
+    'مرصود': 'Detected', 'ناقص': 'Missing', 'عدد معلن': 'Declared Count',
 }
 
 COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
@@ -730,7 +731,7 @@ def broken_page_row(url, reason, source):
             'صور Alt ضعيف': 0, 'عدد الكلمات': 0, 'حالة المحتوى': 'na',
             'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '', '_raw_url': url,
         },
-        'images_data': [], 'links': set(),
+        'images_data': [], 'links': set(), 'product_links': set(),
     }
 
 
@@ -818,6 +819,11 @@ def _fetch_and_audit(url, base_url, source):
 
     jd = extract_product_facts(soup) if page_type == T_PRODUCT else \
         {'name': '', 'images': [], 'sku': '', 'offers': False}
+    prod_links = set()
+    if page_type in (T_CATEGORY, T_HOME):
+        for lk in links:
+            if detect_page_type(lk, base_url, None) == T_PRODUCT:
+                prod_links.add(url_key(lk))
     declared_n = (extract_declared_count(soup)
                   if page_type in (T_CATEGORY, T_HOME) else None)
 
@@ -846,6 +852,7 @@ def _fetch_and_audit(url, base_url, source):
         },
         'images_data': page_images,
         'links': links,
+        'product_links': prod_links,
         'platform_html': res.text[:60000] if page_type == T_HOME else '',
         'platform_headers': dict(res.headers) if page_type == T_HOME else {},
     }
@@ -1228,6 +1235,7 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
     seen = {url_key(base_url)}
     frontier = [base_url]
     category_urls = []
+    cat_products = {}
     platform = 'unknown'
     level = 0
 
@@ -1246,7 +1254,9 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
                     platform = detect_platform(res['platform_html'],
                                                res.get('platform_headers'), base_url)
                 if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
-                    category_urls.append(row.get('_raw_url', row['الرابط']))
+                    cu = row.get('_raw_url', row['الرابط'])
+                    category_urls.append(cu)
+                    cat_products[cu] = set(res.get('product_links') or ())
                 # الوجهة النهائية بعد التحويل تُعدّ مزارة أيضاً
                 seen.add(url_key(row.get('_raw_url', row['الرابط'])))
                 for link in res.get('links', ()):
@@ -1258,18 +1268,20 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
         if progress_cb:
             progress_cb(len(pages), len(frontier), level)
     truncated = bool(frontier)   # بقيت روابط لم تُفحص
-    meta = {'truncated': truncated, 'pending': len(frontier), 'levels': level}
+    meta = {'truncated': truncated, 'pending': len(frontier), 'levels': level,
+            'cat_products': cat_products}
     return pages, images, category_urls, seen, platform, meta
 
 
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
-                               max_depth=MAX_PAGINATION_DEPTH):
+                               max_depth=MAX_PAGINATION_DEPTH, cat_products=None):
     base_url = normalize_url(base_url)
     base_netloc = urlparse(base_url).netloc
     roots = list(dict.fromkeys(
         list(category_urls) + [f"{base_url}/{r}" for r in
                                ['products', 'collections/all', 'shop']]))
     new_urls, fetched = [], 0
+    per_cat = {}
     for idx, cat in enumerate(roots):
         seen_here = set()
         for page in range(2, max_depth + 1):
@@ -1288,14 +1300,18 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
             if not fresh:
                 break
             seen_here |= fresh
+            if cat_products is not None:
+                cat_products.setdefault(cat, set()).update(
+                    {url_key(x) for x in fresh})
             for u in fresh:
                 k = url_key(u)
+                per_cat.setdefault(cat, set()).add(k)
                 if k not in seen_keys:
                     seen_keys.add(k)
                     new_urls.append(u)
         if progress_cb:
             progress_cb(idx + 1, len(roots), len(new_urls), fetched)
-    return new_urls
+    return new_urls, per_cat
 
 
 def audit_urls(urls, base_url, source, workers, progress_bar=None):
@@ -1646,19 +1662,40 @@ def extract_declared_count(soup, text=None):
     return best
 
 
-def build_structured_report(df, declared_counts):
-    """يقارن ما رصده الزاحف بما يعلنه المتجر، ويعيد فجوات محددة."""
+def build_structured_report(df, declared_counts, cat_products=None):
+    """يقارن ما يعلنه المتجر بما رصده الزاحف — قسماً بقسم.
+
+    لا تُجمع أعداد الأقسام ولا يؤخذ أكبرها: المنتج قد ينتمي لأكثر من قسم،
+    فالمقارنة الصحيحة هي بين عدّاد كل قسم وعدد منتجاته المرصودة فيه.
+    """
     ok = df[df['متاحة'] == True]  # noqa: E712
     prod = ok[ok['نوع الصفحة'] == T_PRODUCT]
     n_found = len(prod)
-    clean = []
-    for v in declared_counts.values():
+    cat_products = cat_products or {}
+
+    def as_int(v):
         try:
             if v is not None and pd.notna(v) and int(v) > 0:
-                clean.append(int(v))
+                return int(v)
         except (TypeError, ValueError):
+            pass
+        return None
+
+    cats, short = [], []
+    for url, raw in (declared_counts or {}).items():
+        dec = as_int(raw)
+        if dec is None:
             continue
-    declared_max = max(clean, default=None)
+        found = len(cat_products.get(url, set()))
+        row = {'القسم': unquote(url), 'عدد معلن': dec, 'مرصود': found,
+               'ناقص': max(dec - found, 0)}
+        cats.append(row)
+        if found < dec:
+            short.append(row)
+
+    total_missing = sum(r['ناقص'] for r in short)
+    checked = len(cats)
+    matched = checked - len(short)
 
     name_gap, img_gap, no_jsonld = [], [], 0
     for _, r in prod.iterrows():
@@ -1671,31 +1708,24 @@ def build_structured_report(df, declared_counts):
                 not (set(slug_tokens(j_name)) & set(slug_tokens(shown))):
             name_gap.append({'الرابط': r['الرابط'], 'الاسم المعلن': j_name,
                              'الاسم المعروض': shown})
-        try:
-            dec = int(r.get('صور معلنة') or 0)
-        except (TypeError, ValueError):
-            dec = 0
-        try:
-            seen = int(r.get('إجمالي الصور') or 0)
-        except (TypeError, ValueError):
-            seen = 0
-        if dec and seen < dec:
-            img_gap.append({'الرابط': r['الرابط'], 'صور معلنة': dec,
-                            'صور مرصودة': seen})
+        dec_i = as_int(r.get('صور معلنة')) or 0
+        seen_i = as_int(r.get('إجمالي الصور')) or 0
+        if dec_i and seen_i < dec_i:
+            img_gap.append({'الرابط': r['الرابط'], 'صور معلنة': dec_i,
+                            'صور مرصودة': seen_i})
 
-    missing = (declared_max - n_found) if (declared_max and declared_max > n_found) else 0
     return {
-        'declared_products': declared_max,
         'found_products': n_found,
-        'missing_products': missing,
-        'coverage_pct': round(n_found / declared_max * 100, 1)
-        if declared_max else None,
+        'categories_checked': checked,
+        'categories_matched': matched,
+        'categories_short': short,
+        'category_rows': cats,
+        'missing_products': total_missing,
+        'coverage_pct': round(matched / checked * 100, 1) if checked else None,
         'name_mismatch': name_gap,
         'image_gap': img_gap,
         'no_jsonld': no_jsonld,
         'jsonld_pages': len(prod) - no_jsonld,
-        'declared_by_page': {k: int(v) for k, v in declared_counts.items()
-                             if v is not None and pd.notna(v) and int(v) > 0},
     }
 
 
@@ -1837,28 +1867,34 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
 
     # 6د) مقارنة بما يعلنه المتجر نفسه — أقوى فحص تغطية
     if structured:
-        dec = structured.get('declared_products')
-        found = structured.get('found_products', 0)
+        checked = structured.get('categories_checked', 0)
+        matched = structured.get('categories_matched', 0)
+        short = structured.get('categories_short') or []
         miss = structured.get('missing_products', 0)
-        if dec and miss:
+        if checked and short:
             pct = structured.get('coverage_pct') or 0
-            lvl = CHECK_FAIL if pct < 80 else CHECK_WARN
-            add(lvl, "تغطية المنتجات المعلنة",
-                f"المتجر يعلن {dec} منتجاً والزاحف وصل إلى {found} فقط "
-                f"({pct}%) — ناقص {miss} منتجاً.",
-                "غالباً يحمّل المتجر بقية المنتجات بالتمرير أو بزر «المزيد». "
-                "لا تعتمد أرقام المنتجات في هذا التقرير.")
-        elif dec:
-            add(CHECK_PASS, "تغطية المنتجات المعلنة",
-                f"المتجر يعلن {dec} منتجاً والزاحف وصل إليها كاملة.")
+            lvl = CHECK_FAIL if pct < 70 else CHECK_WARN
+            add(lvl, "تغطية أقسام المتجر",
+                f"{len(short)} قسماً من {checked} يعلن منتجات أكثر مما رصده الزاحف "
+                f"(ناقص {miss} منتجاً في المجموع).",
+                "غالباً يحمّل القسم بقية منتجاته بالتمرير أو بزر «المزيد». "
+                "راجع تبويب «البيانات المعلنة».")
+        elif checked:
+            add(CHECK_PASS, "تغطية أقسام المتجر",
+                f"{matched} قسماً من {checked} مطابق تماماً لما يعلنه المتجر.")
+        else:
+            add(CHECK_WARN, "تغطية أقسام المتجر",
+                "لم يعرض المتجر عدّاد منتجات في أقسامه، فتعذّرت مقارنة التغطية.",
+                "اعتمد على عيّنة التحقق اليدوي بدلاً منها.")
 
+        n_prod = structured.get('found_products', 0)
         gaps = structured.get('image_gap') or []
         if gaps:
-            lvl = CHECK_FAIL if len(gaps) / max(found, 1) > 0.5 else CHECK_WARN
+            lvl = CHECK_FAIL if len(gaps) / max(n_prod, 1) > 0.5 else CHECK_WARN
             add(lvl, "مطابقة عدد الصور",
                 f"{len(gaps)} صفحة منتج تعلن صوراً أكثر مما رصده الزاحف.",
                 "معرض الصور يُحمَّل بـ JavaScript جزئياً. أرقام الصور أقل من الواقع.")
-        elif found:
+        elif n_prod:
             add(CHECK_PASS, "مطابقة عدد الصور",
                 "عدد الصور المرصود يطابق ما يعلنه المتجر.")
 
@@ -1870,11 +1906,11 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
                 "راجعها في تبويب «البيانات المعلنة».")
 
         nj = structured.get('no_jsonld', 0)
-        if found and nj == found:
+        if n_prod and nj == n_prod:
             add(CHECK_WARN, "البيانات المهيكلة",
                 "لا توجد بيانات منتجات مهيكلة في أي صفحة.",
                 "هذا بحد ذاته نقص سيو في المتجر، ويحرم الأداة من مصدر تحقق.")
-        elif found:
+        elif n_prod:
             add(CHECK_PASS, "البيانات المهيكلة",
                 f"{structured.get('jsonld_pages', 0)} صفحة منتج تحمل بيانات مهيكلة.")
 
@@ -2791,6 +2827,7 @@ ZIP_NAMES = {
            'redirect': "11_روابط_الخريطة_المحوّلة.csv",
            'imggap': "12_صفحات_صورها_ناقصة.csv",
            'namegap': "13_اسم_معلن_مختلف.csv",
+           'catgap': "14_مقارنة_عدادات_الأقسام.csv",
            'excel': "التقرير_الشامل.xlsx"},
     'en': {T_PRODUCT: "1_products.csv", T_CATEGORY: "2_categories.csv",
            T_BLOG: "3_blog.csv", T_INFO: "4_info_pages.csv",
@@ -2801,6 +2838,7 @@ ZIP_NAMES = {
            'redirect': "11_redirecting_sitemap_urls.csv",
            'imggap': "12_pages_with_missing_images.csv",
            'namegap': "13_declared_name_mismatch.csv",
+           'catgap': "14_category_counter_comparison.csv",
            'excel': "full_audit_report.xlsx"},
 }
 
@@ -2832,7 +2870,8 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
 
         if structured:
             for key, data in [('imggap', structured.get('image_gap')),
-                              ('namegap', structured.get('name_mismatch'))]:
+                              ('namegap', structured.get('name_mismatch')),
+                              ('catgap', structured.get('category_rows'))]:
                 if data:
                     z.writestr(names[key],
                                localize_df(pd.DataFrame(data), lang)
@@ -3221,38 +3260,43 @@ if nav == "🔍 فحص متجر جديد":
         with tabs[2]:
             stx = st.session_state.get('structured')
             st.markdown("#### ما يعلنه المتجر مقابل ما رصده الفحص")
-            st.caption("الأرقام هنا مصدرها المتجر نفسه: عدّاد المنتجات في صفحات "
-                       "الأقسام، وبيانات المنتج المهيكلة التي يكتبها المتجر لمحركات "
-                       "البحث. وكلاهما يعدّ المعروض للزائر فقط — لا المخفي ولا "
-                       "المحذوف. أي فارق بينها وبين نتائج الزحف يعني أن جزءاً "
-                       "معروضاً لم يصل إليه الفحص.")
+            st.caption("تُقارَن كل صفحة قسم بعدّاد المنتجات الظاهر فيها. العدّاد يعدّ "
+                       "المعروض للزائر فقط — لا المخفي ولا المحذوف — فأي نقص يعني "
+                       "منتجات معروضة لم يصل إليها الفحص.")
             if not stx:
                 st.info("لا توجد بيانات معلنة في هذا الفحص.")
             else:
-                dec = stx.get('declared_products')
+                checked = stx.get('categories_checked', 0)
+                short = stx.get('categories_short') or []
+                miss = stx.get('missing_products', 0)
                 c1, c2, c3 = st.columns(3)
-                c1.metric("منتجات يعلنها المتجر في أقسامه", dec if dec else "—")
-                c2.metric("منتجات وصل إليها الفحص", stx.get('found_products', 0))
-                c3.metric("نسبة التغطية",
-                          f"{stx['coverage_pct']}%" if stx.get('coverage_pct')
-                          is not None else "—")
+                c1.metric("أقسام قورنت بعدّادها", checked if checked else "—")
+                c2.metric("أقسام ينقصها منتجات", len(short))
+                c3.metric("منتجات معروضة لم تُرصد", miss)
                 st.write("")
-                if dec and stx.get('missing_products'):
+
+                if not checked:
                     st.markdown(finding(
-                        f"<b>{stx['missing_products']}</b> منتجاً يعلنه المتجر ولم يصل "
-                        "إليه الفحص. الأرجح أن بقية المنتجات تُحمَّل بالتمرير أو بزر "
-                        "«عرض المزيد»، وهذه الحالة خارج قدرة الزاحف. "
-                        "لا تعتمد أرقام المنتجات في هذا التقرير.", 'bad'),
+                        "لم يعرض المتجر عدّاد منتجات في أقسامه، فتعذّرت مقارنة "
+                        "التغطية. تبقى مقارنة الصور والأسماء أدناه صالحة.", 'warn'),
                         unsafe_allow_html=True)
-                elif dec:
+                elif short:
                     st.markdown(finding(
-                        "عدد المنتجات المرصود يطابق ما يعلنه المتجر بالكامل.", 'ok'),
-                        unsafe_allow_html=True)
+                        f"<b>{len(short)}</b> قسماً يعلن منتجات أكثر مما رصده الفحص "
+                        f"(ناقص <b>{miss}</b> منتجاً). الأرجح أن القسم يحمّل بقية "
+                        "منتجاته بالتمرير أو بزر «عرض المزيد». لا تعتمد أرقام "
+                        "المنتجات في هذا التقرير.", 'bad'), unsafe_allow_html=True)
                 else:
                     st.markdown(finding(
-                        "لم يعرض المتجر عدّاداً لعدد المنتجات في صفحات أقسامه، "
-                        "فتعذّرت مقارنة التغطية بمصدر يقيني. تبقى مقارنة الصور "
-                        "والأسماء أدناه صالحة.", 'warn'), unsafe_allow_html=True)
+                        f"جميع الأقسام الـ{checked} مطابقة تماماً لعدّاداتها — "
+                        "لم يفت الفحص أي منتج معروض.", 'ok'), unsafe_allow_html=True)
+
+                rows = stx.get('category_rows') or []
+                if rows:
+                    view = pd.DataFrame(rows)
+                    st.dataframe(view, use_container_width=True,
+                                 column_config={"القسم": st.column_config.LinkColumn(
+                                     "القسم", width="large")})
 
                 gaps = stx.get('image_gap') or []
                 if gaps:
@@ -3271,13 +3315,8 @@ if nav == "🔍 فحص متجر جديد":
 
                 st.caption(f"صفحات منتجات تحمل بيانات مهيكلة: "
                            f"{stx.get('jsonld_pages', 0)} · بدونها: "
-                           f"{stx.get('no_jsonld', 0)}")
-                if stx.get('declared_by_page'):
-                    with st.expander("الأعداد المعلنة في كل قسم"):
-                        st.dataframe(pd.DataFrame(
-                            [{'الصفحة': k, 'عدد معلن': v}
-                             for k, v in stx['declared_by_page'].items()]),
-                            use_container_width=True)
+                           f"{stx.get('no_jsonld', 0)} · إجمالي منتجات الفحص: "
+                           f"{stx.get('found_products', 0)}")
 
         # ---------------- الصفحات ----------------
         with tabs[3]:
