@@ -1651,7 +1651,14 @@ def build_structured_report(df, declared_counts):
     ok = df[df['متاحة'] == True]  # noqa: E712
     prod = ok[ok['نوع الصفحة'] == T_PRODUCT]
     n_found = len(prod)
-    declared_max = max([v for v in declared_counts.values() if v], default=None)
+    clean = []
+    for v in declared_counts.values():
+        try:
+            if v is not None and pd.notna(v) and int(v) > 0:
+                clean.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    declared_max = max(clean, default=None)
 
     name_gap, img_gap, no_jsonld = [], [], 0
     for _, r in prod.iterrows():
@@ -1664,8 +1671,14 @@ def build_structured_report(df, declared_counts):
                 not (set(slug_tokens(j_name)) & set(slug_tokens(shown))):
             name_gap.append({'الرابط': r['الرابط'], 'الاسم المعلن': j_name,
                              'الاسم المعروض': shown})
-        dec = int(r.get('صور معلنة') or 0)
-        seen = int(r.get('إجمالي الصور') or 0)
+        try:
+            dec = int(r.get('صور معلنة') or 0)
+        except (TypeError, ValueError):
+            dec = 0
+        try:
+            seen = int(r.get('إجمالي الصور') or 0)
+        except (TypeError, ValueError):
+            seen = 0
         if dec and seen < dec:
             img_gap.append({'الرابط': r['الرابط'], 'صور معلنة': dec,
                             'صور مرصودة': seen})
@@ -1681,7 +1694,8 @@ def build_structured_report(df, declared_counts):
         'image_gap': img_gap,
         'no_jsonld': no_jsonld,
         'jsonld_pages': len(prod) - no_jsonld,
-        'declared_by_page': {k: v for k, v in declared_counts.items() if v},
+        'declared_by_page': {k: int(v) for k, v in declared_counts.items()
+                             if v is not None and pd.notna(v) and int(v) > 0},
     }
 
 
@@ -2932,8 +2946,14 @@ if nav == "🔍 فحص متجر جديد":
                               "وجهة الروابط غير المطابقة")
                 coverage = build_coverage_report(df, sm_urls, target, workers)
 
-            declared = {r['الرابط']: r['عدد معلن'] for _, r in df.iterrows()
-                        if r.get('عدد معلن')}
+            declared = {}
+            for _, r in df.iterrows():
+                v = r.get('عدد معلن')
+                try:
+                    if v is not None and pd.notna(v) and int(v) > 0:
+                        declared[r['الرابط']] = int(v)
+                except (TypeError, ValueError):
+                    continue
             structured = build_structured_report(df, declared)
 
             summary = compute_summary(df, coverage, images_df)
@@ -3201,19 +3221,21 @@ if nav == "🔍 فحص متجر جديد":
         with tabs[2]:
             stx = st.session_state.get('structured')
             st.markdown("#### ما يعلنه المتجر مقابل ما رصده الفحص")
-            st.caption("هذه البيانات يكتبها المتجر من قاعدة بياناته لمحركات البحث "
-                       "(JSON-LD)، فهي مصدر يقين لا تخمين. أي فارق بينها وبين نتائج "
-                       "الزحف يعني أن جزءاً من المتجر لم يصل إليه الفحص.")
+            st.caption("الأرقام هنا مصدرها المتجر نفسه: عدّاد المنتجات في صفحات "
+                       "الأقسام، وبيانات المنتج المهيكلة التي يكتبها المتجر لمحركات "
+                       "البحث. وكلاهما يعدّ المعروض للزائر فقط — لا المخفي ولا "
+                       "المحذوف. أي فارق بينها وبين نتائج الزحف يعني أن جزءاً "
+                       "معروضاً لم يصل إليه الفحص.")
             if not stx:
                 st.info("لا توجد بيانات معلنة في هذا الفحص.")
             else:
                 dec = stx.get('declared_products')
                 c1, c2, c3 = st.columns(3)
-                c1.metric("منتجات يعلنها المتجر", dec if dec else "—")
+                c1.metric("منتجات يعلنها المتجر في أقسامه", dec if dec else "—")
                 c2.metric("منتجات وصل إليها الفحص", stx.get('found_products', 0))
                 c3.metric("نسبة التغطية",
                           f"{stx['coverage_pct']}%" if stx.get('coverage_pct')
-                          else "—")
+                          is not None else "—")
                 st.write("")
                 if dec and stx.get('missing_products'):
                     st.markdown(finding(
@@ -3228,8 +3250,9 @@ if nav == "🔍 فحص متجر جديد":
                         unsafe_allow_html=True)
                 else:
                     st.markdown(finding(
-                        "لم يعلن المتجر عدد منتجاته في صفحات الأقسام، فتعذّرت مقارنة "
-                        "التغطية بمصدر يقيني.", 'warn'), unsafe_allow_html=True)
+                        "لم يعرض المتجر عدّاداً لعدد المنتجات في صفحات أقسامه، "
+                        "فتعذّرت مقارنة التغطية بمصدر يقيني. تبقى مقارنة الصور "
+                        "والأسماء أدناه صالحة.", 'warn'), unsafe_allow_html=True)
 
                 gaps = stx.get('image_gap') or []
                 if gaps:
