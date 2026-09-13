@@ -1281,7 +1281,6 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
         list(category_urls) + [f"{base_url}/{r}" for r in
                                ['products', 'collections/all', 'shop']]))
     new_urls, fetched = [], 0
-    per_cat = {}
     for idx, cat in enumerate(roots):
         seen_here = set()
         for page in range(2, max_depth + 1):
@@ -1305,13 +1304,12 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
                     {url_key(x) for x in fresh})
             for u in fresh:
                 k = url_key(u)
-                per_cat.setdefault(cat, set()).add(k)
                 if k not in seen_keys:
                     seen_keys.add(k)
                     new_urls.append(u)
         if progress_cb:
             progress_cb(idx + 1, len(roots), len(new_urls), fetched)
-    return new_urls, per_cat
+    return new_urls
 
 
 def audit_urls(urls, base_url, source, workers, progress_bar=None):
@@ -1671,7 +1669,8 @@ def build_structured_report(df, declared_counts, cat_products=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     prod = ok[ok['نوع الصفحة'] == T_PRODUCT]
     n_found = len(prod)
-    cat_products = cat_products or {}
+    # توحيد المفاتيح: قد يأتي رابط القسم مشفّراً من الزحف ومفكوكاً من الجدول
+    cat_products = {url_key(k): v for k, v in (cat_products or {}).items()}
 
     def as_int(v):
         try:
@@ -1686,7 +1685,7 @@ def build_structured_report(df, declared_counts, cat_products=None):
         dec = as_int(raw)
         if dec is None:
             continue
-        found = len(cat_products.get(url, set()))
+        found = len(cat_products.get(url_key(url), set()))
         row = {'القسم': unquote(url), 'عدد معلن': dec, 'مرصود': found,
                'ناقص': max(dec - found, 0)}
         cats.append(row)
@@ -2955,7 +2954,9 @@ if nav == "🔍 فحص متجر جديد":
                     note2.caption(f"{i}/{total} قسم · {found} منتج إضافي · "
                                   f"{fetched} صفحة مجلوبة")
 
-                extra = harvest_paginated_products(target, cat_urls, seen, pag_cb)
+                extra = harvest_paginated_products(
+                    target, cat_urls, seen, pag_cb,
+                    cat_products=crawl_meta.setdefault('cat_products', {}))
                 if extra:
                     st.write(f"**المرحلة 3** — فحص {len(extra)} منتج من الصفحات التالية")
                     bar3 = st.progress(0)
