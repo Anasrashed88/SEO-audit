@@ -142,6 +142,10 @@ COL_EN = {
     'جودة العنوان': 'Title Quality', 'جودة الوصف': 'Description Quality',
     'جودة الرابط': 'URL Quality', 'المسار': 'Slug', 'محتوى مكرر': 'Duplicate Content',
     'اسم المنتج المعروض': 'Displayed Product Name', 'صيغة الصورة': 'Image Format',
+    'اسم منظم': 'Declared Name', 'صور معلنة': 'Declared Images',
+    'رقم المنتج': 'SKU', 'عدد معلن': 'Declared Count',
+    'الاسم المعلن': 'Declared Name', 'الاسم المعروض': 'Displayed Name',
+    'صور مرصودة': 'Images Detected',
 }
 
 COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
@@ -177,7 +181,7 @@ init_db()
 for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
                      ('current_url', ""), ('coverage', None), ('platform', 'unknown'),
                      ('selfcheck', None), ('brand', ''), ('dup_groups', None),
-                     ('speed', None)]:
+]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -718,6 +722,8 @@ def broken_page_row(url, reason, source):
         'page_data': {
             'نوع الصفحة': T_BROKEN, 'الرابط': unquote(url), 'مصدر الاكتشاف': source,
             'متاحة': False, 'كود الاستجابة': str(reason), 'لغة الصفحة': '—',
+            'اسم المنتج المعروض': '', 'اسم منظم': '', 'صور معلنة': 0,
+            'رقم المنتج': '', 'عدد معلن': None,
             'درجة السيو': None, 'عنوان الميتا': '', 'طول العنوان': 0,
             'حالة العنوان': 'failed', 'وصف الميتا': '', 'طول الوصف': 0,
             'حالة الوصف': 'failed', 'إجمالي الصور': 0, 'صور بدون Alt': 0,
@@ -810,6 +816,11 @@ def _fetch_and_audit(url, base_url, source):
                 'صيغة الصورة': image_format(urljoin(final_url, src)),
             })
 
+    jd = extract_product_facts(soup) if page_type == T_PRODUCT else \
+        {'name': '', 'images': [], 'sku': '', 'offers': False}
+    declared_n = (extract_declared_count(soup)
+                  if page_type in (T_CATEGORY, T_HOME) else None)
+
     for s in content_soup(['script', 'style', 'noscript']):
         s.decompose()
     body_text = content_soup.get_text(separator=' ', strip=True)
@@ -821,7 +832,10 @@ def _fetch_and_audit(url, base_url, source):
         'page_data': {
             'نوع الصفحة': page_type, 'الرابط': unquote(final_url), 'مصدر الاكتشاف': source,
             'متاحة': True, 'كود الاستجابة': '200', 'لغة الصفحة': page_lang,
-            'درجة السيو': None,  # تُحسب بعد تقييم تكرار الـ Alt
+            'اسم المنتج المعروض': display_name, 'اسم منظم': jd['name'],
+            'صور معلنة': len(jd['images']), 'رقم المنتج': jd['sku'],
+            'عدد معلن': declared_n,
+            'درجة السيو': None,  # تُحسب بعد تقييم الصور والروابط
             'عنوان الميتا': title, 'طول العنوان': title_len, 'حالة العنوان': title_status,
             'وصف الميتا': meta_desc, 'طول الوصف': desc_len, 'حالة الوصف': desc_status,
             'إجمالي الصور': total_img, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
@@ -1106,7 +1120,8 @@ def analyze_url_quality(df, brand=''):
         # 4) هل يشير الرابط لمنتج مختلف عن المعروض في الصفحة؟
         # يُقارن الرابط بالاسم المعروض وبعنوان الميتا معاً: بعض المتاجر
         # تختار رابطاً بكلمات البحث واسماً تجارياً مختلفاً، وهذا سليم.
-        name = str(row.get('اسم المنتج المعروض') or '').strip()
+        name = (str(row.get('اسم منظم') or '').strip()
+                or str(row.get('اسم المنتج المعروض') or '').strip())
         meta_t = str(row.get('عنوان الميتا') or '').strip()
         if (name or meta_t) and row.get('نوع الصفحة') == T_PRODUCT:
             s_tok = [t for t in slug_tokens(slug) if not t.isdigit()]
@@ -1545,67 +1560,129 @@ def localize_df(df, lang):
 
 
 
+
 # ==============================================================
-#  سرعة الموقع — PageSpeed Insights من جوجل
+#  التحقق بالبيانات المهيكلة (JSON-LD) وعدّادات المتجر
+#
+#  مصدر يقين لا تخمين: هذه البيانات يكتبها المتجر من قاعدة بياناته
+#  لمحركات البحث. مقارنتها بما استنتجه الزاحف من الشكل تكشف النقص.
 # ==============================================================
-PSI_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-PSI_METRICS = [
-    ('largest-contentful-paint', 'أكبر عنصر مرئي', 'Largest Contentful Paint'),
-    ('first-contentful-paint', 'أول محتوى يظهر', 'First Contentful Paint'),
-    ('total-blocking-time', 'زمن التجميد', 'Total Blocking Time'),
-    ('cumulative-layout-shift', 'اهتزاز التخطيط', 'Cumulative Layout Shift'),
-    ('speed-index', 'مؤشر السرعة', 'Speed Index'),
+def iter_jsonld(soup):
+    for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
+        try:
+            data = json.loads(tag.string or '{}')
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                stack.extend(node)
+            elif isinstance(node, dict):
+                yield node
+                for v in node.values():
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+
+
+def node_types(node):
+    t = node.get('@type')
+    return {str(x) for x in (t if isinstance(t, list) else [t]) if x}
+
+
+def extract_product_facts(soup):
+    """اسم المنتج وصوره كما يعلنها المتجر لمحركات البحث."""
+    facts = {'name': '', 'images': [], 'sku': '', 'offers': False}
+    for node in iter_jsonld(soup):
+        if 'Product' not in node_types(node):
+            continue
+        nm = node.get('name')
+        if isinstance(nm, str) and nm.strip() and not facts['name']:
+            facts['name'] = re.sub(r'\s+', ' ', nm).strip()
+        img = node.get('image')
+        imgs = img if isinstance(img, list) else ([img] if img else [])
+        for it in imgs:
+            if isinstance(it, dict):
+                it = it.get('url') or it.get('contentUrl')
+            if isinstance(it, str) and it.strip():
+                facts['images'].append(it.strip())
+        if node.get('sku') and not facts['sku']:
+            facts['sku'] = str(node['sku'])
+        if node.get('offers'):
+            facts['offers'] = True
+        break
+    facts['images'] = list(dict.fromkeys(facts['images']))
+    return facts
+
+
+# صيغ إعلان عدد المنتجات في صفحات الأقسام
+COUNT_PATTERNS = [
+    r'عدد\s*المنتجات\s*[:：]?\s*([\d,]+)',
+    r'([\d,]+)\s*منتج(?:اً|ا)?\b',
+    r'من\s*أصل\s*([\d,]+)',
+    r'\b([\d,]+)\s*products?\b',
+    r'showing\s*\d+\s*(?:-|to)\s*\d+\s*of\s*([\d,]+)',
 ]
 
 
-def fetch_pagespeed(url, strategy='mobile', api_key=None, timeout=75):
-    """يستدعي PageSpeed Insights ويعيد الدرجة والمقاييس الأساسية.
-
-    يعيد None عند أي فشل (مهلة، حصة مستنفدة، موقع محجوب) حتى لا يتعطل الفحص.
-    """
-    params = {'url': url, 'strategy': strategy, 'category': 'performance'}
-    if api_key:
-        params['key'] = api_key
-    try:
-        res = requests.get(PSI_ENDPOINT, params=params, timeout=timeout)
-        if res.status_code != 200:
-            return {'error': f'HTTP {res.status_code}'}
-        data = res.json()
-    except Exception as e:
-        return {'error': type(e).__name__}
-
-    try:
-        lh = data.get('lighthouseResult', {})
-        cat = (lh.get('categories', {}).get('performance') or {})
-        score = cat.get('score')
-        audits = lh.get('audits', {})
-        metrics = {}
-        for key, ar_lbl, en_lbl in PSI_METRICS:
-            a = audits.get(key) or {}
-            metrics[key] = {
-                'display': a.get('displayValue', '—'),
-                'value': a.get('numericValue'),
-                'score': a.get('score'),
-            }
-        field = data.get('loadingExperience', {}).get('overall_category')
-        return {
-            'score': round(score * 100) if isinstance(score, (int, float)) else None,
-            'metrics': metrics,
-            'field_category': field,
-            'strategy': strategy,
-        }
-    except Exception as e:
-        return {'error': f'parse:{type(e).__name__}'}
+def extract_declared_count(soup, text=None):
+    """الرقم الذي يعلنه المتجر نفسه لعدد منتجات القسم."""
+    best = None
+    for node in iter_jsonld(soup):
+        if node_types(node) & {'ItemList', 'CollectionPage'}:
+            n = node.get('numberOfItems')
+            if isinstance(n, (int, float)) and n > 0:
+                return int(n)
+    body = text if text is not None else soup.get_text(' ', strip=True)
+    body = body[:4000]
+    for pat in COUNT_PATTERNS:
+        for mo in re.finditer(pat, body, re.I):
+            try:
+                v = int(mo.group(1).replace(',', ''))
+            except Exception:
+                continue
+            if 0 < v < 100000:
+                best = v if best is None else max(best, v)
+    return best
 
 
-def speed_verdict(score):
-    if score is None:
-        return 'na'
-    if score >= 90:
-        return 'ok'
-    if score >= 50:
-        return 'warn'
-    return 'bad'
+def build_structured_report(df, declared_counts):
+    """يقارن ما رصده الزاحف بما يعلنه المتجر، ويعيد فجوات محددة."""
+    ok = df[df['متاحة'] == True]  # noqa: E712
+    prod = ok[ok['نوع الصفحة'] == T_PRODUCT]
+    n_found = len(prod)
+    declared_max = max([v for v in declared_counts.values() if v], default=None)
+
+    name_gap, img_gap, no_jsonld = [], [], 0
+    for _, r in prod.iterrows():
+        j_name = str(r.get('اسم منظم') or '').strip()
+        if not j_name:
+            no_jsonld += 1
+            continue
+        shown = str(r.get('اسم المنتج المعروض') or '').strip()
+        if shown and slug_tokens(j_name) and \
+                not (set(slug_tokens(j_name)) & set(slug_tokens(shown))):
+            name_gap.append({'الرابط': r['الرابط'], 'الاسم المعلن': j_name,
+                             'الاسم المعروض': shown})
+        dec = int(r.get('صور معلنة') or 0)
+        seen = int(r.get('إجمالي الصور') or 0)
+        if dec and seen < dec:
+            img_gap.append({'الرابط': r['الرابط'], 'صور معلنة': dec,
+                            'صور مرصودة': seen})
+
+    missing = (declared_max - n_found) if (declared_max and declared_max > n_found) else 0
+    return {
+        'declared_products': declared_max,
+        'found_products': n_found,
+        'missing_products': missing,
+        'coverage_pct': round(n_found / declared_max * 100, 1)
+        if declared_max else None,
+        'name_mismatch': name_gap,
+        'image_gap': img_gap,
+        'no_jsonld': no_jsonld,
+        'jsonld_pages': len(prod) - no_jsonld,
+        'declared_by_page': {k: v for k, v in declared_counts.items() if v},
+    }
 
 
 # ==============================================================
@@ -1614,7 +1691,8 @@ def speed_verdict(score):
 CHECK_FAIL, CHECK_WARN, CHECK_PASS = 'fail', 'warn', 'pass'
 
 
-def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None):
+def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
+                    structured=None):
     """يفحص نتائج الفحص نفسها بحثاً عن علامات عدم الموثوقية.
 
     الهدف ليس إثبات صحة الأرقام — بل رصد الحالات التي تشير إلى أن الزاحف
@@ -1743,6 +1821,49 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None)
             add(CHECK_PASS, "مطابقة الروابط",
                 f"{len(prod) - wrong} رابط من {len(prod)} يطابق اسم منتجه.")
 
+    # 6د) مقارنة بما يعلنه المتجر نفسه — أقوى فحص تغطية
+    if structured:
+        dec = structured.get('declared_products')
+        found = structured.get('found_products', 0)
+        miss = structured.get('missing_products', 0)
+        if dec and miss:
+            pct = structured.get('coverage_pct') or 0
+            lvl = CHECK_FAIL if pct < 80 else CHECK_WARN
+            add(lvl, "تغطية المنتجات المعلنة",
+                f"المتجر يعلن {dec} منتجاً والزاحف وصل إلى {found} فقط "
+                f"({pct}%) — ناقص {miss} منتجاً.",
+                "غالباً يحمّل المتجر بقية المنتجات بالتمرير أو بزر «المزيد». "
+                "لا تعتمد أرقام المنتجات في هذا التقرير.")
+        elif dec:
+            add(CHECK_PASS, "تغطية المنتجات المعلنة",
+                f"المتجر يعلن {dec} منتجاً والزاحف وصل إليها كاملة.")
+
+        gaps = structured.get('image_gap') or []
+        if gaps:
+            lvl = CHECK_FAIL if len(gaps) / max(found, 1) > 0.5 else CHECK_WARN
+            add(lvl, "مطابقة عدد الصور",
+                f"{len(gaps)} صفحة منتج تعلن صوراً أكثر مما رصده الزاحف.",
+                "معرض الصور يُحمَّل بـ JavaScript جزئياً. أرقام الصور أقل من الواقع.")
+        elif found:
+            add(CHECK_PASS, "مطابقة عدد الصور",
+                "عدد الصور المرصود يطابق ما يعلنه المتجر.")
+
+        nm = structured.get('name_mismatch') or []
+        if nm:
+            add(CHECK_WARN, "مطابقة أسماء المنتجات",
+                f"{len(nm)} منتجاً اسمه المعلن لمحركات البحث يختلف عن المعروض "
+                "في الصفحة.",
+                "راجعها في تبويب «البيانات المعلنة».")
+
+        nj = structured.get('no_jsonld', 0)
+        if found and nj == found:
+            add(CHECK_WARN, "البيانات المهيكلة",
+                "لا توجد بيانات منتجات مهيكلة في أي صفحة.",
+                "هذا بحد ذاته نقص سيو في المتجر، ويحرم الأداة من مصدر تحقق.")
+        elif found:
+            add(CHECK_PASS, "البيانات المهيكلة",
+                f"{structured.get('jsonld_pages', 0)} صفحة منتج تحمل بيانات مهيكلة.")
+
     # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
     if n_ok:
         thin = summary.get('thin_pages', 0) / n_ok * 100
@@ -1810,7 +1931,7 @@ PDF_TXT = {
         'impact': 'الأثر على متجرك',
         'h_item': 'عنصر الفحص', 'h_val': 'النتيجة',
         'm_pages': 'صفحة معروضة', 'm_products': 'منتج', 'm_images': 'صورة',
-        'm_issues': 'بند يحتاج معالجة', 'm_speed': 'سرعة الجوال', 'm_cats': 'قسم',
+        'm_issues': 'بند يحتاج معالجة', 'm_cats': 'قسم',
         'u_page': 'صفحة', 'u_product': 'منتج', 'u_cat': 'تصنيف', 'u_article': 'مقال',
         'u_link': 'رابط', 'u_title': 'عنوان', 'u_desc': 'وصف', 'u_img': 'صورة',
         'na': 'غير متاح',
@@ -1829,7 +1950,7 @@ PDF_TXT = {
         'impact': 'What this means for your store',
         'h_item': 'Audited item', 'h_val': 'Result',
         'm_pages': 'visible pages', 'm_products': 'products', 'm_images': 'images',
-        'm_issues': 'items to fix', 'm_speed': 'mobile speed', 'm_cats': 'categories',
+        'm_issues': 'items to fix', 'm_cats': 'categories',
         'u_page': 'pages', 'u_product': 'products', 'u_cat': 'categories',
         'u_article': 'articles', 'u_link': 'links', 'u_title': 'titles',
         'u_desc': 'descriptions', 'u_img': 'images', 'na': 'not available',
@@ -1838,16 +1959,6 @@ PDF_TXT = {
 
 SECTION_TXT = {
     'ar': {
-        'speed': {
-            'title': 'سرعة تحميل المتجر',
-            'intro': 'تُقاس السرعة بأداة PageSpeed Insights من جوجل، التي تحاكي فتح '
-                     'المتجر على جوال متوسط وعلى جهاز مكتبي. الدرجة من 100، والمقاييس '
-                     'أدناه هي ذاتها التي يعتمدها جوجل ضمن معايير تجربة الصفحة.',
-            'impact': 'سرعة الجوال عامل ترتيب معلن من جوجل، وأثرها على المبيعات مباشر: '
-                      'كل ثانية تأخير في التحميل ترفع نسبة مغادرة الزائر قبل أن يرى '
-                      'المنتج. وبما أن غالبية زوار المتاجر السعودية يتصفحون من الجوال، '
-                      'فإن تحسين هذه الدرجة يسبق في الأولوية كثيراً من التحسينات الأخرى.',
-        },
         'structure': {
             'title': 'بنية المتجر ونطاق الفحص',
             'intro': 'يبدأ الفحص من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه الزائر، '
@@ -1904,18 +2015,6 @@ SECTION_TXT = {
         },
     },
     'en': {
-        'speed': {
-            'title': 'Store loading speed',
-            'intro': 'Speed is measured with Google PageSpeed Insights, which simulates '
-                     'opening the store on a mid-range mobile device and on desktop. The '
-                     'score runs to 100, and the metrics below are the ones Google uses '
-                     'within its page experience signals.',
-            'impact': 'Mobile speed is a declared Google ranking factor with a direct '
-                      'commercial effect: every extra second of loading raises the share '
-                      'of visitors who leave before seeing the product. Since most Saudi '
-                      'store traffic is mobile, this score often outranks other fixes in '
-                      'priority.',
-        },
         'structure': {
             'title': 'Store structure and audit scope',
             'intro': 'The audit starts at the homepage and browses the store the way a '
@@ -1954,12 +2053,12 @@ SECTION_TXT = {
             'intro': 'Alt text is the description attached to an image in the page code. '
                      'Search engines do not see the image; they read this text. This '
                      'section also checks image formats, which affect page weight and '
-                     'loading speed directly.',
+                     'loading and page weight directly.',
             'impact': 'Google Image search is a meaningful traffic source for visual '
                       'stores such as fashion, fragrance and gifts, where customers search '
                       'by image before words. An image without alt text does not exist to '
                       'Google. Modern formats also cut image weight by about a third at '
-                      'the same quality, improving mobile speed automatically.',
+                      'the same quality, making pages lighter on mobile.',
         },
         'sitemap': {
             'title': 'Visible catalogue vs sitemap',
@@ -2188,7 +2287,7 @@ def build_diagnosis(score, stats, lang):
     return intro, points, close
 
 
-def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
+def generate_client_pdf(domain, score, stats, lang='ar'):
     """تقرير عميل بتصميم حديث: غلاف، ثم قسم لكل محور في صفحة مستقلة
     يضم شرحاً للمقياس وجدول النتائج وصندوق الأثر، ثم التشخيص وخطة العمل."""
     rtl = (lang == 'ar')
@@ -2314,14 +2413,14 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
                 self.cell(wl, 8, fmt(T['h_item']), 0, 0, 'L', fill=True)
                 self.cell(wv, 8, fmt(T['h_val']), 0, 1, 'C', fill=True)
             self.set_font(FONT, "", 9)
-            for i, (label, value, st) in enumerate(rows):
+            for i, (label, value, stt) in enumerate(rows):
                 if self.get_y() > 250:
                     self.add_page()
                 self.set_x(M)
                 if i % 2 == 0:
                     self.set_fill_color(*C_BG)
                     self.rect(M, self.get_y(), W, 7.5, 'F')
-                self.set_text_color(*STATUS_RGB.get(st, C_MUTED))
+                self.set_text_color(*STATUS_RGB.get(stt, C_MUTED))
                 self.set_font(FONT, "", 9)
                 if rtl:
                     self.cell(wv, 7.5, fmt(value), 0, 0, 'C')
@@ -2330,7 +2429,7 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
                 else:
                     self.set_text_color(*C_INK)
                     self.cell(wl, 7.5, fmt(label), 0, 0, 'L')
-                    self.set_text_color(*STATUS_RGB.get(st, C_MUTED))
+                    self.set_text_color(*STATUS_RGB.get(stt, C_MUTED))
                     self.cell(wv, 7.5, fmt(value), 0, 1, 'C')
                 self.set_draw_color(*C_LINE)
                 self.line(M, self.get_y(), 210 - M, self.get_y())
@@ -2428,15 +2527,11 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     pdf.set_y(y + 52)
 
     # بطاقات موجزة
-    speed_m = (speed or {}).get('mobile') or {}
-    sp_score = speed_m.get('score')
     cards = [
         (str(stats['total_pages']), T['m_pages'], C_INK),
         (str(stats['products']), T['m_products'], C_INK),
         (str(stats['categories']), T['m_cats'], C_INK),
         (str(stats.get('total_images', 0)), T['m_images'], C_INK),
-        (f"{sp_score}%" if sp_score is not None else T['na'], T['m_speed'],
-         STATUS_RGB.get(speed_verdict(sp_score), C_MUTED)),
         (str(stats.get('critical_titles', 0) + stats.get('missing_alts', 0)),
          T['m_issues'], C_BAD),
     ]
@@ -2471,32 +2566,6 @@ def generate_client_pdf(domain, score, stats, lang='ar', speed=None):
     pdf.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
 
     n = 0
-
-    # ======================= السرعة =======================
-    if speed and any(speed.get(k) for k in ('mobile', 'desktop')):
-        n += 1
-        pdf.add_page()
-        pdf.section(n, 'speed')
-        rows = []
-        for strat, lbl_ar, lbl_en in [('mobile', 'الجوال', 'Mobile'),
-                                      ('desktop', 'سطح المكتب', 'Desktop')]:
-            d = speed.get(strat) or {}
-            sc = d.get('score')
-            lbl = lbl_ar if rtl else lbl_en
-            head = ('درجة الأداء على ' if rtl else 'Performance score - ') + lbl
-            rows.append((head, f"{sc}%" if sc is not None else T['na'],
-                         speed_verdict(sc)))
-            for key, ar_lbl, en_lbl in PSI_METRICS:
-                mm = (d.get('metrics') or {}).get(key) or {}
-                msc = mm.get('score')
-                st = ('ok' if isinstance(msc, (int, float)) and msc >= 0.9 else
-                      'warn' if isinstance(msc, (int, float)) and msc >= 0.5 else
-                      'bad' if isinstance(msc, (int, float)) else 'neutral')
-                sep = ' — ' if rtl else ' - '
-                rows.append((f"{ar_lbl if rtl else en_lbl}{sep}{lbl}",
-                             mm.get('display', '—'), st))
-        pdf.table(rows)
-        pdf.impact('speed')
 
     # ======================= البنية =======================
     n += 1
@@ -2706,6 +2775,8 @@ ZIP_NAMES = {
            'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
            'orphan': "10_صفحات_يتيمة_في_الخريطة.csv",
            'redirect': "11_روابط_الخريطة_المحوّلة.csv",
+           'imggap': "12_صفحات_صورها_ناقصة.csv",
+           'namegap': "13_اسم_معلن_مختلف.csv",
            'excel': "التقرير_الشامل.xlsx"},
     'en': {T_PRODUCT: "1_products.csv", T_CATEGORY: "2_categories.csv",
            T_BLOG: "3_blog.csv", T_INFO: "4_info_pages.csv",
@@ -2714,11 +2785,13 @@ ZIP_NAMES = {
            'notidx': "9_products_missing_from_sitemap.csv",
            'orphan': "10_orphan_sitemap_pages.csv",
            'redirect': "11_redirecting_sitemap_urls.csv",
+           'imggap': "12_pages_with_missing_images.csv",
+           'namegap': "13_declared_name_mismatch.csv",
            'excel': "full_audit_report.xlsx"},
 }
 
 
-def build_zip(df, images_df, coverage=None, lang='ar'):
+def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
     names = ZIP_NAMES[lang]
     ldf = localize_df(df, lang)
     limg = localize_df(unique_images(images_df), lang)
@@ -2738,6 +2811,14 @@ def build_zip(df, images_df, coverage=None, lang='ar'):
             for key, data in [('notidx', coverage.get('visible_not_in_sitemap')),
                               ('orphan', coverage.get('sitemap_not_visible')),
                               ('redirect', coverage.get('sitemap_redirects'))]:
+                if data:
+                    z.writestr(names[key],
+                               localize_df(pd.DataFrame(data), lang)
+                               .to_csv(index=False, encoding='utf-8-sig'))
+
+        if structured:
+            for key, data in [('imggap', structured.get('image_gap')),
+                              ('namegap', structured.get('name_mismatch'))]:
                 if data:
                     z.writestr(names[key],
                                localize_df(pd.DataFrame(data), lang)
@@ -2770,12 +2851,6 @@ with st.sidebar:
                                 help="يلتقط المنتجات في الصفحات التالية من كل قسم.")
     do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True,
                                    help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
-    do_speed = st.checkbox("قياس سرعة الموقع", value=True,
-                           help="عبر PageSpeed Insights من جوجل. يضيف نحو دقيقة "
-                                "لكل فحص، ويُتخطى تلقائياً عند تعذّر الاتصال.")
-    psi_key = st.text_input("مفتاح PageSpeed (اختياري)", type="password",
-                            help="بدون مفتاح تعمل الخدمة بحصة محدودة. أنشئ مفتاحاً "
-                                 "مجانياً من Google Cloud Console عند الحاجة.")
     st.markdown("---")
     st.caption("الأداة معايرة على منصات سلة وزد وشوبيفاي.")
 
@@ -2793,7 +2868,7 @@ if nav == "🔍 فحص متجر جديد":
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
             for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck',
-                      'dup_groups', 'speed']:
+                      'dup_groups', 'structured']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
@@ -2857,27 +2932,14 @@ if nav == "🔍 فحص متجر جديد":
                               "وجهة الروابط غير المطابقة")
                 coverage = build_coverage_report(df, sm_urls, target, workers)
 
-            speed = None
-            if do_speed:
-                st.write("**المرحلة 5** — قياس سرعة الموقع عبر PageSpeed Insights")
-                sp_note = st.empty()
-                speed = {}
-                for strat, lbl in [('mobile', 'الجوال'), ('desktop', 'سطح المكتب')]:
-                    sp_note.caption(f"جارٍ قياس {lbl}... قد يستغرق نصف دقيقة.")
-                    speed[strat] = fetch_pagespeed(target, strat,
-                                                   psi_key.strip() or None)
-                errs = [v.get('error') for v in speed.values() if v and v.get('error')]
-                if errs:
-                    sp_note.caption(f"تعذّر القياس ({', '.join(errs)}) — "
-                                    "سيصدر التقرير بدون قسم السرعة.")
-                    if all(v.get('error') for v in speed.values()):
-                        speed = None
-                else:
-                    sp_note.caption("اكتمل قياس السرعة.")
+            declared = {r['الرابط']: r['عدد معلن'] for _, r in df.iterrows()
+                        if r.get('عدد معلن')}
+            structured = build_structured_report(df, declared)
 
             summary = compute_summary(df, coverage, images_df)
+            summary['structured'] = structured
             selfcheck = run_self_checks(df, images_df, coverage, platform,
-                                        summary, crawl_meta)
+                                        summary, crawl_meta, structured)
             summary['platform'] = platform
             summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
             status.update(label="اكتمل الفحص", state="complete", expanded=False)
@@ -2887,7 +2949,7 @@ if nav == "🔍 فحص متجر جديد":
         st.session_state.summary = summary
         st.session_state.coverage = coverage
         st.session_state.selfcheck = selfcheck
-        st.session_state.speed = speed
+        st.session_state.structured = structured
 
         conn = sqlite3.connect(DB_FILE)
         conn.cursor().execute(
@@ -2926,8 +2988,6 @@ if nav == "🔍 فحص متجر جديد":
                        "على هذه المنصات الثلاث — راجع تبويب التحقق اليدوي قبل إرسال "
                        "التقرير لأي عميل.")
 
-        sp = st.session_state.get('speed') or {}
-        sp_m = (sp.get('mobile') or {}).get('score')
         cards = [
             (summary["total_pages"], "الصفحات المعروضة", COLOR['accent']),
             (summary["products"], "المنتجات", COLOR['accent']),
@@ -2939,11 +2999,8 @@ if nav == "🔍 فحص متجر جديد":
              COLOR['bad'] if summary["missing_alts"] else COLOR['ok']),
             (summary.get("broken_pages", 0), "روابط معطلة",
              COLOR['bad'] if summary.get("broken_pages") else COLOR['ok']),
-            (f"{sp_m}%" if sp_m is not None else "—", "سرعة الجوال",
-             {'ok': COLOR['ok'], 'warn': COLOR['warn'], 'bad': COLOR['bad'],
-              'na': COLOR['muted']}[speed_verdict(sp_m)]),
         ]
-        for col, (v, l, c) in zip(st.columns(8), cards):
+        for col, (v, l, c) in zip(st.columns(7), cards):
             with col:
                 st.markdown(metric_card(v, l, c), unsafe_allow_html=True)
 
@@ -2968,8 +3025,9 @@ if nav == "🔍 فحص متجر جديد":
                         f'التفاصيل في تبويب «فحص الثقة».</span></div>',
                         unsafe_allow_html=True)
 
-        tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "📄 الصفحات", "🖼️ الصور",
-                        "🗺️ خريطة الموقع", "🔬 التحقق اليدوي", "📥 التصدير"])
+        tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "🧾 البيانات المعلنة",
+                        "📄 الصفحات", "🖼️ الصور", "🗺️ خريطة الموقع",
+                        "🔬 التحقق اليدوي", "📥 التصدير"])
 
         # ---------------- نظرة عامة ----------------
         with tabs[0]:
@@ -3049,18 +3107,6 @@ if nav == "🔍 فحص متجر جديد":
                     'JPG': COLOR['warn'], 'PNG': COLOR['warn']}),
                     unsafe_allow_html=True)
 
-            if sp:
-                items = []
-                for strat, lbl in [('mobile', 'الجوال'), ('desktop', 'سطح المكتب')]:
-                    d = sp.get(strat) or {}
-                    if d.get('score') is not None:
-                        items.append((lbl, d['score']))
-                if items:
-                    st.markdown(bar_chart("درجة سرعة الموقع (من 100)", items, {
-                        k: (COLOR['ok'] if v >= 90 else COLOR['warn'] if v >= 50
-                            else COLOR['bad']) for k, v in items}),
-                        unsafe_allow_html=True)
-
             st.markdown("#### أبرز النتائج")
             out = []
             if summary['missing_alts']:
@@ -3070,13 +3116,6 @@ if nav == "🔍 فحص متجر جديد":
             if summary['weak_alts']:
                 out.append((f"<b>{summary['weak_alts']}</b> صورة نصها البديل موجود لكنه "
                             "غير وصفي أو مكرر — يمر كسليم في الأدوات السطحية.", 'warn'))
-            if sp_m is not None and sp_m < 50:
-                out.append((f"سرعة الموقع على الجوال <b>{sp_m}%</b> — بطء يرفع نسبة "
-                            "مغادرة الزائر قبل رؤية المنتج، وهو عامل ترتيب معلن "
-                            "من جوجل.", 'bad'))
-            elif sp_m is not None and sp_m < 90:
-                out.append((f"سرعة الموقع على الجوال <b>{sp_m}%</b> — مقبولة "
-                            "وقابلة للتحسين.", 'warn'))
             if summary.get('url_clone'):
                 out.append((f"<b>{summary['url_clone']}</b> منتج مستنسخ — نسخ مكررة "
                             "من منتج واحد تتنافس مع أصلها.", 'bad'))
@@ -3158,8 +3197,67 @@ if nav == "🔍 فحص متجر جديد":
                         f'<div class="m">{c["msg"]}</div>{act}</div></div>',
                         unsafe_allow_html=True)
 
-        # ---------------- الصفحات ----------------
+        # ---------------- البيانات المعلنة ----------------
         with tabs[2]:
+            stx = st.session_state.get('structured')
+            st.markdown("#### ما يعلنه المتجر مقابل ما رصده الفحص")
+            st.caption("هذه البيانات يكتبها المتجر من قاعدة بياناته لمحركات البحث "
+                       "(JSON-LD)، فهي مصدر يقين لا تخمين. أي فارق بينها وبين نتائج "
+                       "الزحف يعني أن جزءاً من المتجر لم يصل إليه الفحص.")
+            if not stx:
+                st.info("لا توجد بيانات معلنة في هذا الفحص.")
+            else:
+                dec = stx.get('declared_products')
+                c1, c2, c3 = st.columns(3)
+                c1.metric("منتجات يعلنها المتجر", dec if dec else "—")
+                c2.metric("منتجات وصل إليها الفحص", stx.get('found_products', 0))
+                c3.metric("نسبة التغطية",
+                          f"{stx['coverage_pct']}%" if stx.get('coverage_pct')
+                          else "—")
+                st.write("")
+                if dec and stx.get('missing_products'):
+                    st.markdown(finding(
+                        f"<b>{stx['missing_products']}</b> منتجاً يعلنه المتجر ولم يصل "
+                        "إليه الفحص. الأرجح أن بقية المنتجات تُحمَّل بالتمرير أو بزر "
+                        "«عرض المزيد»، وهذه الحالة خارج قدرة الزاحف. "
+                        "لا تعتمد أرقام المنتجات في هذا التقرير.", 'bad'),
+                        unsafe_allow_html=True)
+                elif dec:
+                    st.markdown(finding(
+                        "عدد المنتجات المرصود يطابق ما يعلنه المتجر بالكامل.", 'ok'),
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown(finding(
+                        "لم يعلن المتجر عدد منتجاته في صفحات الأقسام، فتعذّرت مقارنة "
+                        "التغطية بمصدر يقيني.", 'warn'), unsafe_allow_html=True)
+
+                gaps = stx.get('image_gap') or []
+                if gaps:
+                    st.markdown(finding(
+                        f"<b>{len(gaps)}</b> صفحة منتج تعلن صوراً أكثر مما رصده الفحص — "
+                        "معرض الصور يُحمَّل بـ JavaScript جزئياً.", 'bad'),
+                        unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(gaps), use_container_width=True)
+
+                nm = stx.get('name_mismatch') or []
+                if nm:
+                    st.markdown(finding(
+                        f"<b>{len(nm)}</b> منتجاً اسمه المعلن لمحركات البحث يختلف عن "
+                        "الاسم المعروض في الصفحة.", 'warn'), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(nm), use_container_width=True)
+
+                st.caption(f"صفحات منتجات تحمل بيانات مهيكلة: "
+                           f"{stx.get('jsonld_pages', 0)} · بدونها: "
+                           f"{stx.get('no_jsonld', 0)}")
+                if stx.get('declared_by_page'):
+                    with st.expander("الأعداد المعلنة في كل قسم"):
+                        st.dataframe(pd.DataFrame(
+                            [{'الصفحة': k, 'عدد معلن': v}
+                             for k, v in stx['declared_by_page'].items()]),
+                            use_container_width=True)
+
+        # ---------------- الصفحات ----------------
+        with tabs[3]:
             present = [PAGE_TYPE_LABEL['ar'][t] for t in PAGE_TYPE_ORDER
                        if (df['نوع الصفحة'] == t).any()]
             f1, f2 = st.columns([2, 3])
@@ -3203,7 +3301,7 @@ if nav == "🔍 فحص متجر جديد":
                 "، ".join(f"{k}: {v}" for k, v in langs.items()))
 
         # ---------------- الصور ----------------
-        with tabs[3]:
+        with tabs[4]:
             if view_imgs is not None and not view_imgs.empty:
                 L = STATUS_LABEL['ar']
                 fc1, fc2 = st.columns(2)
@@ -3243,7 +3341,7 @@ if nav == "🔍 فحص متجر جديد":
                 st.info("لا توجد صور محتوى مرصودة.")
 
         # ---------------- خريطة الموقع ----------------
-        with tabs[4]:
+        with tabs[5]:
             if not coverage:
                 st.info("لم تُفعّل المقارنة مع خريطة الموقع في هذا الفحص.")
             else:
@@ -3294,7 +3392,7 @@ if nav == "🔍 فحص متجر جديد":
                         use_container_width=True)
 
         # ---------------- التحقق اليدوي ----------------
-        with tabs[5]:
+        with tabs[6]:
             st.markdown("#### عيّنة للمطابقة اليدوية")
             st.caption("افتح كل رابط وقارن العنوان والوصف بما هو مسجّل هنا. "
                        "تطابق العيّنة كاملة يعني أن محرك القراءة يعمل بشكل صحيح.")
@@ -3327,7 +3425,7 @@ if nav == "🔍 فحص متجر جديد":
                                    f"كانونيكال: {L[r['حالة الكانونيكال']]}")
 
         # ---------------- التصدير ----------------
-        with tabs[6]:
+        with tabs[7]:
             st.markdown("#### تصدير التقرير والبيانات")
             lang_choice = st.radio("لغة الملفات", ["العربية", "English"], horizontal=True)
             lang = 'ar' if lang_choice == "العربية" else 'en'
@@ -3337,12 +3435,12 @@ if nav == "🔍 فحص متجر جديد":
             netloc = urlparse(st.session_state.current_url).netloc or "store"
             try:
                 pdf_bytes = generate_client_pdf(st.session_state.current_url,
-                                                summary['score'], exp_summary, lang,
-                                                st.session_state.get('speed'))
+                                                summary['score'], exp_summary, lang)
             except Exception as e:
                 pdf_bytes = None
                 st.error(f"تعذر توليد الـ PDF: {e}")
-            zip_bytes = build_zip(df, images_df, coverage, lang)
+            zip_bytes = build_zip(df, images_df, coverage, lang,
+                                  st.session_state.get('structured'))
 
             gate_ok = True
             if selfcheck and selfcheck['verdict'] == 'blocked':
