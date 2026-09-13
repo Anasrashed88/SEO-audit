@@ -1963,6 +1963,88 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
     return {'checks': checks, 'fails': fails, 'warns': warns, 'verdict': verdict}
 
 
+
+# ==============================================================
+#  مسار الفحص الكامل — نقطة دخول واحدة
+#
+#  تستدعيه الواجهة ويستدعيه الاختبار الآلي بنفس الطريقة، فلا يمكن
+#  أن يختلف ما يُختبر عمّا يعمل فعلاً.
+# ==============================================================
+def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
+                  do_pagination=True, do_sitemap_check=True, progress=None):
+    """يشغّل الفحص من أوله لآخره ويعيد كل النتائج في قاموس واحد."""
+    def say(stage, **kw):
+        if progress:
+            try:
+                progress(stage, **kw)
+            except Exception:
+                pass
+
+    target = normalize_url(target)
+
+    say('crawl_start')
+    pages, imgs, cat_urls, seen, platform, crawl_meta = crawl_store(
+        target, max_pages, workers,
+        (lambda d, pend, lvl: say('crawl', done=d, pending=pend, level=lvl)))
+    cat_products = crawl_meta.setdefault('cat_products', {})
+
+    if do_pagination and cat_urls:
+        say('pagination_start')
+        extra = harvest_paginated_products(
+            target, cat_urls, seen,
+            (lambda i, tot, f, fe: say('pagination', i=i, total=tot,
+                                       found=f, fetched=fe)),
+            cat_products=cat_products)
+        if extra:
+            say('extra_start', count=len(extra))
+            p2, i2 = audit_urls(extra, target, 'ترقيم الأقسام', workers,
+                                None)
+            pages += p2
+            imgs += i2
+
+    df = dedupe_pages(pd.DataFrame(pages))
+    images_df = pd.DataFrame(imgs)
+    if not images_df.empty:
+        images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
+            .copy().reset_index(drop=True)
+        images_df = apply_duplicate_alt(images_df)
+    df, brand = analyze_text_quality(df)
+    df = analyze_url_quality(df, brand)
+    df, dup_groups = detect_duplicate_content(df)
+    df = score_pages(df, images_df)
+
+    coverage = None
+    if do_sitemap_check:
+        say('sitemap_start')
+        sm_urls = collect_sitemap_urls(target)
+        say('sitemap', count=len(sm_urls))
+        coverage = build_coverage_report(df, sm_urls, target, workers)
+
+    declared = {}
+    for _, r in df.iterrows():
+        v = r.get('عدد معلن')
+        try:
+            if v is not None and pd.notna(v) and int(v) > 0:
+                declared[r['الرابط']] = int(v)
+        except (TypeError, ValueError):
+            continue
+    structured = build_structured_report(df, declared, cat_products)
+
+    summary = compute_summary(df, coverage, images_df)
+    summary['structured'] = structured
+    summary['platform'] = platform
+    summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+    selfcheck = run_self_checks(df, images_df, coverage, platform, summary,
+                                crawl_meta, structured)
+    say('done')
+
+    return {'df': df, 'images_df': images_df, 'summary': summary,
+            'coverage': coverage, 'structured': structured,
+            'selfcheck': selfcheck, 'brand': brand, 'dup_groups': dup_groups,
+            'platform': platform, 'crawl_meta': crawl_meta,
+            'declared': declared}
+
+
 # ==============================================================
 #  تقرير العميل (PDF)
 # ==============================================================
@@ -2930,79 +3012,53 @@ if nav == "🔍 فحص متجر جديد":
         st.session_state.current_url = target
 
         with st.status("جارٍ الفحص...", expanded=True) as status:
-            st.write("**المرحلة 1** — تصفح المتجر من الصفحة الرئيسية")
-            bar1 = st.progress(0)
-            note1 = st.empty()
+            head = st.empty()
+            bar = st.progress(0)
+            note = st.empty()
 
-            def crawl_cb(done, pending, level):
-                bar1.progress(min(done / max(done + pending, 1), 1.0))
-                note1.caption(f"المستوى {level} · فُحصت {done} صفحة · "
-                              f"{pending} رابط في الانتظار")
+            def progress(stage, **kw):
+                if stage == 'crawl_start':
+                    head.write("**المرحلة 1** — تصفح المتجر من الصفحة الرئيسية")
+                elif stage == 'crawl':
+                    done, pend = kw.get('done', 0), kw.get('pending', 0)
+                    bar.progress(min(done / max(done + pend, 1), 1.0))
+                    note.caption(f"المستوى {kw.get('level')} · فُحصت {done} صفحة · "
+                                 f"{pend} رابط في الانتظار")
+                elif stage == 'pagination_start':
+                    head.write("**المرحلة 2** — متابعة ترقيم صفحات الأقسام")
+                    bar.progress(0)
+                elif stage == 'pagination':
+                    bar.progress(min(kw.get('i', 0) / max(kw.get('total', 1), 1), 1.0))
+                    note.caption(f"{kw.get('i')}/{kw.get('total')} قسم · "
+                                 f"{kw.get('found')} منتج إضافي · "
+                                 f"{kw.get('fetched')} صفحة مجلوبة")
+                elif stage == 'extra_start':
+                    head.write(f"**المرحلة 3** — فحص {kw.get('count')} منتج "
+                               "من الصفحات التالية")
+                    bar.progress(0)
+                elif stage == 'sitemap_start':
+                    head.write("**المرحلة 4** — مقارنة تشخيصية مع خريطة الموقع")
+                    bar.progress(0)
+                elif stage == 'sitemap':
+                    note.caption(f"{kw.get('count')} رابط في الخريطة · جارٍ التحقق "
+                                 "من وجهة الروابط غير المطابقة")
+                elif stage == 'done':
+                    bar.progress(1.0)
 
-            pages, imgs, cat_urls, seen, platform, crawl_meta = crawl_store(
-                target, max_pages, workers, crawl_cb)
-            bar1.progress(1.0)
-            st.session_state.platform = platform
-
-            if do_pagination and cat_urls:
-                st.write("**المرحلة 2** — متابعة ترقيم صفحات الأقسام")
-                bar2 = st.progress(0)
-                note2 = st.empty()
-
-                def pag_cb(i, total, found, fetched):
-                    bar2.progress(min(i / max(total, 1), 1.0))
-                    note2.caption(f"{i}/{total} قسم · {found} منتج إضافي · "
-                                  f"{fetched} صفحة مجلوبة")
-
-                extra = harvest_paginated_products(
-                    target, cat_urls, seen, pag_cb,
-                    cat_products=crawl_meta.setdefault('cat_products', {}))
-                if extra:
-                    st.write(f"**المرحلة 3** — فحص {len(extra)} منتج من الصفحات التالية")
-                    bar3 = st.progress(0)
-                    p2, i2 = audit_urls(extra, target, 'ترقيم الأقسام', workers, bar3)
-                    pages += p2
-                    imgs += i2
-
-            df = dedupe_pages(pd.DataFrame(pages))
-            images_df = pd.DataFrame(imgs)
-            if not images_df.empty:
-                images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
-                    .copy().reset_index(drop=True)
-                images_df = apply_duplicate_alt(images_df)
-            df, brand = analyze_text_quality(df)
-            df = analyze_url_quality(df, brand)
-            df, dup_groups = detect_duplicate_content(df)
-            df = score_pages(df, images_df)
-            st.session_state.brand = brand
-            st.session_state.dup_groups = dup_groups
-
-            coverage = None
-            if do_sitemap_check:
-                st.write("**المرحلة 4** — مقارنة تشخيصية مع خريطة الموقع")
-                note4 = st.empty()
-                sm_urls = collect_sitemap_urls(target)
-                note4.caption(f"{len(sm_urls)} رابط في الخريطة · جارٍ التحقق من "
-                              "وجهة الروابط غير المطابقة")
-                coverage = build_coverage_report(df, sm_urls, target, workers)
-
-            declared = {}
-            for _, r in df.iterrows():
-                v = r.get('عدد معلن')
-                try:
-                    if v is not None and pd.notna(v) and int(v) > 0:
-                        declared[r['الرابط']] = int(v)
-                except (TypeError, ValueError):
-                    continue
-            structured = build_structured_report(df, declared)
-
-            summary = compute_summary(df, coverage, images_df)
-            summary['structured'] = structured
-            selfcheck = run_self_checks(df, images_df, coverage, platform,
-                                        summary, crawl_meta, structured)
-            summary['platform'] = platform
-            summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+            result = run_full_scan(target, max_pages, workers, do_pagination,
+                                   do_sitemap_check, progress)
             status.update(label="اكتمل الفحص", state="complete", expanded=False)
+
+        df = result['df']
+        images_df = result['images_df']
+        summary = result['summary']
+        coverage = result['coverage']
+        structured = result['structured']
+        selfcheck = result['selfcheck']
+        platform = result['platform']
+        st.session_state.platform = platform
+        st.session_state.brand = result['brand']
+        st.session_state.dup_groups = result['dup_groups']
 
         st.session_state.audit_df = df
         st.session_state.images_df = images_df
