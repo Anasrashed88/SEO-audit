@@ -148,6 +148,7 @@ COL_EN = {
     'رقم المنتج': 'SKU', 'عدد معلن': 'Declared Count',
     'الاسم المعلن': 'Declared Name', 'الاسم المعروض': 'Displayed Name',
     'صور مرصودة': 'Images Detected', 'القسم': 'Category',
+    'في الخريطة': 'In Sitemap', 'مرتبط برابط': 'Internally Linked',
     'مرصود': 'Detected', 'ناقص': 'Missing', 'عدد معلن': 'Declared Count',
 }
 
@@ -1603,13 +1604,16 @@ def compute_summary(df, coverage=None, images_df=None):
         s['img_modern_pct'] = round(modern / len(uimg) * 100, 1)
     if coverage:
         s.update({
-            'visible_products': coverage['visible_count'],
-            'sitemap_products': coverage['sitemap_count'],
-            'not_indexed_count': len(coverage['visible_not_in_sitemap']),
-            'hidden_count': len(coverage['sitemap_not_visible']),
-            'redirect_count': len(coverage.get('sitemap_redirects', [])),
+            'visible_products': coverage.get('products_live', 0),
+            'sitemap_products': coverage.get('sitemap_total', 0),
+            'sitemap_live': coverage.get('sitemap_live', 0),
+            'not_indexed_count': coverage.get('products_unlisted', 0),
+            'dead_count': coverage.get('sitemap_dead', 0),
+            'hidden_count': len(coverage.get('orphan_pages', [])),
+            'scroll_only_count': len(coverage.get('scroll_only_products', [])),
+            'unlisted_count': len(coverage.get('unlisted_pages', [])),
             'orphan_by_type': coverage.get('orphan_by_type', {}),
-            'indexed_pct': coverage['indexed_pct'],
+            'indexed_pct': coverage.get('indexed_pct', 100.0),
         })
     return s
 
@@ -1939,20 +1943,27 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
         short = structured.get('categories_short') or []
         miss = structured.get('missing_products', 0)
         if checked and short:
-            pct = structured.get('coverage_pct') or 0
-            lvl = CHECK_FAIL if pct < 70 else CHECK_WARN
-            add(lvl, "تغطية أقسام المتجر",
-                f"{len(short)} قسماً من {checked} يعلن منتجات أكثر مما رصده الزاحف "
-                f"(ناقص {miss} منتجاً في المجموع).",
-                "غالباً يحمّل القسم بقية منتجاته بالتمرير أو بزر «المزيد». "
-                "راجع تبويب «البيانات المعلنة».")
+            # مع وجود خريطة موقع تكون المنتجات مفحوصة أصلاً، فالنقص في الترابط
+            # لا في الفحص. بغياب الخريطة يكون النقص حقيقياً في التغطية.
+            has_map = summary.get('sitemap_products', 0) > 0
+            if has_map:
+                add(CHECK_WARN, "ترابط الأقسام الداخلي",
+                    f"{len(short)} قسماً من {checked} لا يعرض روابط كل منتجاته في "
+                    f"صفحته ({miss} منتجاً يظهر بالتمرير أو بزر «المزيد»).",
+                    "المنتجات نفسها مفحوصة بالكامل من خريطة الموقع — هذه ملاحظة عن "
+                    "الترابط الداخلي للمتجر لا نقص في الفحص.")
+            else:
+                add(CHECK_FAIL, "تغطية المنتجات",
+                    f"{len(short)} قسماً يعلن {miss} منتجاً أكثر مما وصل إليه الفحص، "
+                    "ولا توجد خريطة موقع للاعتماد عليها.",
+                    "المتجر يحمّل منتجاته بالتمرير وبلا خريطة موقع — أرقام "
+                    "المنتجات في هذا التقرير ناقصة. لا ترسله.")
         elif checked:
-            add(CHECK_PASS, "تغطية أقسام المتجر",
-                f"{matched} قسماً من {checked} مطابق تماماً لما يعلنه المتجر.")
+            add(CHECK_PASS, "ترابط الأقسام الداخلي",
+                f"{matched} قسماً من {checked} يعرض روابط كل منتجاته.")
         else:
-            add(CHECK_WARN, "تغطية أقسام المتجر",
-                "لم يعرض المتجر عدّاد منتجات في أقسامه، فتعذّرت مقارنة التغطية.",
-                "اعتمد على عيّنة التحقق اليدوي بدلاً منها.")
+            add(CHECK_PASS, "ترابط الأقسام الداخلي",
+                "لا توجد عدّادات في صفحات الأقسام للمقارنة بها.")
 
         n_prod = structured.get('found_products', 0)
         gaps = structured.get('image_gap') or []
@@ -1990,6 +2001,23 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
             f"{unreach} صفحة تعذّر الاتصال بها رغم إعادة المحاولة.",
             "قد يحدّ المتجر من سرعة الزحف. خفّض «المسارات المتوازية» إلى 2 "
             "وأعد الفحص للحصول على تغطية كاملة.")
+
+    # 6و) خريطة الموقع مصدر القائمة — غيابها يعني فحصاً ناقصاً
+    sm_total = summary.get('sitemap_products', 0)
+    if summary.get('coverage_enabled'):
+        if sm_total == 0:
+            add(CHECK_FAIL, "خريطة الموقع",
+                "لم يُعثر على خريطة موقع صالحة، فاعتمد الفحص على تتبع الروابط وحده.",
+                "قد تفوت منتجات تظهر بالتمرير. راجع عيّنة التحقق اليدوي.")
+        elif summary.get('unlisted_count', 0) > sm_total * 0.3:
+            add(CHECK_WARN, "خريطة الموقع",
+                f"{summary['unlisted_count']} صفحة معروضة غير مدرجة في الخريطة "
+                f"مقابل {sm_total} مدرجة — الخريطة ناقصة.",
+                "هذه نتيجة حقيقية عن المتجر، لكن راجع عيّنة للتأكد.")
+        else:
+            add(CHECK_PASS, "خريطة الموقع",
+                f"{sm_total} رابط في الخريطة، منها {summary.get('sitemap_live', 0)} "
+                "يعمل ويصل إليه الزائر.")
 
     # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
     if n_ok:
@@ -2042,6 +2070,126 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
 
 
 
+
+# ==============================================================
+#  محرك الاكتشاف والفحص — يبدأ من خريطة الموقع
+#
+#  الخريطة تعطي القائمة الكاملة فوراً، فلا تفوتنا منتجات بسبب التمرير.
+#  ثم تُفتح كل صفحة: المحذوف والمخفي يردّان بخطأ فيخرجان تلقائياً.
+#  وروابط كل صفحة تُجمع مجاناً أثناء الفحص، فنعرف المرتبط من اليتيم
+#  بلا أي طلب إضافي.
+# ==============================================================
+def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
+                       progress=None, max_rounds=6):
+    base_url = normalize_url(base_url)
+    if progress:
+        progress('sitemap_read')
+    sitemap_urls = collect_sitemap_urls(base_url)
+    sitemap_keys = {url_key(u) for u in sitemap_urls}
+
+    queue = sorted({clean_url(u) for u in sitemap_urls} | {base_url})
+    seen = {url_key(u) for u in queue}
+    linked = set()              # مفاتيح ظهرت كرابط في أي صفحة
+    cat_links = {}              # رابط القسم -> مجموعة روابط منتجاته
+    pages, images = [], []
+    platform = 'unknown'
+    rounds = 0
+    truncated = False
+
+    while queue and rounds < max_rounds:
+        rounds += 1
+        room = max_pages - len(pages)
+        if room <= 0:
+            truncated = True
+            break
+        batch, queue = queue[:room], queue[room:]
+        if queue:
+            truncated = True
+        nxt = []
+        src = 'خريطة الموقع' if rounds == 1 else 'رابط داخلي'
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for res in ex.map(fetch_and_audit,
+                              [(u, base_url, src) for u in batch]):
+                row = res['page_data']
+                pages.append(row)
+                images.extend(res['images_data'])
+                if res.get('platform_html') and platform == 'unknown':
+                    platform = detect_platform(res['platform_html'],
+                                               res.get('platform_headers'), base_url)
+                raw = row.get('_raw_url', row['الرابط'])
+                seen.add(url_key(raw))
+                if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
+                    cat_links.setdefault(raw, set()).update(
+                        {url_key(x) for x in res.get('product_links', set())})
+                for link in res.get('links', ()):
+                    k = url_key(link)
+                    linked.add(k)
+                    if k not in seen:
+                        seen.add(k)
+                        nxt.append(link)
+        queue = nxt + queue
+        if progress:
+            progress('audit', done=len(pages), pending=len(queue), round=rounds)
+
+    for row in pages:
+        raw = row.get('_raw_url', row['الرابط'])
+        k = url_key(raw)
+        row['في الخريطة'] = k in sitemap_keys
+        row['مرتبط برابط'] = k in linked
+
+    meta = {'truncated': truncated, 'pending': len(queue), 'rounds': rounds,
+            'cat_products': cat_links, 'sitemap_count': len(sitemap_keys),
+            'sitemap_urls': sitemap_urls,
+            'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages
+                             if r['نوع الصفحة'] in (T_BLOG, T_ARCHIVE)]}
+    return pages, images, meta, platform
+
+
+def build_sitemap_report(df, base_url):
+    """يصنّف علاقة كل صفحة بخريطة الموقع بعد فتحها فعلياً."""
+    if df.empty or 'في الخريطة' not in df.columns:
+        return None
+    in_map = df['في الخريطة'] == True                      # noqa: E712
+    alive = df['متاحة'] == True                            # noqa: E712
+    linked = df['مرتبط برابط'] == True                     # noqa: E712
+
+    def rows(mask, extra=None):
+        out = []
+        for _, r in df[mask].iterrows():
+            item = {'الرابط': r['الرابط'],
+                    'نوع الصفحة': r['نوع الصفحة']}
+            if extra:
+                item[extra] = r['كود الاستجابة']
+            out.append(item)
+        return out
+
+    is_prod = df['نوع الصفحة'] == T_PRODUCT
+    dead = rows(in_map & ~alive, 'كود الاستجابة')
+    # المنتج غير المرتبط يصل إليه الزائر بالتمرير، فليس يتيماً بالمعنى الضار
+    orphan = rows(in_map & alive & ~linked & ~is_prod)
+    scroll_only = rows(in_map & alive & ~linked & is_prod)
+    unlisted = rows(~in_map & alive)
+    live_in_map = int((in_map & alive).sum())
+    prod_live = int((alive & (df['نوع الصفحة'] == T_PRODUCT)).sum())
+    prod_unlisted = int((~in_map & alive &
+                         (df['نوع الصفحة'] == T_PRODUCT)).sum())
+    return {
+        'sitemap_total': int(in_map.sum()),
+        'sitemap_live': live_in_map,
+        'sitemap_dead': len(dead),
+        'orphan_pages': orphan,
+        'scroll_only_products': scroll_only,
+        'dead_pages': dead,
+        'unlisted_pages': unlisted,
+        'products_live': prod_live,
+        'products_unlisted': prod_unlisted,
+        'indexed_pct': round((prod_live - prod_unlisted) / prod_live * 100, 1)
+        if prod_live else 100.0,
+        'orphan_by_type': dict(df[in_map & alive & ~linked & ~is_prod]['نوع الصفحة']
+                               .value_counts()),
+    }
+
+
 # ==============================================================
 #  مسار الفحص الكامل — نقطة دخول واحدة
 #
@@ -2060,24 +2208,27 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     target = normalize_url(target)
 
-    say('crawl_start')
-    pages, imgs, cat_urls, seen, platform, crawl_meta = crawl_store(
+    say('discover_start')
+    pages, imgs, crawl_meta, platform = discover_and_audit(
         target, max_pages, workers,
-        (lambda d, pend, lvl: say('crawl', done=d, pending=pend, level=lvl)))
+        (lambda st, **k: say(st, **k)))
     cat_products = crawl_meta.setdefault('cat_products', {})
 
-    if do_pagination and cat_urls:
+    if do_pagination and cat_products:
         say('pagination_start')
+        seen_keys = {url_key(r.get('_raw_url', r['الرابط'])) for r in pages}
         extra = harvest_paginated_products(
-            target, cat_urls, seen,
+            target, list(cat_products.keys()), seen_keys,
             (lambda i, tot, f, fe: say('pagination', i=i, total=tot,
                                        found=f, fetched=fe)),
             cat_products=cat_products,
             listing_urls=crawl_meta.get('listing_urls'))
         if extra:
             say('extra_start', count=len(extra))
-            p2, i2 = audit_urls(extra, target, 'ترقيم الأقسام', workers,
-                                None)
+            p2, i2 = audit_urls(extra, target, 'ترقيم القوائم', workers, None)
+            for r in p2:
+                r['في الخريطة'] = False
+                r['مرتبط برابط'] = True
             pages += p2
             imgs += i2
 
@@ -2088,9 +2239,22 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
         say('retry_start', count=len(retry))
         time.sleep(2)
         fixed, fixed_imgs = audit_urls(retry[:120], target, 'إعادة محاولة', 2, None)
-        good = {r['_raw_url']: r for r in fixed if r['متاحة']}
+        good = {}
+        for r in fixed:
+            if r['متاحة']:
+                good[r['_raw_url']] = r
         if good:
-            pages = [good.get(r['_raw_url'], r) for r in pages]
+            merged = []
+            for r in pages:
+                g = good.get(r['_raw_url'])
+                if g:
+                    g = dict(g)
+                    g['في الخريطة'] = r.get('في الخريطة', False)
+                    g['مرتبط برابط'] = r.get('مرتبط برابط', False)
+                    merged.append(g)
+                else:
+                    merged.append(r)
+            pages = merged
             imgs += [im for im in fixed_imgs
                      if im['رابط الصفحة'] in {g['الرابط'] for g in good.values()}]
 
@@ -2105,12 +2269,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     df, dup_groups = detect_duplicate_content(df)
     df = score_pages(df, images_df)
 
-    coverage = None
-    if do_sitemap_check:
-        say('sitemap_start')
-        sm_urls = collect_sitemap_urls(target)
-        say('sitemap', count=len(sm_urls))
-        coverage = build_coverage_report(df, sm_urls, target, workers)
+    coverage = build_sitemap_report(df, target) if do_sitemap_check else None
 
     declared = {}
     for _, r in df.iterrows():
@@ -2389,12 +2548,19 @@ def build_diagnosis(score, stats, lang):
         if stats.get('canon_missing'):
             points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
                           "ما يعرّض المتجر لتكرار المحتوى.")
+        if stats.get('dead_count'):
+            points.append(f"{stats['dead_count']} رابط محذوف ما زال معلناً في خريطة "
+                          "الموقع، فترسل محركات البحث زحفها إلى صفحات غير موجودة.")
         if stats.get('hidden_count'):
             points.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع لا يصل "
                           "إليها الزائر بأي رابط داخلي، فتفقد قيمتها.")
-        if stats.get('redirect_count'):
-            points.append(f"{stats['redirect_count']} رابط في خريطة الموقع يعيد التوجيه "
-                          "لصفحة أخرى، ما يستهلك ميزانية زحف المتجر بلا فائدة.")
+        if stats.get('unlisted_count'):
+            points.append(f"{stats['unlisted_count']} صفحة معروضة في المتجر وغير مدرجة "
+                          "في خريطة الموقع، فقد لا تعلم بها محركات البحث.")
+        if stats.get('scroll_only_count'):
+            points.append(f"{stats['scroll_only_count']} منتجاً لا يظهر رابطه في صفحات "
+                          "الأقسام ويصل إليه الزائر بالتمرير فقط، فيضعف ترابطه الداخلي "
+                          "وتقل قوته في نتائج البحث.")
         if stats.get('not_indexed_count'):
             points.append(f"{stats['not_indexed_count']} منتجاً معروضاً في المتجر "
                           "لا يظهر في خريطة الموقع.")
@@ -2482,9 +2648,6 @@ def build_diagnosis(score, stats, lang):
     if stats.get('hidden_count'):
         points.append(f"{stats['hidden_count']} pages published in the sitemap have no "
                       "internal link path for visitors and lose their value.")
-    if stats.get('redirect_count'):
-        points.append(f"{stats['redirect_count']} sitemap URLs redirect elsewhere, "
-                      "consuming crawl budget without benefit.")
     if stats.get('not_indexed_count'):
         points.append(f"{stats['not_indexed_count']} visible products are absent "
                       "from the sitemap.")
@@ -2933,21 +3096,26 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         pdf.add_page()
         pdf.section(n, 'sitemap')
         pdf.table([
-            ('منتجات معروضة لزوار المتجر' if rtl else 'Products visible to visitors',
-             f"{stats.get('visible_products', 0)} {T['u_product']}", 'neutral'),
-            ('منتجات معلنة في خريطة الموقع' if rtl else 'Products declared in sitemap',
-             f"{stats.get('sitemap_products', 0)} {T['u_product']}", 'neutral'),
-            ('منتجات معروضة ولا تظهر في الخريطة' if rtl else
-             'Visible products absent from sitemap',
-             f"{stats.get('not_indexed_count', 0)} {T['u_product']}",
-             'bad' if stats.get('not_indexed_count') else 'ok'),
-            ('روابط في الخريطة تعيد التوجيه' if rtl else 'Sitemap URLs redirecting',
-             f"{stats.get('redirect_count', 0)} {T['u_link']}",
-             'warn' if stats.get('redirect_count') else 'ok'),
+            ('روابط معلنة في خريطة الموقع' if rtl else 'URLs declared in sitemap',
+             f"{stats.get('sitemap_products', 0)} {T['u_link']}", 'neutral'),
+            ('منها تعمل ويصل إليها الزائر' if rtl else 'Of those, live and reachable',
+             f"{stats.get('sitemap_live', 0)} {T['u_link']}", 'neutral'),
+            ('روابط محذوفة ما زالت في الخريطة' if rtl else
+             'Deleted URLs still listed in the sitemap',
+             f"{stats.get('dead_count', 0)} {T['u_link']}",
+             'bad' if stats.get('dead_count') else 'ok'),
             ('صفحات في الخريطة لا يصل إليها الزائر' if rtl else
-             'Sitemap pages unreachable by visitors',
+             'Sitemap pages with no internal link',
              f"{stats.get('hidden_count', 0)} {T['u_page']}",
              'warn' if stats.get('hidden_count') else 'ok'),
+            ('منتجات لا تظهر روابطها إلا بالتمرير' if rtl else
+             'Products linked only via scrolling',
+             f"{stats.get('scroll_only_count', 0)} {T['u_product']}",
+             'warn' if stats.get('scroll_only_count') else 'ok'),
+            ('صفحات معروضة وغير مدرجة في الخريطة' if rtl else
+             'Live pages missing from the sitemap',
+             f"{stats.get('unlisted_count', 0)} {T['u_page']}",
+             'bad' if stats.get('unlisted_count') else 'ok'),
             ('نسبة المنتجات المعروضة المدرجة' if rtl else
              'Visible products included in sitemap',
              f"{stats.get('indexed_pct', 0)}%",
@@ -3008,22 +3176,26 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 ZIP_NAMES = {
     'ar': {T_PRODUCT: "1_المنتجات.csv", T_CATEGORY: "2_التصنيفات.csv",
            T_BLOG: "3_المدونة.csv", T_INFO: "4_الصفحات_التعريفية.csv",
-           T_HOME: "5_الصفحة_الرئيسية.csv", T_UNKNOWN: "6_غير_مصنفة.csv",
-           T_BROKEN: "8_روابط_معطلة.csv", 'images': "8_تدقيق_الصور.csv",
+           T_HOME: "5_الصفحة_الرئيسية.csv", T_ARCHIVE: "6_صفحات_أرشيف.csv",
+           T_UNKNOWN: "7_غير_مصنفة.csv", T_BROKEN: "8_روابط_معطلة.csv",
+           'images': "9_تدقيق_الصور.csv",
            'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
-           'orphan': "10_صفحات_يتيمة_في_الخريطة.csv",
-           'redirect': "11_روابط_الخريطة_المحوّلة.csv",
+           'orphan': "10_صفحات_يتيمة.csv",
+           'scroll': "15_منتجات_بالتمرير_فقط.csv",
+           'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
            'imggap': "12_صفحات_صورها_ناقصة.csv",
            'namegap': "13_اسم_معلن_مختلف.csv",
            'catgap': "14_مقارنة_عدادات_الأقسام.csv",
            'excel': "التقرير_الشامل.xlsx"},
     'en': {T_PRODUCT: "1_products.csv", T_CATEGORY: "2_categories.csv",
            T_BLOG: "3_blog.csv", T_INFO: "4_info_pages.csv",
-           T_HOME: "5_homepage.csv", T_UNKNOWN: "6_unclassified.csv",
-           T_BROKEN: "8_broken_links.csv", 'images': "8_image_alt_audit.csv",
+           T_HOME: "5_homepage.csv", T_ARCHIVE: "6_archive_pages.csv",
+           T_UNKNOWN: "7_unclassified.csv", T_BROKEN: "8_broken_links.csv",
+           'images': "9_image_alt_audit.csv",
            'notidx': "9_products_missing_from_sitemap.csv",
-           'orphan': "10_orphan_sitemap_pages.csv",
-           'redirect': "11_redirecting_sitemap_urls.csv",
+           'orphan': "10_orphan_pages.csv",
+           'scroll': "15_scroll_only_products.csv",
+           'redirect': "11_dead_urls_in_sitemap.csv",
            'imggap': "12_pages_with_missing_images.csv",
            'namegap': "13_declared_name_mismatch.csv",
            'catgap': "14_category_counter_comparison.csv",
@@ -3043,14 +3215,16 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
             label = PAGE_TYPE_LABEL[lang][tkey]
             sub = ldf[ldf[type_col] == label] if type_col in ldf.columns else pd.DataFrame()
             if not sub.empty:
-                z.writestr(names[tkey], sub.to_csv(index=False, encoding='utf-8-sig'))
+                fname = names.get(tkey, f"{tkey}.csv")
+                z.writestr(fname, sub.to_csv(index=False, encoding='utf-8-sig'))
         if limg is not None and not limg.empty:
             z.writestr(names['images'], limg.to_csv(index=False, encoding='utf-8-sig'))
 
         if coverage:
-            for key, data in [('notidx', coverage.get('visible_not_in_sitemap')),
-                              ('orphan', coverage.get('sitemap_not_visible')),
-                              ('redirect', coverage.get('sitemap_redirects'))]:
+            for key, data in [('notidx', coverage.get('unlisted_pages')),
+                              ('orphan', coverage.get('orphan_pages')),
+                              ('redirect', coverage.get('dead_pages')),
+                              ('scroll', coverage.get('scroll_only_products'))]:
                 if data:
                     z.writestr(names[key],
                                localize_df(pd.DataFrame(data), lang)
@@ -3124,15 +3298,17 @@ if nav == "🔍 فحص متجر جديد":
             note = st.empty()
 
             def progress(stage, **kw):
-                if stage == 'crawl_start':
-                    head.write("**المرحلة 1** — تصفح المتجر من الصفحة الرئيسية")
-                elif stage == 'crawl':
+                if stage == 'discover_start':
+                    head.write("**المرحلة 1** — قراءة خريطة الموقع وفحص الصفحات")
+                elif stage == 'sitemap_read':
+                    note.caption("جارٍ قراءة خريطة الموقع...")
+                elif stage == 'audit':
                     done, pend = kw.get('done', 0), kw.get('pending', 0)
                     bar.progress(min(done / max(done + pend, 1), 1.0))
-                    note.caption(f"المستوى {kw.get('level')} · فُحصت {done} صفحة · "
+                    note.caption(f"الجولة {kw.get('round')} · فُحصت {done} صفحة · "
                                  f"{pend} رابط في الانتظار")
                 elif stage == 'pagination_start':
-                    head.write("**المرحلة 2** — متابعة ترقيم صفحات الأقسام")
+                    head.write("**المرحلة 2** — متابعة ترقيم القوائم")
                     bar.progress(0)
                 elif stage == 'pagination':
                     bar.progress(min(kw.get('i', 0) / max(kw.get('total', 1), 1), 1.0))
@@ -3147,12 +3323,6 @@ if nav == "🔍 فحص متجر جديد":
                     head.write(f"**إعادة محاولة** — {kw.get('count')} صفحة "
                                "تعذّر الاتصال بها")
                     bar.progress(0)
-                elif stage == 'sitemap_start':
-                    head.write("**المرحلة 4** — مقارنة تشخيصية مع خريطة الموقع")
-                    bar.progress(0)
-                elif stage == 'sitemap':
-                    note.caption(f"{kw.get('count')} رابط في الخريطة · جارٍ التحقق "
-                                 "من وجهة الروابط غير المطابقة")
                 elif stage == 'done':
                     bar.progress(1.0)
 
@@ -3573,53 +3743,68 @@ if nav == "🔍 فحص متجر جديد":
         # ---------------- خريطة الموقع ----------------
         with tabs[5]:
             if not coverage:
-                st.info("لم تُفعّل المقارنة مع خريطة الموقع في هذا الفحص.")
+                st.info("لم تُفعّل مقارنة خريطة الموقع في هذا الفحص.")
             else:
-                st.caption("هذه المقارنة تشخيصية ولا تؤثر على أرقام الفحص أعلاه.")
-                m = st.columns(4)
-                m[0].metric("منتجات معروضة للزائر", coverage['visible_count'])
-                m[1].metric("منتجات في الخريطة", coverage['sitemap_count'])
-                m[2].metric("معروضة وخارج الخريطة",
-                            len(coverage['visible_not_in_sitemap']))
-                m[3].metric("نسبة الإدراج", f"{coverage['indexed_pct']}%")
+                st.caption("كل رابط في الخريطة فُتح فعلياً: المحذوف يردّ بخطأ، "
+                           "والمعروض يُفحص. وروابط الصفحات جُمعت أثناء الفحص "
+                           "لمعرفة ما يصل إليه الزائر بنقرة.")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("روابط في الخريطة", coverage['sitemap_total'])
+                m2.metric("تعمل ويصل إليها الزائر", coverage['sitemap_live'])
+                m3.metric("محذوفة ما زالت مدرجة", coverage['sitemap_dead'])
+                m4.metric("نسبة إدراج المنتجات", f"{coverage['indexed_pct']}%")
                 st.write("")
 
-                if coverage['visible_not_in_sitemap']:
+                if coverage['dead_pages']:
                     st.markdown(finding(
-                        f"<b>{len(coverage['visible_not_in_sitemap'])}</b> منتج يراه الزائر "
-                        "ولا يظهر في خريطة الموقع — محركات البحث قد لا تعلم بوجوده.",
+                        f"<b>{len(coverage['dead_pages'])}</b> رابط محذوف ما زال معلناً "
+                        "في خريطة الموقع. محركات البحث ترسل زحفها إلى صفحات غير "
+                        "موجودة، فتهدر ميزانية الزحف.", 'bad'), unsafe_allow_html=True)
+                    st.dataframe(localize_df(pd.DataFrame(coverage['dead_pages']), 'ar'),
+                                 use_container_width=True)
+
+                if coverage['unlisted_pages']:
+                    st.markdown(finding(
+                        f"<b>{len(coverage['unlisted_pages'])}</b> صفحة معروضة في المتجر "
+                        "وغير مدرجة في خريطة الموقع — قد لا تعلم بها محركات البحث.",
                         'bad'), unsafe_allow_html=True)
                     st.dataframe(localize_df(
-                        pd.DataFrame(coverage['visible_not_in_sitemap']), 'ar'),
-                        use_container_width=True)
-                else:
-                    st.markdown(finding(
-                        "جميع المنتجات المعروضة مدرجة في خريطة الموقع.", 'ok'),
-                        unsafe_allow_html=True)
-
-                if coverage.get('sitemap_redirects'):
-                    st.markdown(finding(
-                        f"<b>{len(coverage['sitemap_redirects'])}</b> رابط في خريطة الموقع "
-                        "يعيد التوجيه لصفحة أخرى مفحوصة أصلاً. الصفحات نفسها سليمة، "
-                        "لكن إدراج الروابط القديمة في الخريطة يستهلك ميزانية الزحف "
-                        "ويُفضّل استبدالها بوجهاتها النهائية.", 'warn'),
-                        unsafe_allow_html=True)
-                    st.dataframe(localize_df(
-                        pd.DataFrame(coverage['sitemap_redirects']), 'ar'),
+                        pd.DataFrame(coverage['unlisted_pages']), 'ar'),
                         use_container_width=True)
 
-                if coverage['sitemap_not_visible']:
+                if coverage.get('scroll_only_products'):
+                    st.markdown(finding(
+                        f"<b>{len(coverage['scroll_only_products'])}</b> منتجاً لا "
+                        "تظهر روابطه في صفحات الأقسام، ويصل إليه الزائر بالتمرير أو "
+                        "بزر «عرض المزيد». المنتجات نفسها مفحوصة بالكامل، لكن ضعف "
+                        "الترابط الداخلي يقلل قوتها في نتائج البحث.", 'warn'),
+                        unsafe_allow_html=True)
+                    with st.expander(
+                            f"عرض الـ{len(coverage['scroll_only_products'])} منتجاً"):
+                        st.dataframe(localize_df(
+                            pd.DataFrame(coverage['scroll_only_products']), 'ar'),
+                            use_container_width=True)
+
+                if coverage['orphan_pages']:
                     bt = coverage.get('orphan_by_type', {})
                     brk = "، ".join(f"{PAGE_TYPE_LABEL['ar'].get(k, k)}: {v}"
                                     for k, v in bt.items())
                     st.markdown(finding(
-                        f"<b>{len(coverage['sitemap_not_visible'])}</b> صفحة يتيمة "
-                        f"({brk}): منشورة في خريطة الموقع ولا يصل إليها الزائر بأي رابط "
-                        "داخلي. لا تستفيد من قوة الموقع وهي مستبعدة من أرقام الفحص.",
-                        'warn'), unsafe_allow_html=True)
+                        f"<b>{len(coverage['orphan_pages'])}</b> صفحة يتيمة ({brk}): "
+                        "تعمل ومدرجة في الخريطة لكن لا يصل إليها الزائر بأي رابط "
+                        "داخلي، فلا تستفيد من قوة المتجر.", 'warn'),
+                        unsafe_allow_html=True)
                     st.dataframe(localize_df(
-                        pd.DataFrame(coverage['sitemap_not_visible']), 'ar'),
+                        pd.DataFrame(coverage['orphan_pages']), 'ar'),
                         use_container_width=True)
+
+                if not (coverage['dead_pages'] or coverage['unlisted_pages']
+                        or coverage['orphan_pages']
+                        or coverage.get('scroll_only_products')):
+                    st.markdown(finding(
+                        "خريطة الموقع مطابقة لما يراه الزائر: لا روابط محذوفة ولا "
+                        "صفحات يتيمة ولا صفحات خارج الخريطة.", 'ok'),
+                        unsafe_allow_html=True)
 
         # ---------------- التحقق اليدوي ----------------
         with tabs[6]:
