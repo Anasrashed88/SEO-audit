@@ -84,15 +84,17 @@ HEADERS = {
 
 T_HOME, T_PRODUCT, T_CATEGORY = 'home', 'product', 'category'
 T_BLOG, T_INFO, T_UNKNOWN, T_BROKEN = 'blog', 'info', 'unknown', 'broken'
-PAGE_TYPE_ORDER = [T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_UNKNOWN, T_BROKEN]
+T_ARCHIVE = 'archive'
+PAGE_TYPE_ORDER = [T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_ARCHIVE,
+                   T_UNKNOWN, T_BROKEN]
 
 PAGE_TYPE_LABEL = {
     'ar': {T_HOME: 'صفحة رئيسية', T_PRODUCT: 'صفحة منتج', T_CATEGORY: 'صفحة تصنيف',
-           T_BLOG: 'صفحة مدونة', T_INFO: 'صفحة تعريفية', T_UNKNOWN: 'غير مصنفة',
-           T_BROKEN: 'صفحة غير متاحة'},
+           T_BLOG: 'صفحة مدونة', T_INFO: 'صفحة تعريفية', T_ARCHIVE: 'صفحة أرشيف',
+           T_UNKNOWN: 'غير مصنفة', T_BROKEN: 'صفحة غير متاحة'},
     'en': {T_HOME: 'Homepage', T_PRODUCT: 'Product', T_CATEGORY: 'Category',
-           T_BLOG: 'Blog', T_INFO: 'Info / Policy', T_UNKNOWN: 'Unclassified',
-           T_BROKEN: 'Unreachable'},
+           T_BLOG: 'Blog', T_INFO: 'Info / Policy', T_ARCHIVE: 'Archive',
+           T_UNKNOWN: 'Unclassified', T_BROKEN: 'Unreachable'},
 }
 
 STATUS_LABEL = {
@@ -295,13 +297,28 @@ def clean_url(url):
     return url.split('#')[0].split('?')[0].rstrip('/')
 
 
+# معرّفات المنصات الثابتة: سلة تضع رقم المنتج في آخر مقطع، والاسم قد
+# يختلف بين خريطة الموقع والصفحة نفسها، فالمعرّف هو المرجع لا الاسم.
+PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product)-?(\d{4,})$', re.I)
+
+
 def url_key(url):
-    """مفتاح موحّد للمقارنة: يفك ترميز المسارات العربية حتى لا يُعدّ
-    /products/%D8%A8... مختلفاً عن /products/بوكس..."""
+    """مفتاح موحّد للمقارنة.
+
+    يفك ترميز المسارات العربية، ويعتمد المعرّف الرقمي حين يوجد: رابطا
+    /عبايات-مفتوحه/p163285128 و/عباية-مفتوحة/p163285128 صفحة واحدة.
+    """
     if not url:
         return ""
     p = urlparse(clean_url(url))
-    return f"{p.netloc.lower()}{unquote(p.path).rstrip('/')}"
+    path = unquote(p.path).rstrip('/')
+    host = p.netloc.lower()
+    segs = [x for x in path.split('/') if x]
+    if segs:
+        mo = PLATFORM_ID_RE.match(segs[-1])
+        if mo:
+            return f"{host}/#{mo.group(1).lower()}{mo.group(2)}"
+    return f"{host}{path}"
 
 
 def make_soup(markup):
@@ -615,6 +632,21 @@ def detect_page_type(url, base_url, soup=None):
     # السياسات قبل المدونة: بعض المتاجر تنشر السياسات تحت مسار /blogs/
     if any(segment_is_policy(seg) for seg in segments if seg not in BLOG_SEGMENTS):
         return T_INFO
+
+    # صفحات الأرشيف (وسم/كاتب/تاريخ): تعرض قوائم لا محتوى أصلياً
+    if segments:
+        last = segments[-1]
+        if re.match(r'^(tag|author|category|archive)-?\d*$', last) or \
+                re.match(r'^\d{4}$', last):
+            return T_ARCHIVE
+        # تصنيف داخل المدونة: /blog/عام/c-368175017
+        if re.match(r'^c-?\d{4,}$', last) and \
+                any(x in BLOG_SEGMENTS for x in segments[:-1]):
+            return T_ARCHIVE
+        if len(segments) >= 2 and any(
+                x in ('tag', 'tags', 'author', 'authors', 'archive', 'وسم', 'وسوم')
+                for x in segments[:-1]):
+            return T_ARCHIVE
 
     if 'article' in og_type or 'blog' in og_type:
         return T_BLOG
@@ -1258,6 +1290,7 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
     seen = {url_key(base_url)}
     frontier = [base_url]
     category_urls = []
+    listing_urls = []          # قوائم المدونة والأرشيف
     cat_products = {}
     platform = 'unknown'
     level = 0
@@ -1276,6 +1309,8 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
                 if res.get('platform_html') and platform == 'unknown':
                     platform = detect_platform(res['platform_html'],
                                                res.get('platform_headers'), base_url)
+                if row['نوع الصفحة'] in (T_BLOG, T_ARCHIVE):
+                    listing_urls.append(row.get('_raw_url', row['الرابط']))
                 if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
                     cu = row.get('_raw_url', row['الرابط'])
                     category_urls.append(cu)
@@ -1292,17 +1327,21 @@ def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_C
             progress_cb(len(pages), len(frontier), level)
     truncated = bool(frontier)   # بقيت روابط لم تُفحص
     meta = {'truncated': truncated, 'pending': len(frontier), 'levels': level,
-            'cat_products': cat_products}
+            'cat_products': cat_products, 'listing_urls': listing_urls}
     return pages, images, category_urls, seen, platform, meta
 
 
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
-                               max_depth=MAX_PAGINATION_DEPTH, cat_products=None):
+                               max_depth=MAX_PAGINATION_DEPTH, cat_products=None,
+                               listing_urls=None):
+    """يتابع ترقيم صفحات القوائم (أقسام ومدونة) لالتقاط ما لا يظهر في
+    الصفحة الأولى. القوائم التي تحمّل بالتمرير لا تستجيب للترقيم، وهذا
+    يظهر في فحص الثقة."""
     base_url = normalize_url(base_url)
     base_netloc = urlparse(base_url).netloc
     roots = list(dict.fromkeys(
-        list(category_urls) + [f"{base_url}/{r}" for r in
-                               ['products', 'collections/all', 'shop']]))
+        list(category_urls) + list(listing_urls or []) +
+        [f"{base_url}/{r}" for r in ['products', 'collections/all', 'shop', 'blog']]))
     new_urls, fetched = [], 0
     for idx, cat in enumerate(roots):
         seen_here = set()
@@ -1316,7 +1355,7 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
             for a in soup.find_all('a', href=True):
                 full = clean_url(urljoin(cat, a['href'].strip()))
                 if is_crawlable(full, base_netloc) and \
-                        detect_page_type(full, base_url, None) == T_PRODUCT:
+                        detect_page_type(full, base_url, None) in (T_PRODUCT, T_BLOG):
                     found.add(full)
             fresh = found - seen_here
             if not fresh:
@@ -1508,8 +1547,14 @@ def compute_summary(df, coverage=None, images_df=None):
         'categories': int((df['نوع الصفحة'] == T_CATEGORY).sum()),
         'info_pages': int((df['نوع الصفحة'] == T_INFO).sum()),
         'blog_pages': int((df['نوع الصفحة'] == T_BLOG).sum()),
+        'archive_pages': int((df['نوع الصفحة'] == T_ARCHIVE).sum()),
         'unclassified': int((df['نوع الصفحة'] == T_UNKNOWN).sum()),
-        'broken_pages': int((df['متاحة'] == False).sum()),  # noqa: E712
+        'broken_pages': int(((df['متاحة'] == False) &  # noqa: E712
+                             (~df['كود الاستجابة'].astype(str)
+                              .str.contains('فشل اتصال|خطأ فني', na=False))).sum()),
+        'unreachable_pages': int(((df['متاحة'] == False) &  # noqa: E712
+                                  (df['كود الاستجابة'].astype(str)
+                                   .str.contains('فشل اتصال|خطأ فني', na=False))).sum()),
         'bad_titles': int((~ok['حالة العنوان'].isin(['optimal'])).sum()),
         'critical_titles': int(ok['حالة العنوان'].isin(
             ['missing', 'very_short', 'long']).sum()),
@@ -1936,6 +1981,16 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
             add(CHECK_PASS, "البيانات المهيكلة",
                 f"{structured.get('jsonld_pages', 0)} صفحة منتج تحمل بيانات مهيكلة.")
 
+    # 6هـ) تعذّر الاتصال — مؤشر على ضغط الفحص لا على عطل في المتجر
+    unreach = summary.get('unreachable_pages', 0)
+    if unreach:
+        total_pages = max(len(df), 1)
+        lvl = CHECK_WARN if unreach / total_pages < 0.15 else CHECK_FAIL
+        add(lvl, "استقرار الاتصال",
+            f"{unreach} صفحة تعذّر الاتصال بها رغم إعادة المحاولة.",
+            "قد يحدّ المتجر من سرعة الزحف. خفّض «المسارات المتوازية» إلى 2 "
+            "وأعد الفحص للحصول على تغطية كاملة.")
+
     # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
     if n_ok:
         thin = summary.get('thin_pages', 0) / n_ok * 100
@@ -2017,13 +2072,27 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
             target, cat_urls, seen,
             (lambda i, tot, f, fe: say('pagination', i=i, total=tot,
                                        found=f, fetched=fe)),
-            cat_products=cat_products)
+            cat_products=cat_products,
+            listing_urls=crawl_meta.get('listing_urls'))
         if extra:
             say('extra_start', count=len(extra))
             p2, i2 = audit_urls(extra, target, 'ترقيم الأقسام', workers,
                                 None)
             pages += p2
             imgs += i2
+
+    # فشل الاتصال قد يكون ضغطاً مؤقتاً لا رابطاً معطلاً: نعيد المحاولة بتمهّل
+    retry = [r['_raw_url'] for r in pages
+             if not r['متاحة'] and 'فشل اتصال' in str(r['كود الاستجابة'])]
+    if retry:
+        say('retry_start', count=len(retry))
+        time.sleep(2)
+        fixed, fixed_imgs = audit_urls(retry[:120], target, 'إعادة محاولة', 2, None)
+        good = {r['_raw_url']: r for r in fixed if r['متاحة']}
+        if good:
+            pages = [good.get(r['_raw_url'], r) for r in pages]
+            imgs += [im for im in fixed_imgs
+                     if im['رابط الصفحة'] in {g['الرابط'] for g in good.values()}]
 
     df = dedupe_pages(pd.DataFrame(pages))
     images_df = pd.DataFrame(imgs)
@@ -2331,6 +2400,10 @@ def build_diagnosis(score, stats, lang):
                           "لا يظهر في خريطة الموقع.")
         if stats.get('broken_pages'):
             points.append(f"{stats['broken_pages']} رابط معطل داخل المتجر يصل إليه الزائر.")
+        if stats.get('archive_pages', 0) > 20:
+            points.append(f"{stats['archive_pages']} صفحة أرشيف (وسوم وقوائم) تعرض "
+                          "محتوى مكرراً بعنوان واحد، وتستهلك ميزانية الزحف دون أن "
+                          "تجلب زيارات. يوصى بحصر الوسوم في المفيد منها.")
         if stats.get('thin_pages'):
             points.append(f"{stats['thin_pages']} صفحة بمحتوى نصي أقل من 50 كلمة.")
 
@@ -2417,6 +2490,10 @@ def build_diagnosis(score, stats, lang):
                       "from the sitemap.")
     if stats.get('broken_pages'):
         points.append(f"{stats['broken_pages']} broken links are reachable by visitors.")
+    if stats.get('archive_pages', 0) > 20:
+        points.append(f"{stats['archive_pages']} archive pages (tags and lists) show "
+                      "duplicated content under a single title and consume crawl "
+                      "budget without bringing traffic.")
     if stats.get('thin_pages'):
         points.append(f"{stats['thin_pages']} pages carry fewer than 50 words of text.")
 
@@ -2735,11 +2812,18 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         ('مقالات وصفحات المدونة' if rtl else 'Blog posts and articles',
          f"{stats.get('blog_pages', 0)} {T['u_article']}",
          'warn' if not stats.get('blog_pages') else 'neutral'),
+        ('صفحات أرشيف (وسوم وقوائم)' if rtl else 'Archive pages (tags and lists)',
+         f"{stats.get('archive_pages', 0)} {T['u_page']}",
+         'warn' if stats.get('archive_pages', 0) > 20 else 'neutral'),
         ('الصفحات التعريفية والسياسات' if rtl else 'Info and policy pages',
          f"{stats['info_pages']} {T['u_page']}", 'neutral'),
         ('روابط معطلة يصل إليها الزائر' if rtl else 'Broken links reachable by visitors',
          f"{stats.get('broken_pages', 0)} {T['u_link']}",
          'bad' if stats.get('broken_pages') else 'ok'),
+        ('صفحات تعذّر الاتصال بها أثناء الفحص' if rtl else
+         'Pages unreachable during the scan',
+         f"{stats.get('unreachable_pages', 0)} {T['u_page']}",
+         'warn' if stats.get('unreachable_pages') else 'ok'),
         ('صفحات بمحتوى نصي ضعيف' if rtl else 'Pages with thin text content',
          f"{stats.get('thin_pages', 0)} {T['u_page']}",
          'warn' if stats.get('thin_pages') else 'ok'),
@@ -2925,7 +3009,7 @@ ZIP_NAMES = {
     'ar': {T_PRODUCT: "1_المنتجات.csv", T_CATEGORY: "2_التصنيفات.csv",
            T_BLOG: "3_المدونة.csv", T_INFO: "4_الصفحات_التعريفية.csv",
            T_HOME: "5_الصفحة_الرئيسية.csv", T_UNKNOWN: "6_غير_مصنفة.csv",
-           T_BROKEN: "7_روابط_معطلة.csv", 'images': "8_تدقيق_الصور.csv",
+           T_BROKEN: "8_روابط_معطلة.csv", 'images': "8_تدقيق_الصور.csv",
            'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
            'orphan': "10_صفحات_يتيمة_في_الخريطة.csv",
            'redirect': "11_روابط_الخريطة_المحوّلة.csv",
@@ -2936,7 +3020,7 @@ ZIP_NAMES = {
     'en': {T_PRODUCT: "1_products.csv", T_CATEGORY: "2_categories.csv",
            T_BLOG: "3_blog.csv", T_INFO: "4_info_pages.csv",
            T_HOME: "5_homepage.csv", T_UNKNOWN: "6_unclassified.csv",
-           T_BROKEN: "7_broken_links.csv", 'images': "8_image_alt_audit.csv",
+           T_BROKEN: "8_broken_links.csv", 'images': "8_image_alt_audit.csv",
            'notidx': "9_products_missing_from_sitemap.csv",
            'orphan': "10_orphan_sitemap_pages.csv",
            'redirect': "11_redirecting_sitemap_urls.csv",
@@ -3058,6 +3142,10 @@ if nav == "🔍 فحص متجر جديد":
                 elif stage == 'extra_start':
                     head.write(f"**المرحلة 3** — فحص {kw.get('count')} منتج "
                                "من الصفحات التالية")
+                    bar.progress(0)
+                elif stage == 'retry_start':
+                    head.write(f"**إعادة محاولة** — {kw.get('count')} صفحة "
+                               "تعذّر الاتصال بها")
                     bar.progress(0)
                 elif stage == 'sitemap_start':
                     head.write("**المرحلة 4** — مقارنة تشخيصية مع خريطة الموقع")
