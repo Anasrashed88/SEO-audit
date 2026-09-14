@@ -704,14 +704,37 @@ def is_relevant_seo_image(img, src):
     return True
 
 
-def strip_boilerplate(soup):
-    targets = soup.select('header, nav, footer, aside, [class*="header"], '
-                          '[class*="footer"], [class*="navbar"], [class*="nav-menu"]')
+def strip_boilerplate(soup, markup=None):
+    """يحذف الترويسة والفوتر والقوائم فقط، لا الصفحة كلها.
+
+    بعض القوالب (سلة مثلاً) تضع صنفاً فيه كلمة header على وسم body نفسه،
+    فالمطابقة بالصنف وحدها تمسح المحتوى بالكامل. لذلك نستثني الأوسمة
+    الجذرية وأي عنصر يحوي المحتوى الرئيسي أو معظم نص الصفحة، ونعود
+    للصفحة كاملة إذا لم يتبقَّ منها شيء يُذكر.
+    """
+    body = soup.body or soup
+    total = len(body.get_text(' ', strip=True))
+
+    targets = soup.select(
+        'header, nav, footer, aside, [class*="header"], [class*="footer"], '
+        '[class*="navbar"], [class*="nav-menu"]')
     for tag in targets:
         try:
+            if tag.name in ('html', 'body', 'main'):
+                continue
+            if tag.find('main') is not None:
+                continue
+            if total and len(tag.get_text(' ', strip=True)) > total * 0.6:
+                continue
             tag.decompose()
         except Exception:
             pass
+
+    # شبكة أمان: لو ابتلع التنظيف الصفحة، نعيد الأصل كما هو
+    if markup and total > 200:
+        left = len((soup.body or soup).get_text(' ', strip=True))
+        if left < total * 0.15:
+            return make_soup(markup)
     return soup
 
 
@@ -800,7 +823,7 @@ def _fetch_and_audit(url, base_url, source):
     desc_len = text_length(meta_desc)
     desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
-    content_soup = strip_boilerplate(make_soup(res.text))
+    content_soup = strip_boilerplate(make_soup(res.text), res.text)
     total_img = 0
     page_images = []
     for img in content_soup.find_all('img'):
