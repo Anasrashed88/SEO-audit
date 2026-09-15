@@ -339,25 +339,6 @@ def safe_get(url, timeout=12, retries=2):
     return None
 
 
-def resolve_final_url(url, timeout=10):
-    """وجهة الرابط بعد اتباع كل عمليات التحويل، دون تحميل الصفحة كاملة."""
-    try:
-        res = requests.head(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
-        if res.status_code >= 400 or res.status_code == 405:
-            raise ValueError
-        return clean_url(res.url), res.status_code
-    except Exception:
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=timeout,
-                               allow_redirects=True, stream=True)
-            final = clean_url(res.url)
-            code = res.status_code
-            res.close()
-            return final, code
-        except Exception:
-            return None, None
-
-
 EXCLUDE_PATH_PARTS = [
     '/cart', '/checkout', '/login', '/signin', '/register', '/signup', '/account',
     '/my-account', '/wishlist', '/favorites', '/compare', '/search', '/orders',
@@ -1285,53 +1266,6 @@ def score_pages(df, images_df):
 # ==============================================================
 #  الزحف من الواجهة
 # ==============================================================
-def crawl_store(base_url, max_pages, workers, progress_cb=None, max_levels=MAX_CRAWL_LEVELS):
-    base_url = normalize_url(base_url)
-    pages, images = [], []
-    seen = {url_key(base_url)}
-    frontier = [base_url]
-    category_urls = []
-    listing_urls = []          # قوائم المدونة والأرشيف
-    cat_products = {}
-    platform = 'unknown'
-    level = 0
-
-    while frontier and len(pages) < max_pages and level < max_levels:
-        level += 1
-        room = max_pages - len(pages)
-        batch, frontier = frontier[:room], frontier[room:]
-        next_frontier = []
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            for res in ex.map(fetch_and_audit,
-                              [(u, base_url, 'الزحف من الواجهة') for u in batch]):
-                row = res['page_data']
-                pages.append(row)
-                images.extend(res['images_data'])
-                if res.get('platform_html') and platform == 'unknown':
-                    platform = detect_platform(res['platform_html'],
-                                               res.get('platform_headers'), base_url)
-                if row['نوع الصفحة'] in (T_BLOG, T_ARCHIVE):
-                    listing_urls.append(row.get('_raw_url', row['الرابط']))
-                if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
-                    cu = row.get('_raw_url', row['الرابط'])
-                    category_urls.append(cu)
-                    cat_products[cu] = set(res.get('product_links') or ())
-                # الوجهة النهائية بعد التحويل تُعدّ مزارة أيضاً
-                seen.add(url_key(row.get('_raw_url', row['الرابط'])))
-                for link in res.get('links', ()):
-                    k = url_key(link)
-                    if k not in seen:
-                        seen.add(k)
-                        next_frontier.append(link)
-        frontier = next_frontier + frontier
-        if progress_cb:
-            progress_cb(len(pages), len(frontier), level)
-    truncated = bool(frontier)   # بقيت روابط لم تُفحص
-    meta = {'truncated': truncated, 'pending': len(frontier), 'levels': level,
-            'cat_products': cat_products, 'listing_urls': listing_urls}
-    return pages, images, category_urls, seen, platform, meta
-
-
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
                                max_depth=MAX_PAGINATION_DEPTH, cat_products=None,
                                listing_urls=None):
@@ -1429,96 +1363,48 @@ def iter_locs(root):
 
 
 def collect_sitemap_urls(base_url, max_depth=3):
+    """يعيد (الروابط، تقرير القراءة). القراءة الناقصة تُعلَن صراحةً حتى
+    لا تُتَّهم خريطة المتجر بالنقص بسبب فشل اتصال عندنا."""
     base_url = normalize_url(base_url)
     base_netloc = urlparse(base_url).netloc
     urls, visited = set(), set()
+    report = {'files_ok': 0, 'files_failed': 0, 'failed_urls': []}
 
-    def walk(sm_url, depth):
+    def walk(sm_url, depth, declared=True):
+        """declared=False للمسارات المُخمّنة: غيابها طبيعي ولا يُعدّ فشلاً."""
         if depth > max_depth or sm_url in visited:
             return
         visited.add(sm_url)
-        root = fetch_xml_root(sm_url)
+        root = None
+        for attempt in range(3):
+            root = fetch_xml_root(sm_url)
+            if root is not None:
+                break
+            time.sleep(1.5 * (attempt + 1))
         if root is None:
+            if declared:
+                report['files_failed'] += 1
+                report['failed_urls'].append(sm_url)
             return
+        report['files_ok'] += 1
         for loc in iter_locs(root):
             low = loc.lower()
             if low.endswith('.xml') or low.endswith('.xml.gz'):
-                walk(loc, depth + 1)
+                walk(loc, depth + 1, declared=True)
             else:
                 u = clean_url(loc)
                 if u and urlparse(u).netloc == base_netloc:
                     urls.add(u)
 
-    for c in (discover_sitemaps_from_robots(base_url) +
-              [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
-               f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml"]):
-        walk(c, 0)
-    return urls
+    for c in discover_sitemaps_from_robots(base_url):
+        walk(c, 0, declared=True)
+    for c in [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
+              f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml"]:
+        walk(c, 0, declared=False)
+    report['partial'] = report['files_failed'] > 0
+    return urls, report
 
 
-def build_coverage_report(visible_df, sitemap_urls, base_url, workers=4, progress_cb=None):
-    """مقارنة بين ما يراه الزائر وما تعلنه خريطة الموقع.
-
-    أي رابط في الخريطة لا يطابق صفحة مزارة يُتحقق من وجهته أولاً: قد يكون
-    مجرد تحويل إلى صفحة مفحوصة (وهذا هدر لميزانية الزحف، لا صفحة يتيمة).
-    """
-    src_col = '_raw_url' if '_raw_url' in visible_df.columns else 'الرابط'
-    vis, vis_types = {}, {}
-    for _, r in visible_df[visible_df['متاحة'] == True].iterrows():  # noqa: E712
-        k = url_key(r[src_col])
-        vis.setdefault(k, r[src_col])
-        vis_types.setdefault(k, r['نوع الصفحة'])
-
-    sm, sm_types = {}, {}
-    for u in sitemap_urls:
-        k = url_key(u)
-        sm.setdefault(k, u)
-        sm_types.setdefault(k, detect_page_type(u, base_url, None))
-
-    vis_keys, sm_keys = set(vis), set(sm)
-    unmatched = sorted(sm_keys - vis_keys)[:MAX_REDIRECT_CHECKS]
-
-    redirects, orphans = [], []
-    if unmatched:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            finals = list(ex.map(lambda k: resolve_final_url(sm[k]), unmatched))
-        for k, (final, code) in zip(unmatched, finals):
-            row = {'الرابط': unquote(sm[k]), 'نوع الصفحة': sm_types.get(k, T_UNKNOWN)}
-            if final and url_key(final) in vis_keys:
-                row['الوجهة النهائية'] = unquote(final)
-                redirects.append(row)
-            else:
-                row['كود الاستجابة'] = str(code or '—')
-                orphans.append(row)
-        if progress_cb:
-            progress_cb(len(unmatched))
-
-    orphan_by_type = {}
-    for o in orphans:
-        orphan_by_type[o['نوع الصفحة']] = orphan_by_type.get(o['نوع الصفحة'], 0) + 1
-
-    vis_products = {k for k in vis_keys if vis_types.get(k) == T_PRODUCT}
-    sm_products = {k for k in sm_keys if sm_types.get(k) == T_PRODUCT}
-    matched_products = vis_products & sm_products
-
-    return {
-        'visible_count': len(vis_products),
-        'sitemap_count': len(sm_products),
-        'matched_count': len(matched_products),
-        'visible_not_in_sitemap': [
-            {'الرابط': unquote(vis[k]), 'نوع الصفحة': T_PRODUCT}
-            for k in sorted(vis_products - sm_products)],
-        'sitemap_not_visible': orphans,
-        'sitemap_redirects': redirects,
-        'orphan_by_type': orphan_by_type,
-        'indexed_pct': round(len(matched_products) / len(vis_products) * 100, 1)
-        if vis_products else 100.0,
-    }
-
-
-# ==============================================================
-#  تجميع النتائج
-# ==============================================================
 def dedupe_pages(df):
     if df.empty:
         return df
@@ -2004,11 +1890,18 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
 
     # 6و) خريطة الموقع مصدر القائمة — غيابها يعني فحصاً ناقصاً
     sm_total = summary.get('sitemap_products', 0)
+    coverage_obj = coverage if isinstance(coverage, dict) else {}
     if summary.get('coverage_enabled'):
         if sm_total == 0:
             add(CHECK_FAIL, "خريطة الموقع",
                 "لم يُعثر على خريطة موقع صالحة، فاعتمد الفحص على تتبع الروابط وحده.",
                 "قد تفوت منتجات تظهر بالتمرير. راجع عيّنة التحقق اليدوي.")
+        elif coverage_obj.get('partial_read'):
+            add(CHECK_FAIL, "قراءة خريطة الموقع",
+                f"تعذّرت قراءة {coverage_obj.get('files_failed', 0)} من ملفات خريطة "
+                "الموقع، فالقائمة التي اعتمدها الفحص ناقصة.",
+                "خفّض «المسارات المتوازية» إلى 2 وأعد الفحص. لا تعتمد أرقام "
+                "الخريطة في هذا التقرير.")
         elif summary.get('unlisted_count', 0) > sm_total * 0.3:
             add(CHECK_WARN, "خريطة الموقع",
                 f"{summary['unlisted_count']} صفحة معروضة غير مدرجة في الخريطة "
@@ -2084,7 +1977,7 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
     base_url = normalize_url(base_url)
     if progress:
         progress('sitemap_read')
-    sitemap_urls = collect_sitemap_urls(base_url)
+    sitemap_urls, sm_report = collect_sitemap_urls(base_url)
     sitemap_keys = {url_key(u) for u in sitemap_urls}
 
     queue = sorted({clean_url(u) for u in sitemap_urls} | {base_url})
@@ -2139,13 +2032,13 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     meta = {'truncated': truncated, 'pending': len(queue), 'rounds': rounds,
             'cat_products': cat_links, 'sitemap_count': len(sitemap_keys),
-            'sitemap_urls': sitemap_urls,
+            'sitemap_urls': sitemap_urls, 'sitemap_report': sm_report,
             'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages
                              if r['نوع الصفحة'] in (T_BLOG, T_ARCHIVE)]}
     return pages, images, meta, platform
 
 
-def build_sitemap_report(df, base_url):
+def build_sitemap_report(df, base_url, sm_report=None):
     """يصنّف علاقة كل صفحة بخريطة الموقع بعد فتحها فعلياً."""
     if df.empty or 'في الخريطة' not in df.columns:
         return None
@@ -2173,14 +2066,18 @@ def build_sitemap_report(df, base_url):
     prod_live = int((alive & (df['نوع الصفحة'] == T_PRODUCT)).sum())
     prod_unlisted = int((~in_map & alive &
                          (df['نوع الصفحة'] == T_PRODUCT)).sum())
+    partial = bool((sm_report or {}).get('partial'))
     return {
+        'partial_read': partial,
+        'files_failed': (sm_report or {}).get('files_failed', 0),
         'sitemap_total': int(in_map.sum()),
         'sitemap_live': live_in_map,
         'sitemap_dead': len(dead),
         'orphan_pages': orphan,
         'scroll_only_products': scroll_only,
         'dead_pages': dead,
-        'unlisted_pages': unlisted,
+        'unlisted_pages': [] if partial else unlisted,
+        'unlisted_suppressed': len(unlisted) if partial else 0,
         'products_live': prod_live,
         'products_unlisted': prod_unlisted,
         'indexed_pct': round((prod_live - prod_unlisted) / prod_live * 100, 1)
@@ -2214,7 +2111,10 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
         (lambda st, **k: say(st, **k)))
     cat_products = crawl_meta.setdefault('cat_products', {})
 
-    if do_pagination and cat_products:
+    sm_ok = (crawl_meta.get('sitemap_count', 0) > 0
+             and not (crawl_meta.get('sitemap_report') or {}).get('partial'))
+    if do_pagination and cat_products and not sm_ok:
+        # الترقيم لازم فقط حين لا تكفي الخريطة مصدراً للقائمة
         say('pagination_start')
         seen_keys = {url_key(r.get('_raw_url', r['الرابط'])) for r in pages}
         extra = harvest_paginated_products(
@@ -2269,7 +2169,8 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     df, dup_groups = detect_duplicate_content(df)
     df = score_pages(df, images_df)
 
-    coverage = build_sitemap_report(df, target) if do_sitemap_check else None
+    coverage = (build_sitemap_report(df, target, crawl_meta.get('sitemap_report'))
+                if do_sitemap_check else None)
 
     declared = {}
     for _, r in df.iterrows():
