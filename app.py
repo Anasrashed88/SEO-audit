@@ -1041,14 +1041,16 @@ URL_LABEL = {
            'u_wrongname': 'يشير لمنتج آخر',
            'u_underscore': 'شرطة سفلية بدل الواصلة', 'u_uppercase': 'حروف كبيرة',
            'u_long': 'طويل جداً', 'u_repeat': 'كلمة مكررة داخل الرابط',
-           'u_wordy': 'كلمات كثيرة', 'u_na': '—'},
+           'u_wordy': 'كلمات كثيرة', 'u_malformed': 'رابط معطوب فيه عنوان موقع',
+           'u_na': '—'},
     'en': {'u_ok': 'Sound', 'u_clone': 'Cloned product', 'u_generic': 'ID or code, no words',
            'u_wrongname': 'Points to a different product',
            'u_underscore': 'Underscores instead of hyphens', 'u_uppercase': 'Uppercase letters',
            'u_long': 'Too long', 'u_repeat': 'Repeated word in slug',
-           'u_wordy': 'Too many words', 'u_na': '—'},
+           'u_wordy': 'Too many words', 'u_malformed': 'Malformed: contains a URL',
+           'u_na': '—'},
 }
-URL_CREDIT = {'u_ok': 1.0, 'u_underscore': 0.95, 'u_uppercase': 0.95, 'u_repeat': 0.95,
+URL_CREDIT = {'u_malformed': 0.5, 'u_ok': 1.0, 'u_underscore': 0.95, 'u_uppercase': 0.95, 'u_repeat': 0.95,
               'u_wordy': 0.93, 'u_long': 0.90, 'u_generic': 0.80, 'u_wrongname': 0.65,
               'u_clone': 0.70, 'u_na': 1.0}
 URL_MAX_WORDS = 9
@@ -1139,6 +1141,10 @@ def analyze_url_quality(df, brand=''):
             parent = str(row['الرابط']).replace(slug, mo.group(1))
             if url_key(parent) in known:
                 return 'u_clone'
+
+        # 1ب) عنوان موقع مدسوس داخل المسار (لصق خاطئ في حقل الرابط)
+        if re.search(r'https?[:;]|://|www\.|\.com|\.net|\.store\b', low):
+            return 'u_malformed'
 
         # 2) رابط بلا كلمات وصفية
         if re.fullmatch(r'[\d\W_]+', slug) or \
@@ -1339,8 +1345,17 @@ def discover_sitemaps_from_robots(base_url):
     return found
 
 
-def fetch_xml_root(url):
-    res = safe_get(url, timeout=12, retries=1)
+LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
+
+
+def fetch_sitemap_locs(url, quick=False):
+    """يستخرج روابط خريطة الموقع بأقصى تسامح ممكن.
+
+    بعض المنصات تضيف ورقة أنماط أو مسافة قبل إعلان XML أو ترميزاً غير
+    معياري، فيفشل المحلل الصارم. عند فشله نستخرج وسوم loc بالتعبير
+    النمطي — الخريطة نص لا بنية معقدة.
+    """
+    res = safe_get(url, timeout=(8 if quick else 30), retries=(0 if quick else 2))
     if res is None or res.status_code != 200:
         return None
     content = res.content
@@ -1349,17 +1364,20 @@ def fetch_xml_root(url):
             content = gzip.decompress(content)
         except Exception:
             pass
+    text = content.decode('utf-8', 'ignore').lstrip('\ufeff \t\r\n')
+    if '<loc' not in text.lower() and '<sitemapindex' not in text.lower() \
+            and '<urlset' not in text.lower():
+        return None                     # ليست خريطة أصلاً
+    locs = [m.strip() for m in LOC_RE.findall(text) if m.strip()]
+    if locs:
+        return locs
     try:
-        return ET.fromstring(content)
+        root = ET.fromstring(text.encode('utf-8'))
+        return [el.text.strip() for el in root.iter()
+                if (el.tag.split('}')[-1] if '}' in el.tag else el.tag) == 'loc'
+                and el.text]
     except Exception:
         return None
-
-
-def iter_locs(root):
-    for el in root.iter():
-        tag = el.tag.split('}')[-1] if '}' in el.tag else el.tag
-        if tag == 'loc' and el.text:
-            yield el.text.strip()
 
 
 def collect_sitemap_urls(base_url, max_depth=3):
@@ -1375,19 +1393,22 @@ def collect_sitemap_urls(base_url, max_depth=3):
         if depth > max_depth or sm_url in visited:
             return
         visited.add(sm_url)
-        root = None
-        for attempt in range(3):
-            root = fetch_xml_root(sm_url)
-            if root is not None:
+        # إعادة المحاولة للملفات المُعلَنة فقط: غياب المسار المُخمّن طبيعي
+        tries = 3 if declared else 1
+        locs = None
+        for attempt in range(tries):
+            locs = fetch_sitemap_locs(sm_url, quick=not declared)
+            if locs is not None:
                 break
-            time.sleep(1.5 * (attempt + 1))
-        if root is None:
+            if attempt + 1 < tries:
+                time.sleep(1.5 * (attempt + 1))
+        if locs is None:
             if declared:
                 report['files_failed'] += 1
                 report['failed_urls'].append(sm_url)
             return
         report['files_ok'] += 1
-        for loc in iter_locs(root):
+        for loc in locs:
             low = loc.lower()
             if low.endswith('.xml') or low.endswith('.xml.gz'):
                 walk(loc, depth + 1, declared=True)
@@ -1399,7 +1420,10 @@ def collect_sitemap_urls(base_url, max_depth=3):
     for c in discover_sitemaps_from_robots(base_url):
         walk(c, 0, declared=True)
     for c in [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
-              f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml"]:
+              f"{base_url}/sitemap-index.xml", f"{base_url}/sitemap.xml.gz",
+              f"{base_url}/sitemap/sitemap.xml", f"{base_url}/sitemaps.xml",
+              f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml",
+              f"{base_url}/wp-sitemap.xml"]:
         walk(c, 0, declared=False)
     report['partial'] = report['files_failed'] > 0
     return urls, report
@@ -1470,6 +1494,8 @@ def compute_summary(df, coverage=None, images_df=None):
         if 'جودة الرابط' in ok.columns else 0,
         'url_style': int(ok['جودة الرابط'].isin(
             ['u_underscore', 'u_uppercase', 'u_long', 'u_repeat', 'u_wordy']).sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_malformed': int((ok['جودة الرابط'] == 'u_malformed').sum())
         if 'جودة الرابط' in ok.columns else 0,
         'url_generic': int((ok['جودة الرابط'] == 'u_generic').sum())
         if 'جودة الرابط' in ok.columns else 0,
@@ -1734,10 +1760,16 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
 
     # 3) وجود منتجات
     n_prod = summary.get('products', 0)
-    if n_ok >= 5 and n_prod == 0:
+    if n_ok >= 2 and n_prod == 0:
+        no_map = summary.get('sitemap_products', 0) == 0
+        why = ("المتجر يعرض منتجاته بـ JavaScript ولا توجد خريطة موقع، فلا مصدر "
+               "لقائمة المنتجات." if no_map else
+               "بنية روابط هذا المتجر غير معتادة.")
         add(CHECK_FAIL, "اكتشاف المنتجات",
-            "لم يُعثر على أي صفحة منتج رغم نجاح الزحف.",
-            "بنية روابط هذا المتجر غير معتادة — راجع تبويب الصفحات يدوياً.")
+            f"لم يُعثر على أي صفحة منتج. {why}",
+            "افتح الصفحة الرئيسية واضغط بزر الفأرة الأيمن ثم «عرض المصدر»: إن لم "
+            "تجد روابط المنتجات في الكود فالمتجر خارج نطاق الأداة حالياً. "
+            "الحل: تفعيل خريطة الموقع في إعدادات المتجر.")
     elif n_prod:
         add(CHECK_PASS, "اكتشاف المنتجات", f"{n_prod} صفحة منتج.")
 
@@ -2444,6 +2476,10 @@ def build_diagnosis(score, stats, lang):
         if stats.get('url_style'):
             points.append(f"{stats['url_style']} رابط بصياغة غير مثالية: شرطة سفلية "
                           "أو حروف كبيرة أو طول مفرط أو تكرار كلمة داخل الرابط.")
+        if stats.get('url_malformed'):
+            points.append(f"{stats['url_malformed']} رابط معطوب يحتوي عنوان موقع داخل "
+                          "مساره (لصق خاطئ في حقل الرابط)، فيظهر للزبون في نتائج البحث "
+                          "بشكل مشوّه ويضعف الثقة.")
         if stats.get('url_generic'):
             points.append(f"{stats['url_generic']} رابط مكوّن من أرقام أو رموز بلا "
                           "كلمات وصفية.")
@@ -2542,6 +2578,9 @@ def build_diagnosis(score, stats, lang):
     if stats.get('url_style'):
         points.append(f"{stats['url_style']} URLs have imperfect formatting: underscores, "
                       "uppercase letters, excessive length, or a repeated word.")
+    if stats.get('url_malformed'):
+        points.append(f"{stats['url_malformed']} URLs are malformed and contain a full "
+                      "web address inside the slug, showing distorted in search results.")
     if stats.get('url_generic'):
         points.append(f"{stats['url_generic']} URLs consist of numbers or codes with no "
                       "descriptive words.")
@@ -2956,6 +2995,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         ('روابط تحمل اسم منتج مختلف' if rtl else 'URLs naming a different product',
          f"{stats.get('url_wrongname', 0)} {T['u_link']}",
          'bad' if stats.get('url_wrongname') else 'ok'),
+        ('روابط معطوبة فيها عنوان موقع' if rtl else 'Malformed URLs containing an address',
+         f"{stats.get('url_malformed', 0)} {T['u_link']}",
+         'bad' if stats.get('url_malformed') else 'ok'),
         ('روابط بأرقام أو رموز بلا كلمات' if rtl else 'URLs with no descriptive words',
          f"{stats.get('url_generic', 0)} {T['u_link']}",
          'warn' if stats.get('url_generic') else 'ok'),
@@ -3392,14 +3434,16 @@ if nav == "🔍 فحص متجر جديد":
                 uc = ok['جودة الرابط'].value_counts()
                 items = [(UL[k], int(uc.get(k, 0))) for k in
                          ['u_ok', 'u_underscore', 'u_uppercase', 'u_repeat', 'u_wordy',
-                          'u_long', 'u_generic', 'u_wrongname', 'u_clone']
+                          'u_long', 'u_generic', 'u_malformed', 'u_wrongname',
+                          'u_clone']
                          if uc.get(k, 0)]
                 if len(items) > 1:
                     st.markdown(bar_chart("جودة روابط الصفحات", items, {
                         UL['u_ok']: COLOR['ok'], UL['u_underscore']: COLOR['warn'],
                         UL['u_uppercase']: COLOR['warn'], UL['u_repeat']: COLOR['warn'],
                         UL['u_wordy']: COLOR['warn'], UL['u_long']: COLOR['warn'],
-                        UL['u_generic']: COLOR['bad'], UL['u_wrongname']: COLOR['bad'],
+                        UL['u_generic']: COLOR['bad'], UL['u_malformed']: COLOR['bad'],
+                        UL['u_wrongname']: COLOR['bad'],
                         UL['u_clone']: COLOR['bad']}),
                         unsafe_allow_html=True)
             if summary.get('img_formats'):
