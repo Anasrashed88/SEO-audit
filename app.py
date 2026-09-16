@@ -9,7 +9,9 @@ import gzip
 import json
 import re
 import zipfile
+from functools import lru_cache
 import sqlite3
+import threading
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse, urljoin, unquote
@@ -149,6 +151,9 @@ COL_EN = {
     'الاسم المعلن': 'Declared Name', 'الاسم المعروض': 'Displayed Name',
     'صور مرصودة': 'Images Detected', 'القسم': 'Category',
     'في الخريطة': 'In Sitemap', 'مرتبط برابط': 'Internally Linked',
+    'الأولوية': 'Priority', 'ما يحتاج إصلاحاً': 'What Needs Fixing',
+    'عنوان الميتا الحالي': 'Current Meta Title',
+    'وصف الميتا الحالي': 'Current Meta Description', 'م': '#',
     'مرصود': 'Detected', 'ناقص': 'Missing', 'عدد معلن': 'Declared Count',
 }
 
@@ -280,6 +285,46 @@ def finding(text, level='warn'):
     return f'<div class="finding" style="border-right-color:{COLOR[level]}">{text}</div>'
 
 
+
+# ==============================================================
+#  جلسة اتصال مجمّعة
+#  إعادة استخدام الاتصال توفّر مصافحة TLS لكل طلب — أكبر مكسب سرعة
+#  على متجر حقيقي بمئات الصفحات.
+# ==============================================================
+_SESSION = None
+_SESSION_LOCK = threading.Lock()
+
+
+def get_session(pool_size=32):
+    global _SESSION
+    if _SESSION is None:
+        with _SESSION_LOCK:
+            if _SESSION is None:
+                sess = requests.Session()
+                sess.headers.update(HEADERS)
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0)
+                sess.mount('https://', adapter)
+                sess.mount('http://', adapter)
+                _SESSION = sess
+    return _SESSION
+
+
+# مقياس ضغط المتجر: يرتفع مع كل فشل ويُبطئ الفحص تلقائياً
+_THROTTLE = {'fails': 0, 'delay': 0.0}
+
+
+def note_failure():
+    _THROTTLE['fails'] += 1
+    if _THROTTLE['fails'] in (5, 15, 40):
+        _THROTTLE['delay'] = min(_THROTTLE['delay'] + 0.25, 1.0)
+
+
+def reset_throttle():
+    _THROTTLE['fails'] = 0
+    _THROTTLE['delay'] = 0.0
+
+
 # ==============================================================
 #  أدوات الروابط
 # ==============================================================
@@ -303,6 +348,7 @@ def clean_url(url):
 PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product)-?(\d{4,})$', re.I)
 
 
+@lru_cache(maxsize=100000)
 def url_key(url):
     """مفتاح موحّد للمقارنة.
 
@@ -326,10 +372,27 @@ def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
 
+_TL = threading.local()
+
+
+def _session():
+    """جلسة لكل خيط: إعادة استخدام الاتصال توفّر مصافحة TLS في كل طلب."""
+    sess = getattr(_TL, 'sess', None)
+    if sess is None:
+        sess = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=8, pool_maxsize=16, max_retries=0)
+        sess.mount('https://', adapter)
+        sess.mount('http://', adapter)
+        sess.headers.update(HEADERS)
+        _TL.sess = sess
+    return sess
+
+
 def safe_get(url, timeout=12, retries=2):
     for attempt in range(retries + 1):
         try:
-            res = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+            res = _session().get(url, timeout=timeout, allow_redirects=True)
             if res.status_code == 429:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -579,6 +642,11 @@ def _has_jsonld_type(soup, wanted):
             if any(str(x) in wanted for x in types if x):
                 return True
     return False
+
+
+@lru_cache(maxsize=60000)
+def _detect_type_by_url(url, base_url):
+    return detect_page_type(url, base_url, None)
 
 
 def detect_page_type(url, base_url, soup=None):
@@ -837,7 +905,8 @@ def _fetch_and_audit(url, base_url, source):
     desc_len = text_length(meta_desc)
     desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
-    content_soup = strip_boilerplate(make_soup(res.text), res.text)
+    # تُستخدم نفس الشجرة بعد استخراج الميتا والروابط، فلا نحلّل الصفحة مرتين
+    content_soup = strip_boilerplate(soup, res.text)
     total_img = 0
     page_images = []
     for img in content_soup.find_all('img'):
@@ -859,7 +928,7 @@ def _fetch_and_audit(url, base_url, source):
     prod_links = set()
     if page_type in (T_CATEGORY, T_HOME):
         for lk in links:
-            if detect_page_type(lk, base_url, None) == T_PRODUCT:
+            if _detect_type_by_url(lk, base_url) == T_PRODUCT:
                 prod_links.add(url_key(lk))
     declared_n = (extract_declared_count(soup)
                   if page_type in (T_CATEGORY, T_HOME) else None)
@@ -1296,7 +1365,7 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
             for a in soup.find_all('a', href=True):
                 full = clean_url(urljoin(cat, a['href'].strip()))
                 if is_crawlable(full, base_netloc) and \
-                        detect_page_type(full, base_url, None) in (T_PRODUCT, T_BLOG):
+                        _detect_type_by_url(full, base_url) in (T_PRODUCT, T_BLOG):
                     found.add(full)
             fresh = found - seen_here
             if not fresh:
@@ -1441,8 +1510,17 @@ def dedupe_pages(df):
     df = df.drop_duplicates(subset=['_key'])
     avail = df[df['متاحة'] == True]  # noqa: E712
     dup_keys = set(avail[avail.duplicated(subset=['_canon'], keep='first')]['_key'])
-    df = df[~df['_key'].isin(dup_keys)]
-    return df.drop(columns=['_key', '_canon']).reset_index(drop=True)
+    # قالب معطوب قد يجعل كل الصفحات تشير لكانونيكال واحد؛ طيّها يمحو المتجر.
+    # في هذه الحالة نُبقي الصفحات ونرفع العلم ليظهر كخلل سيو في التقرير.
+    canon_broken = len(avail) >= 10 and len(dup_keys) > len(avail) * 0.5
+    if canon_broken:
+        df.attrs['canon_broken'] = int(len(dup_keys))
+    else:
+        df = df[~df['_key'].isin(dup_keys)]
+    out = df.drop(columns=['_key', '_canon']).reset_index(drop=True)
+    if canon_broken:
+        out.attrs['canon_broken'] = int(len(dup_keys))
+    return out
 
 
 def compute_summary(df, coverage=None, images_df=None):
@@ -1502,6 +1580,7 @@ def compute_summary(df, coverage=None, images_df=None):
         'url_bad': int((~ok['جودة الرابط'].isin(['u_ok', 'u_na'])).sum())
         if 'جودة الرابط' in ok.columns else 0,
         'dup_content': int(ok['محتوى مكرر'].sum()) if 'محتوى مكرر' in ok.columns else 0,
+        'canon_broken': int(df.attrs.get('canon_broken', 0)),
         'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum()),
         'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum()),
         'thin_pages': int((ok['حالة المحتوى'] == 'thin').sum()),
@@ -1920,6 +1999,15 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
             "قد يحدّ المتجر من سرعة الزحف. خفّض «المسارات المتوازية» إلى 2 "
             "وأعد الفحص للحصول على تغطية كاملة.")
 
+    # 6ز) كانونيكال معطوب يشير لصفحة واحدة
+    if summary.get('canon_broken'):
+        add(CHECK_FAIL, "وسم الكانونيكال",
+            f"{summary['canon_broken']} صفحة تشير بوسم الكانونيكال إلى صفحة أخرى "
+            "واحدة، وهو خلل في قالب المتجر يجعل محركات البحث تتجاهل هذه الصفحات "
+            "كلها.",
+            "أبلغ التاجر فوراً: هذا أخطر خلل سيو ممكن، ويعالج بإصلاح وسم "
+            "الكانونيكال في القالب.")
+
     # 6و) خريطة الموقع مصدر القائمة — غيابها يعني فحصاً ناقصاً
     sm_total = summary.get('sitemap_products', 0)
     coverage_obj = coverage if isinstance(coverage, dict) else {}
@@ -2141,6 +2229,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
                 pass
 
     target = normalize_url(target)
+    reset_throttle()
 
     say('discover_start')
     pages, imgs, crawl_meta, platform = discover_and_audit(
@@ -2487,6 +2576,10 @@ def build_diagnosis(score, stats, lang):
             points.append(f"{stats['img_legacy']} صورة بصيغة قديمة ثقيلة بدل الصيغ "
                           "الحديثة الخفيفة، ما يزيد حجم الصفحة ويبطئ تحميلها "
                           "على الجوال.")
+        if stats.get('canon_broken'):
+            points.append(f"{stats['canon_broken']} صفحة تشير بوسم الكانونيكال إلى "
+                          "صفحة واحدة بدل نفسها، فتطلب من محركات البحث تجاهلها "
+                          "جميعاً. هذا أخطر خلل في التقرير ويعالج من القالب.")
         if stats.get('canon_missing'):
             points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
                           "ما يعرّض المتجر لتكرار المحتوى.")
@@ -2587,6 +2680,10 @@ def build_diagnosis(score, stats, lang):
     if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
         points.append(f"{stats['img_legacy']} images use legacy formats (JPEG/PNG) "
                       "instead of WebP, increasing page weight on mobile.")
+    if stats.get('canon_broken'):
+        points.append(f"{stats['canon_broken']} pages point their canonical tag at a "
+                      "single other page, asking search engines to ignore them all. "
+                      "This is the most severe issue in this report.")
     if stats.get('canon_missing'):
         points.append(f"{stats['canon_missing']} pages have no canonical tag, exposing "
                       "the store to duplicate content.")
@@ -3118,6 +3215,283 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     return bytes(pdf.output())
 
 
+
+# ==============================================================
+#  التسعير والفاتورة
+#  أسعار السوق السعودي لخدمة إعادة تهيئة المتجر لمحركات البحث.
+#  الأسعار قابلة للتعديل من الواجهة قبل إصدار الفاتورة.
+# ==============================================================
+DEFAULT_PRICES = {
+    'meta_title': 12.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
+    'meta_desc': 10.0,    # وصف الميتا لكل صفحة
+    'image_alt': 3.0,     # النص البديل لكل صورة
+}
+PAYMENT = {
+    'iban': 'SA87 1000 0026 5571 0000 0103',
+    'stc': '+966 55 354 1890',
+}
+# خصم الكمية: المتاجر الكبيرة تحصل على سعر أفضل
+VOLUME_TIERS = [(1000, 0.20), (500, 0.15), (200, 0.10), (0, 0.0)]
+
+
+def volume_discount(units):
+    for threshold, rate in VOLUME_TIERS:
+        if units >= threshold:
+            return rate
+    return 0.0
+
+
+def build_quote(summary, prices=None, discount_override=None):
+    """بنود الفاتورة: ما يحتاج إصلاحاً فعلياً فقط، لا كل صفحات المتجر."""
+    pr = dict(DEFAULT_PRICES)
+    pr.update(prices or {})
+
+    titles = int(summary.get('bad_titles', 0))
+    descs = int(summary.get('bad_descs', 0))
+    alts = int(summary.get('missing_alts', 0)) + int(summary.get('weak_alts', 0))
+
+    items = []
+    if titles:
+        items.append({'key': 'meta_title', 'qty': titles, 'unit': pr['meta_title']})
+    if descs:
+        items.append({'key': 'meta_desc', 'qty': descs, 'unit': pr['meta_desc']})
+    if alts:
+        items.append({'key': 'image_alt', 'qty': alts, 'unit': pr['image_alt']})
+    for it in items:
+        it['total'] = round(it['qty'] * it['unit'], 2)
+
+    subtotal = round(sum(i['total'] for i in items), 2)
+    units = titles + descs + alts
+    rate = volume_discount(units) if discount_override is None else discount_override
+    disc = round(subtotal * rate, 2)
+    return {'items': items, 'subtotal': subtotal, 'units': units,
+            'discount_rate': rate, 'discount': disc,
+            'total': round(subtotal - disc, 2), 'prices': pr}
+
+
+INVOICE_TXT = {
+    'ar': {
+        'title': 'عرض سعر', 'sub': 'إعادة تهيئة المتجر لمحركات البحث',
+        'to': 'العميل', 'date': 'التاريخ', 'no': 'رقم العرض',
+        'valid': 'العرض ساري لمدة 14 يوماً من تاريخه',
+        'h_item': 'الخدمة', 'h_qty': 'الكمية', 'h_unit': 'سعر الوحدة',
+        'h_total': 'الإجمالي', 'currency': 'ريال',
+        'meta_title': 'كتابة عناوين الميتا وروابط الصفحات',
+        'meta_title_d': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، '
+                        'مع ضبط الرابط ليكون وصفياً ومطابقاً للمنتج',
+        'meta_desc': 'كتابة أوصاف الميتا',
+        'meta_desc_d': 'وصف تسويقي لكل صفحة ضمن الطول المثالي يرفع نسبة النقر '
+                       'من نتائج البحث',
+        'image_alt': 'كتابة النصوص البديلة للصور',
+        'image_alt_d': 'وصف دقيق لكل صورة يُظهرها في بحث صور جوجل',
+        'unit_page': 'صفحة', 'unit_img': 'صورة',
+        'subtotal': 'المجموع', 'discount': 'خصم الكمية', 'total': 'الإجمالي المستحق',
+        'novat': 'الأسعار غير شاملة ضريبة القيمة المضافة',
+        'pay': 'بيانات الدفع', 'iban': 'الآيبان', 'stc': 'STC Bank',
+        'note': 'يبدأ التنفيذ بعد تأكيد الطلب، ويُسلَّم العمل على دفعات '
+                'للمراجعة والاعتماد.',
+        'scope': 'الكميات أعلاه مبنية على نتائج الفحص الفني للمتجر، '
+                 'وتشمل ما يحتاج إصلاحاً أو تحسيناً فقط.',
+    },
+    'en': {
+        'title': 'Quotation', 'sub': 'Search engine optimisation for your store',
+        'to': 'Client', 'date': 'Date', 'no': 'Quote No.',
+        'valid': 'This quotation is valid for 14 days',
+        'h_item': 'Service', 'h_qty': 'Qty', 'h_unit': 'Unit price',
+        'h_total': 'Amount', 'currency': 'SAR',
+        'meta_title': 'Meta titles and page URLs',
+        'meta_title_d': 'A search-optimised title for each page within the ideal '
+                        'length, with the URL corrected to match the product',
+        'meta_desc': 'Meta descriptions',
+        'meta_desc_d': 'A marketing description per page within the ideal length '
+                       'to raise click-through from search results',
+        'image_alt': 'Image alt texts',
+        'image_alt_d': 'A precise description per image so it appears in '
+                       'Google Image search',
+        'unit_page': 'pages', 'unit_img': 'images',
+        'subtotal': 'Subtotal', 'discount': 'Volume discount', 'total': 'Total due',
+        'novat': 'Prices exclude VAT',
+        'pay': 'Payment details', 'iban': 'IBAN', 'stc': 'STC Bank',
+        'note': 'Work begins upon confirmation and is delivered in batches '
+                'for review and approval.',
+        'scope': 'Quantities are based on the technical audit of your store and '
+                 'cover only what needs fixing or improving.',
+    },
+}
+
+
+def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
+    """عرض سعر بصفحة واحدة أنيقة، بنفس هوية التقرير."""
+    rtl = (lang == 'ar')
+    if rtl and not FONT_PATH.exists():
+        raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
+    T = INVOICE_TXT[lang]
+
+    def _latin(t):
+        t = str(t)
+        for a, b in [('—', '-'), ('–', '-'), ('·', '|'), ('…', '...')]:
+            t = t.replace(a, b)
+        return t.encode('latin-1', 'replace').decode('latin-1')
+
+    fmt = (lambda t: str(t)) if (rtl and HAS_SHAPING) else (shape_ar if rtl else _latin)
+    if not rtl:
+        fmt = _latin
+    FONT = AR_FONT_NAME if rtl else "Helvetica"
+    has_bold = bool(FONT_BOLD_PATH) if rtl else True
+    B = "B" if has_bold else ""
+    ALIGN = "R" if rtl else "L"
+    M, W = 18, 174
+    dom = urlparse(domain).netloc or domain
+
+    pdf = FPDF()
+    if rtl:
+        pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
+        if FONT_BOLD_PATH:
+            pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
+        if HAS_SHAPING:
+            pdf.set_text_shaping(True, direction="rtl")
+    pdf.set_auto_page_break(True, margin=20)
+    pdf.add_page()
+
+    if LOGO_PATH.exists():
+        try:
+            pdf.image(str(LOGO_PATH), x=(M if rtl else 210 - M - 34), y=14, h=12)
+        except Exception:
+            pass
+    pdf.set_y(16)
+    pdf.set_font(FONT, B, 20)
+    pdf.set_text_color(*C_INK)
+    pdf.cell(W, 9, fmt(T['title']), ln=True, align=ALIGN)
+    pdf.set_font(FONT, "", 10)
+    pdf.set_text_color(*C_MUTED)
+    pdf.cell(W, 6, fmt(T['sub']), ln=True, align=ALIGN)
+    pdf.ln(3)
+    pdf.set_draw_color(*C_LINE)
+    pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
+    pdf.ln(5)
+
+    ref = datetime.now().strftime('%Y%m%d-') + f"{abs(hash(dom)) % 9000 + 1000}"
+    pdf.set_font(FONT, "", 10)
+    pdf.set_text_color(*C_INK)
+    for lbl, val in [(T['to'], store_name or dom), (T['no'], ref),
+                     (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
+        pdf.set_x(M)
+        pdf.cell(W, 6.5, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
+    pdf.ln(4)
+
+    wq, wu, wt = 24, 34, 34
+    wn = W - wq - wu - wt
+    pdf.set_fill_color(*C_INK)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font(FONT, B, 9.5)
+    pdf.set_x(M)
+    heads = [(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq), (T['h_item'], wn)] \
+        if rtl else [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu),
+                     (T['h_total'], wt)]
+    for i, (h, w) in enumerate(heads):
+        pdf.cell(w, 8, fmt(h), 0, 1 if i == len(heads) - 1 else 0,
+                 'C' if w != wn else ('R' if rtl else 'L'), fill=True)
+
+    for idx, it in enumerate(quote['items']):
+        name = T[it['key']]
+        desc = T[it['key'] + '_d']
+        unit_lbl = T['unit_img'] if it['key'] == 'image_alt' else T['unit_page']
+        lines = []
+        pdf.set_font(FONT, "", 8.5)
+        cur = ""
+        for word in desc.split():
+            trial = (cur + " " + word).strip()
+            if pdf.get_string_width(fmt(trial)) <= wn - 4:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        h = 7 + len(lines) * 4.4 + 2
+        y = pdf.get_y()
+        if idx % 2 == 0:
+            pdf.set_fill_color(*C_BG)
+            pdf.rect(M, y, W, h, 'F')
+        cells = [(f"{it['total']:,.0f}", wt), (f"{it['unit']:,.0f}", wu),
+                 (f"{it['qty']} {unit_lbl}", wq)] if rtl else []
+        pdf.set_font(FONT, B, 10)
+        pdf.set_text_color(*C_INK)
+        if rtl:
+            pdf.set_xy(M, y + 1.5)
+            for v, w in cells:
+                pdf.cell(w, 6, fmt(v), 0, 0, 'C')
+            pdf.cell(wn, 6, fmt(name), 0, 1, 'R')
+        else:
+            pdf.set_xy(M, y + 1.5)
+            pdf.cell(wn, 6, fmt(name), 0, 0, 'L')
+            pdf.cell(wq, 6, fmt(f"{it['qty']} {unit_lbl}"), 0, 0, 'C')
+            pdf.cell(wu, 6, f"{it['unit']:,.0f}", 0, 0, 'C')
+            pdf.cell(wt, 6, f"{it['total']:,.0f}", 0, 1, 'C')
+        pdf.set_font(FONT, "", 8.5)
+        pdf.set_text_color(*C_MUTED)
+        yy = y + 7.5
+        for ln_ in lines:
+            pdf.set_xy(M + (0 if rtl else 2), yy)
+            pdf.cell(wn, 4.4, fmt(ln_), 0, 0, ALIGN)
+            yy += 4.4
+        pdf.set_y(y + h)
+        pdf.set_draw_color(*C_LINE)
+        pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
+
+    pdf.ln(4)
+    pdf.set_font(FONT, "", 10)
+    rows = [(T['subtotal'], f"{quote['subtotal']:,.0f} {T['currency']}", False)]
+    if quote['discount']:
+        rows.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%",
+                     f"-{quote['discount']:,.0f} {T['currency']}", False))
+    rows.append((T['total'], f"{quote['total']:,.0f} {T['currency']}", True))
+    for lbl, val, strong in rows:
+        pdf.set_font(FONT, B if strong else "", 12 if strong else 10)
+        pdf.set_text_color(*(C_INK if strong else C_MUTED))
+        pdf.set_x(M)
+        if rtl:
+            pdf.cell(W - 60, 8, fmt(val), 0, 0, 'L')
+            pdf.cell(60, 8, fmt(lbl), 0, 1, 'R')
+        else:
+            pdf.cell(60, 8, fmt(lbl), 0, 0, 'L')
+            pdf.cell(W - 60, 8, fmt(val), 0, 1, 'R')
+    pdf.set_font(FONT, "", 8.5)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_x(M)
+    pdf.cell(W, 5, fmt(T['novat']), ln=True, align=ALIGN)
+    pdf.ln(4)
+
+    y = pdf.get_y()
+    pdf.set_fill_color(*C_BG)
+    pdf.rect(M, y, W, 26, 'F')
+    pdf.set_font(FONT, B, 10)
+    pdf.set_text_color(*C_INK)
+    pdf.set_xy(M + 5, y + 3)
+    pdf.cell(W - 10, 6, fmt(T['pay']), ln=True, align=ALIGN)
+    pdf.set_font(FONT, "", 9.5)
+    pdf.set_text_color(*C_MUTED)
+    for lbl, val in [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])]:
+        pdf.set_x(M + 5)
+        pdf.cell(W - 10, 6, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
+    pdf.set_y(y + 30)
+
+    pdf.set_font(FONT, "", 8.5)
+    pdf.set_text_color(*C_MUTED)
+    for line in (T['scope'], T['note'], T['valid']):
+        pdf.set_x(M)
+        pdf.cell(W, 5, fmt(line), ln=True, align=ALIGN)
+
+    pdf.set_y(-22)
+    pdf.set_draw_color(*C_LINE)
+    pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_font(FONT, "", 9)
+    pdf.cell(0, 6, fmt(f"{PDF_TXT[lang]['owner']}  |  anasrashed.com  |  "
+                       "anas@anasrashed.com"), align="C")
+    return bytes(pdf.output())
+
+
 # ==============================================================
 #  حزمة الملفات
 # ==============================================================
@@ -3130,6 +3504,8 @@ ZIP_NAMES = {
            'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
            'orphan': "10_صفحات_يتيمة.csv",
            'scroll': "15_منتجات_بالتمرير_فقط.csv",
+           'fix': "00_صفحات_تحتاج_إصلاح.csv",
+           'noalt': "00_صور_بلا_وصف.csv",
            'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
            'imggap': "12_صفحات_صورها_ناقصة.csv",
            'namegap': "13_اسم_معلن_مختلف.csv",
@@ -3143,12 +3519,73 @@ ZIP_NAMES = {
            'notidx': "9_products_missing_from_sitemap.csv",
            'orphan': "10_orphan_pages.csv",
            'scroll': "15_scroll_only_products.csv",
+           'fix': "00_pages_to_fix.csv",
+           'noalt': "00_images_without_alt.csv",
            'redirect': "11_dead_urls_in_sitemap.csv",
            'imggap': "12_pages_with_missing_images.csv",
            'namegap': "13_declared_name_mismatch.csv",
            'catgap': "14_category_counter_comparison.csv",
            'excel': "full_audit_report.xlsx"},
 }
+
+
+
+def build_fix_lists(df, images_df, lang='ar'):
+    """ملفان عمليان للتنفيذ: ما يحتاج إصلاحاً فقط، مرتباً حسب الأولوية."""
+    L = STATUS_LABEL[lang]
+    QL = QUALITY_LABEL[lang]
+    UL = URL_LABEL[lang]
+    ok = df[df['متاحة'] == True].copy()  # noqa: E712
+    rows = []
+    for _, r in ok.iterrows():
+        need = []
+        if r['حالة العنوان'] in ('missing', 'very_short', 'long'):
+            need.append(('العنوان' if lang == 'ar' else 'Title') +
+                        f" ({L[r['حالة العنوان']]})")
+        elif r['حالة العنوان'] == 'acceptable':
+            need.append('تحسين العنوان' if lang == 'ar' else 'Improve title')
+        if r.get('جودة العنوان') not in ('q_ok', 'q_na', None):
+            need.append(QL.get(r.get('جودة العنوان'), ''))
+        if r['حالة الوصف'] in ('missing', 'very_short', 'long'):
+            need.append(('الوصف' if lang == 'ar' else 'Description') +
+                        f" ({L[r['حالة الوصف']]})")
+        elif r['حالة الوصف'] == 'acceptable':
+            need.append('تحسين الوصف' if lang == 'ar' else 'Improve description')
+        if r.get('جودة الرابط') not in ('u_ok', 'u_na', None):
+            need.append(UL.get(r.get('جودة الرابط'), ''))
+        if int(r.get('صور بدون Alt') or 0):
+            need.append((f"{int(r['صور بدون Alt'])} صورة بلا وصف" if lang == 'ar'
+                         else f"{int(r['صور بدون Alt'])} images without alt"))
+        if int(r.get('صور Alt ضعيف') or 0):
+            need.append((f"{int(r['صور Alt ضعيف'])} صورة بوصف ضعيف" if lang == 'ar'
+                         else f"{int(r['صور Alt ضعيف'])} images with weak alt"))
+        if r['حالة المحتوى'] == 'thin':
+            need.append('محتوى نصي ضعيف' if lang == 'ar' else 'Thin content')
+        if not need:
+            continue
+        rows.append({
+            'الأولوية': 0, 'نوع الصفحة': r['نوع الصفحة'], 'الرابط': r['الرابط'],
+            'درجة السيو': r['درجة السيو'],
+            'ما يحتاج إصلاحاً': ' · '.join([x for x in need if x]),
+            'عنوان الميتا الحالي': r['عنوان الميتا'], 'طول العنوان': r['طول العنوان'],
+            'وصف الميتا الحالي': r['وصف الميتا'], 'طول الوصف': r['طول الوصف'],
+        })
+    fix = pd.DataFrame(rows)
+    if not fix.empty:
+        fix['الأولوية'] = fix['درجة السيو'].rank(method='first').astype(int)
+        fix = fix.sort_values('درجة السيو').reset_index(drop=True)
+        fix['الأولوية'] = range(1, len(fix) + 1)
+        fix = localize_df(fix, lang)
+
+    noalt = pd.DataFrame()
+    uimg = unique_images(images_df)
+    if uimg is not None and not uimg.empty:
+        sub = uimg[uimg['حالة النص البديل'] == 'alt_missing'].copy()
+        if not sub.empty:
+            sub = sub[['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة', 'عدد الصفحات']]
+            sub.insert(0, 'م', range(1, len(sub) + 1))
+            noalt = localize_df(sub, lang)
+    return fix, noalt
 
 
 def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
@@ -3187,6 +3624,12 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
                                localize_df(pd.DataFrame(data), lang)
                                .to_csv(index=False, encoding='utf-8-sig'))
 
+        fix, noalt = build_fix_lists(df, images_df, lang)
+        if fix is not None and not fix.empty:
+            z.writestr(names['fix'], fix.to_csv(index=False, encoding='utf-8-sig'))
+        if noalt is not None and not noalt.empty:
+            z.writestr(names['noalt'], noalt.to_csv(index=False, encoding='utf-8-sig'))
+
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
             ldf.to_excel(w, index=False,
@@ -3194,6 +3637,12 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
             if limg is not None and not limg.empty:
                 limg.to_excel(w, index=False,
                               sheet_name='Images Audit' if lang == 'en' else 'فحص الصور')
+            if fix is not None and not fix.empty:
+                fix.to_excel(w, index=False,
+                             sheet_name='To Fix' if lang == 'en' else 'يحتاج إصلاح')
+            if noalt is not None and not noalt.empty:
+                noalt.to_excel(w, index=False,
+                               sheet_name='No Alt' if lang == 'en' else 'صور بلا وصف')
         z.writestr(names['excel'], xbuf.getvalue())
     return buf.getvalue()
 
@@ -3820,6 +4269,46 @@ if nav == "🔍 فحص متجر جديد":
             elif selfcheck and selfcheck['verdict'] == 'review':
                 st.warning("توجد تنبيهات على موثوقية النتائج. راجع تبويب «فحص الثقة» "
                            "قبل إرسال التقرير لعميل.")
+
+            st.markdown("---")
+            st.markdown("##### 💰 عرض السعر")
+            pc1, pc2, pc3 = st.columns(3)
+            with pc1:
+                p_title = st.number_input("سعر عنوان الميتا + الرابط (ريال)",
+                                          1.0, 200.0, DEFAULT_PRICES['meta_title'], 1.0)
+            with pc2:
+                p_desc = st.number_input("سعر وصف الميتا (ريال)",
+                                         1.0, 200.0, DEFAULT_PRICES['meta_desc'], 1.0)
+            with pc3:
+                p_alt = st.number_input("سعر وصف الصورة (ريال)",
+                                        0.5, 100.0, DEFAULT_PRICES['image_alt'], 0.5)
+            quote = build_quote(summary, {'meta_title': p_title, 'meta_desc': p_desc,
+                                          'image_alt': p_alt})
+            qc = st.columns(4)
+            qc[0].metric("عناوين وروابط", f"{summary.get('bad_titles', 0)}")
+            qc[1].metric("أوصاف ميتا", f"{summary.get('bad_descs', 0)}")
+            qc[2].metric("صور تحتاج وصفاً",
+                         f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
+            qc[3].metric("الإجمالي المستحق", f"{quote['total']:,.0f} ريال")
+            if quote['discount']:
+                st.caption(f"شمل خصم كمية {int(quote['discount_rate'] * 100)}% "
+                           f"({quote['discount']:,.0f} ريال) · الأسعار غير شاملة "
+                           "ضريبة القيمة المضافة")
+            else:
+                st.caption("الأسعار غير شاملة ضريبة القيمة المضافة")
+            try:
+                inv_bytes = generate_invoice_pdf(st.session_state.current_url,
+                                                 quote, lang)
+            except Exception as e:
+                inv_bytes = None
+                st.error(f"تعذّر توليد الفاتورة: {e}")
+            if inv_bytes:
+                st.download_button(
+                    "🧾 تحميل عرض السعر (PDF)" if lang == 'ar'
+                    else "🧾 Download quotation (PDF)",
+                    inv_bytes, f"Quote_{netloc}_{lang}.pdf", "application/pdf",
+                    use_container_width=True)
+            st.markdown("---")
 
             d1, d2 = st.columns(2)
             with d1:
