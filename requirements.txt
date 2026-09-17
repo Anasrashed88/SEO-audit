@@ -6,5 +6,6 @@ pandas
 openpyxl
 fpdf2
 uharfbuzz
+advertools
 arabic-reshaper
 python-bidi
