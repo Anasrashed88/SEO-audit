@@ -23,7 +23,6 @@ def pick_font():
         rp = BASE_DIR / reg
         if rp.exists() and rp.stat().st_size > 10000:
             bp = BASE_DIR / bold
-            # إذا لم يتوفر ملف العريض، نستخدم العادي كبديل لمنع انهيار FPDF
             return name, rp, (bp if bp.exists() and bp.stat().st_size > 10000 else rp)
     amiri = BASE_DIR / "Amiri-Regular.ttf"
     if amiri.exists():
@@ -41,11 +40,9 @@ except Exception:
 LOGO_PATH = BASE_DIR / "brand_logo.png"
 RIYAL_PATH = BASE_DIR / "Saudi_Riyal_Symbol-1.png"
 
-# حدود الطول المعيارية
 TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
 DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
 
-# الألوان الأصلية المحددة للتقرير
 C_INK = (15, 23, 42)
 C_MUTED = (100, 116, 139)
 C_LINE = (226, 232, 240)
@@ -373,7 +370,6 @@ def build_diagnosis(score, stats, lang):
             close = ("المستوى العام جيد، والبنود أعلاه تحسينات تكميلية يمكن تنفيذها ضمن جولة مراجعة واحدة.")
         return intro, points, close
 
-    # اللغة الإنجليزية
     if missing and imgs:
         points.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) carry no alt text at all.")
     if weak:
@@ -393,8 +389,40 @@ def build_diagnosis(score, stats, lang):
     return intro, points, close
 
 
-def generate_client_pdf(domain, score, stats, lang='ar'):
-    """تقرير عميل بتصميم فاخر أصلي: غلاف، جداول ملونة، وصناديق الأثر على المتجر."""
+def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
+    """تقرير عميل بتصميم فاخر أصلي يدعم استدعاءه بوجود coverage أو بدونه."""
+    # دمج بيانات coverage تلقائياً لتفادي أي خطأ بالمدخلات
+    if isinstance(coverage, str) and coverage in ('ar', 'en'):
+        lang = coverage
+        coverage = None
+
+    stats_copy = dict(stats)
+    if coverage:
+        stats_copy['coverage_enabled'] = True
+        stats_copy['sitemap_products'] = coverage.get('sitemap_count', stats_copy.get('sitemap_products', 0))
+        stats_copy['sitemap_live'] = coverage.get('sitemap_count', 0) - len(coverage.get('dead_pages', []))
+        stats_copy['dead_count'] = len(coverage.get('dead_pages', []))
+        stats_copy['hidden_count'] = len(coverage.get('orphan_pages', []))
+        stats_copy['unlisted_count'] = len(coverage.get('unlisted_pages', []))
+        stats_copy['scroll_only_count'] = len(coverage.get('scroll_only_products', []))
+        prod_count = stats_copy.get('products', 0)
+        unlisted_p = len([u for u in coverage.get('unlisted_pages', []) if '/product' in u or '/p/' in u])
+        if prod_count:
+            stats_copy['indexed_pct'] = round((prod_count - unlisted_p) / prod_count * 100, 1)
+        else:
+            stats_copy['indexed_pct'] = 100.0
+
+    # مواءمة مفاتيح المؤشرات مع تقرير الـ PDF الأصلي
+    if 'critical_titles' not in stats_copy:
+        stats_copy['critical_titles'] = stats_copy.get('missing_titles', 0)
+    if 'bad_titles' not in stats_copy:
+        stats_copy['bad_titles'] = stats_copy.get('missing_titles', 0) + stats_copy.get('duplicate_titles', 0) + stats_copy.get('title_mismatch', 0)
+    if 'critical_descs' not in stats_copy:
+        stats_copy['critical_descs'] = stats_copy.get('missing_descs', 0) + stats_copy.get('short_descs', 0)
+    if 'bad_descs' not in stats_copy:
+        stats_copy['bad_descs'] = stats_copy.get('missing_descs', 0) + stats_copy.get('short_descs', 0) + stats_copy.get('duplicate_descs', 0)
+
+    stats = stats_copy
     rtl = (lang == 'ar')
     if rtl and (not FONT_PATH or not FONT_PATH.exists()):
         raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
@@ -409,7 +437,6 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
             t = t.replace(a, b)
         return t.encode('latin-1', 'replace').decode('latin-1')
 
-    # استخدام التشكيل المباشر عند توفر uharfbuzz لمنع سقوط الحروف نهائياً
     use_shaping = rtl and HAS_SHAPING
     fmt = (lambda t: str(t)) if use_shaping else (shape_ar if rtl else _latin)
     if not rtl:
@@ -598,7 +625,6 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     pdf.cell(0, 7, fmt(T['subtitle']), ln=True, align="C")
     pdf.ln(6)
 
-    # بطاقة الدرجة
     y = pdf.get_y()
     pdf.set_fill_color(*C_BG)
     pdf.rect(M, y, W, 44, 'F')
@@ -619,7 +645,6 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     pdf.cell(W, 6, fmt(verdict_lbl), align="C")
     pdf.set_y(y + 52)
 
-    # بطاقات موجزة
     cards = [
         (str(stats['total_pages']), T['m_pages'], C_INK),
         (str(stats['products']), T['m_products'], C_INK),
@@ -810,7 +835,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         ])
         pdf.impact('sitemap')
 
-    # ======================= التشخيص =======================
+    # ======================= التشخيص وخطة العمل =======================
     n += 1
     pdf.add_page()
     pdf.section(n, 'diagnosis')
@@ -858,7 +883,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 
 
 def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
-    """عرض سعر بصفحة واحدة: الهوية والتواصل، والمبالغ برمز الريال على يسار السعر."""
+    """عرض سعر أصلي: الهوية وبيانات التواصل، مع رمز الريال على يسار السعر."""
     rtl = (lang == 'ar')
     if rtl and (not FONT_PATH or not FONT_PATH.exists()):
         raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
@@ -988,12 +1013,15 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
         pdf.cell(w, 8, fmt(h), 0, 1 if i == len(heads) - 1 else 0,
                  'C' if w != wn else ALIGN, fill=True)
 
-    for idx, it in enumerate(quote['items']):
-        name = T[it['key']]
-        unit_lbl = T['unit_img'] if it['key'] == 'image_alt' else T['unit_page']
+    for idx, it in enumerate(quote.get('items', [])):
+        k = it.get('key')
+        name = it.get('name') or (T.get(k) if k else 'خدمة')
+        desc_text = it.get('desc') or (T.get(k + '_d', '') if k else '')
+
+        unit_lbl = T['unit_img'] if k == 'image_alt' else T['unit_page']
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
-        for word in T[it['key'] + '_d'].split():
+        for word in desc_text.split():
             trial = (cur + " " + word).strip()
             if pdf.get_string_width(fmt(trial)) <= wn - 4:
                 cur = trial
