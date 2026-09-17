@@ -64,6 +64,7 @@ try:
 except Exception:
     HAS_SHAPING = False
 LOGO_PATH = BASE_DIR / "brand_logo.png"
+RIYAL_PATH = BASE_DIR / "Saudi_Riyal_Symbol-1.png"
 DB_FILE = str(BASE_DIR / "store_history.db")
 
 try:
@@ -1341,33 +1342,69 @@ def score_pages(df, images_df):
 # ==============================================================
 #  الزحف من الواجهة
 # ==============================================================
+PAGING_PATTERNS = ['?page={n}', '?p={n}', '/page/{n}', '?offset={o}']
+LISTING_ROOTS = ['products', 'latest-products', 'collections/all', 'shop', 'store',
+                 'blog', 'new-arrivals', 'best-selling', 'offers']
+
+
+def listing_product_links(html, base_url, page_url):
+    """روابط المنتجات من صفحة قائمة: من وسوم <a> ومن بيانات ItemList معاً."""
+    soup = make_soup(html)
+    netloc = urlparse(normalize_url(base_url)).netloc
+    out = set()
+    for a in soup.find_all('a', href=True):
+        full = clean_url(urljoin(page_url, a['href'].strip()))
+        if is_crawlable(full, netloc) and \
+                _detect_type_by_url(full, base_url) in (T_PRODUCT, T_BLOG):
+            out.add(full)
+    for node in iter_jsonld(soup):
+        for item in (node.get('itemListElement') or []):
+            if not isinstance(item, dict):
+                continue
+            tgt = None
+            if isinstance(item.get('item'), dict):
+                tgt = item['item'].get('url')
+            tgt = tgt or item.get('url')
+            if tgt:
+                full = clean_url(urljoin(page_url, str(tgt)))
+                if is_crawlable(full, netloc) and \
+                        _detect_type_by_url(full, base_url) in (T_PRODUCT, T_BLOG):
+                    out.add(full)
+    return out
+
+
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
                                max_depth=MAX_PAGINATION_DEPTH, cat_products=None,
                                listing_urls=None):
-    """يتابع ترقيم صفحات القوائم (أقسام ومدونة) لالتقاط ما لا يظهر في
-    الصفحة الأولى. القوائم التي تحمّل بالتمرير لا تستجيب للترقيم، وهذا
-    يظهر في فحص الثقة."""
+    """يتابع ترقيم كل القوائم بكل الصيغ الشائعة.
+
+    القالب يقرر شكل الترقيم (page أو p أو /page/N)، وبعض القوالب تعرض
+    المنتجات بالتمرير فلا تستجيب لأي صيغة — وهذا يظهر في فحص الثقة.
+    """
     base_url = normalize_url(base_url)
-    base_netloc = urlparse(base_url).netloc
     roots = list(dict.fromkeys(
         list(category_urls) + list(listing_urls or []) +
-        [f"{base_url}/{r}" for r in ['products', 'collections/all', 'shop', 'blog']]))
+        [f"{base_url}/{r}" for r in LISTING_ROOTS]))
     new_urls, fetched = [], 0
+
     for idx, cat in enumerate(roots):
+        pattern = None
         seen_here = set()
         for page in range(2, max_depth + 1):
-            res = safe_get(f"{cat}?page={page}", retries=1)
-            fetched += 1
-            if res is None or res.status_code != 200:
-                break
-            soup = make_soup(res.text)
-            found = set()
-            for a in soup.find_all('a', href=True):
-                full = clean_url(urljoin(cat, a['href'].strip()))
-                if is_crawlable(full, base_netloc) and \
-                        _detect_type_by_url(full, base_url) in (T_PRODUCT, T_BLOG):
-                    found.add(full)
-            fresh = found - seen_here
+            candidates = ([pattern] if pattern else PAGING_PATTERNS)
+            fresh = set()
+            for pat in candidates:
+                url = cat + pat.format(n=page, o=(page - 1) * 20)
+                res = safe_get(url, retries=0)
+                fetched += 1
+                if res is None or res.status_code != 200:
+                    continue
+                found = listing_product_links(res.text, base_url, cat)
+                f = found - seen_here
+                if f:
+                    fresh = f
+                    pattern = pat        # ثبّت الصيغة الناجحة لهذا القسم
+                    break
             if not fresh:
                 break
             seen_here |= fresh
@@ -1402,6 +1439,28 @@ def audit_urls(urls, base_url, source, workers, progress_bar=None):
 # ==============================================================
 #  خريطة الموقع — مقارنة تشخيصية
 # ==============================================================
+
+# ==============================================================
+#  مصادر الاكتشاف المستقلة عن القالب
+#  مسارات تفرضها المنصة نفسها (سلة وزد) ولا يملك القالب تعطيلها.
+# ==============================================================
+SITEMAP_CANDIDATES = [
+    'sitemap.xml', 'sitemap_index.xml', 'sitemap-index.xml', 'sitemap/sitemap.xml',
+    'sitemap/index.xml', 'sitemaps/sitemap.xml', 'sitemap.xml.gz',
+    'product-sitemap.xml', 'sitemap-products.xml',
+]
+SITEMAP_NUMBERED = ['sitemap_products_{}.xml', 'sitemap_categories_{}.xml',
+                    'sitemap_pages_{}.xml', 'sitemap_blog_{}.xml',
+                    'sitemap-products-{}.xml']
+# مسارات قوائم تعمل في كل متاجر سلة وزد مهما كان القالب
+PLATFORM_LISTINGS = [
+    'products', 'latest-products', 'offers', 'categories', 'brands',
+    'collections/all', 'shop', 'blog', 'testimonials',
+]
+# صيغ الترقيم المستخدمة في المنصتين
+PAGE_PARAMS = ['?page={}', '?p={}', '/page/{}']
+
+
 def discover_sitemaps_from_robots(base_url):
     found = []
     res = safe_get(f"{base_url}/robots.txt", timeout=10, retries=1)
@@ -1475,7 +1534,7 @@ def collect_sitemap_urls(base_url, max_depth=3):
             if declared:
                 report['files_failed'] += 1
                 report['failed_urls'].append(sm_url)
-            return
+            return False
         report['files_ok'] += 1
         for loc in locs:
             low = loc.lower()
@@ -1485,6 +1544,7 @@ def collect_sitemap_urls(base_url, max_depth=3):
                 u = clean_url(loc)
                 if u and urlparse(u).netloc == base_netloc:
                     urls.add(u)
+        return True
 
     for c in discover_sitemaps_from_robots(base_url):
         walk(c, 0, declared=True)
@@ -2008,6 +2068,13 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
             "أبلغ التاجر فوراً: هذا أخطر خلل سيو ممكن، ويعالج بإصلاح وسم "
             "الكانونيكال في القالب.")
 
+    # 6ح) مصادر الاكتشاف المستخدمة
+    if crawl_meta:
+        srcs = crawl_meta.get('source_counts') or {}
+        if srcs:
+            add(CHECK_PASS, "مصادر الاكتشاف",
+                "الصفحات جاءت من: " + "، ".join(f"{k} ({v})" for k, v in srcs.items()))
+
     # 6و) خريطة الموقع مصدر القائمة — غيابها يعني فحصاً ناقصاً
     sm_total = summary.get('sitemap_products', 0)
     coverage_obj = coverage if isinstance(coverage, dict) else {}
@@ -2105,7 +2172,10 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
     sitemap_urls, sm_report = collect_sitemap_urls(base_url)
     sitemap_keys = {url_key(u) for u in sitemap_urls}
 
-    queue = sorted({clean_url(u) for u in sitemap_urls} | {base_url})
+    # مسارات القوائم التي تفرضها المنصة تُضاف دائماً: لا يعطّلها أي قالب
+    platform_seeds = {f"{base_url}/{p}" for p in PLATFORM_LISTINGS}
+    queue = sorted({clean_url(u) for u in sitemap_urls} | {base_url}
+                   | platform_seeds)
     seen = {url_key(u) for u in queue}
     linked = set()              # مفاتيح ظهرت كرابط في أي صفحة
     cat_links = {}              # رابط القسم -> مجموعة روابط منتجاته
@@ -2155,7 +2225,10 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
         row['في الخريطة'] = k in sitemap_keys
         row['مرتبط برابط'] = k in linked
 
-    meta = {'truncated': truncated, 'pending': len(queue), 'rounds': rounds,
+    from collections import Counter
+    src_counts = dict(Counter(r.get('مصدر الاكتشاف', '—') for r in pages))
+    meta = {'source_counts': src_counts,
+            'truncated': truncated, 'pending': len(queue), 'rounds': rounds,
             'cat_products': cat_links, 'sitemap_count': len(sitemap_keys),
             'sitemap_urls': sitemap_urls, 'sitemap_report': sm_report,
             'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages
@@ -2237,14 +2310,15 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
         (lambda st, **k: say(st, **k)))
     cat_products = crawl_meta.setdefault('cat_products', {})
 
-    sm_ok = (crawl_meta.get('sitemap_count', 0) > 0
-             and not (crawl_meta.get('sitemap_report') or {}).get('partial'))
-    if do_pagination and cat_products and not sm_ok:
+    if do_pagination and cat_products:
         # الترقيم لازم فقط حين لا تكفي الخريطة مصدراً للقائمة
         say('pagination_start')
         seen_keys = {url_key(r.get('_raw_url', r['الرابط'])) for r in pages}
+        listing_roots = list(cat_products.keys()) + [
+            r.get('_raw_url', r['الرابط']) for r in pages
+            if r['نوع الصفحة'] in (T_CATEGORY, T_ARCHIVE, T_BLOG, T_HOME)]
         extra = harvest_paginated_products(
-            target, list(cat_products.keys()), seen_keys,
+            target, list(dict.fromkeys(listing_roots)), seen_keys,
             (lambda i, tot, f, fe: say('pagination', i=i, total=tot,
                                        found=f, fetched=fe)),
             cat_products=cat_products,
@@ -3222,7 +3296,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 #  الأسعار قابلة للتعديل من الواجهة قبل إصدار الفاتورة.
 # ==============================================================
 DEFAULT_PRICES = {
-    'meta_title': 12.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
+    'meta_title': 15.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
     'meta_desc': 10.0,    # وصف الميتا لكل صفحة
     'image_alt': 3.0,     # النص البديل لكل صورة
 }
@@ -3241,7 +3315,7 @@ def volume_discount(units):
     return 0.0
 
 
-def build_quote(summary, prices=None, discount_override=None):
+def build_quote(summary, prices=None, discount_rate=0.0):
     """بنود الفاتورة: ما يحتاج إصلاحاً فعلياً فقط، لا كل صفحات المتجر."""
     pr = dict(DEFAULT_PRICES)
     pr.update(prices or {})
@@ -3262,7 +3336,7 @@ def build_quote(summary, prices=None, discount_override=None):
 
     subtotal = round(sum(i['total'] for i in items), 2)
     units = titles + descs + alts
-    rate = volume_discount(units) if discount_override is None else discount_override
+    rate = max(0.0, min(float(discount_rate or 0.0), 0.9))
     disc = round(subtotal * rate, 2)
     return {'items': items, 'subtotal': subtotal, 'units': units,
             'discount_rate': rate, 'discount': disc,
@@ -3288,10 +3362,8 @@ INVOICE_TXT = {
         'subtotal': 'المجموع', 'discount': 'خصم الكمية', 'total': 'الإجمالي المستحق',
         'novat': 'الأسعار غير شاملة ضريبة القيمة المضافة',
         'pay': 'بيانات الدفع', 'iban': 'الآيبان', 'stc': 'STC Bank',
-        'note': 'يبدأ التنفيذ بعد تأكيد الطلب، ويُسلَّم العمل على دفعات '
-                'للمراجعة والاعتماد.',
-        'scope': 'الكميات أعلاه مبنية على نتائج الفحص الفني للمتجر، '
-                 'وتشمل ما يحتاج إصلاحاً أو تحسيناً فقط.',
+        'note': 'يبدأ التنفيذ بعد تأكيد الطلب.',
+        'scope': 'الكميات مبنية على نتائج الفحص الفني، وتشمل ما يحتاج إصلاحاً فقط.',
     },
     'en': {
         'title': 'Quotation', 'sub': 'Search engine optimisation for your store',
@@ -3312,16 +3384,15 @@ INVOICE_TXT = {
         'subtotal': 'Subtotal', 'discount': 'Volume discount', 'total': 'Total due',
         'novat': 'Prices exclude VAT',
         'pay': 'Payment details', 'iban': 'IBAN', 'stc': 'STC Bank',
-        'note': 'Work begins upon confirmation and is delivered in batches '
-                'for review and approval.',
-        'scope': 'Quantities are based on the technical audit of your store and '
-                 'cover only what needs fixing or improving.',
+        'note': 'Work begins upon confirmation.',
+        'scope': 'Quantities are based on the technical audit and cover only '
+                 'what needs fixing.',
     },
 }
 
 
 def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
-    """عرض سعر بصفحة واحدة أنيقة، بنفس هوية التقرير."""
+    """عرض سعر بصفحة واحدة: الهوية وبيانات التواصل أعلى، والمبالغ برمز الريال."""
     rtl = (lang == 'ar')
     if rtl and not FONT_PATH.exists():
         raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
@@ -3329,19 +3400,19 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
 
     def _latin(t):
         t = str(t)
-        for a, b in [('—', '-'), ('–', '-'), ('·', '|'), ('…', '...')]:
-            t = t.replace(a, b)
+        for a_, b_ in [('—', '-'), ('–', '-'), ('·', '|'), ('…', '...')]:
+            t = t.replace(a_, b_)
         return t.encode('latin-1', 'replace').decode('latin-1')
 
     fmt = (lambda t: str(t)) if (rtl and HAS_SHAPING) else (shape_ar if rtl else _latin)
     if not rtl:
         fmt = _latin
     FONT = AR_FONT_NAME if rtl else "Helvetica"
-    has_bold = bool(FONT_BOLD_PATH) if rtl else True
-    B = "B" if has_bold else ""
+    B = "B" if (FONT_BOLD_PATH if rtl else True) else ""
     ALIGN = "R" if rtl else "L"
     M, W = 18, 174
     dom = urlparse(domain).netloc or domain
+    riyal = RIYAL_PATH.exists()
 
     pdf = FPDF()
     if rtl:
@@ -3350,22 +3421,58 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
             pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
         if HAS_SHAPING:
             pdf.set_text_shaping(True, direction="rtl")
-    pdf.set_auto_page_break(True, margin=20)
+    pdf.set_auto_page_break(True, margin=18)
     pdf.add_page()
 
+    def money(value, x, w, y, size=10, bold=False, color=C_MUTED, center=True):
+        """يكتب المبلغ ثم رمز الريال بجانبه بحجم متناسب مع الخط."""
+        txt = f"{value:,.0f}"
+        pdf.set_font(FONT, B if bold else "", size)
+        pdf.set_text_color(*color)
+        sym_h = size * 0.30
+        sym_w = sym_h * 0.92
+        gap = 1.2
+        tw = pdf.get_string_width(txt)
+        total = tw + (sym_w + gap if riyal else
+                      pdf.get_string_width(" " + T['currency']))
+        start = x + (w - total) / 2 if center else x
+        pdf.set_xy(start, y)
+        pdf.cell(tw, size * 0.5, txt, 0, 0, 'L')
+        if riyal:
+            try:
+                pdf.image(str(RIYAL_PATH), x=start + tw + gap,
+                          y=y + (size * 0.5 - sym_h) / 2 + 0.2, h=sym_h)
+            except Exception:
+                pass
+        else:
+            pdf.set_xy(start + tw, y)
+            pdf.cell(total - tw, size * 0.5, fmt(T['currency']), 0, 0, 'L')
+
+    # ---------- الترويسة: الشعار وتحته الرابط والبريد ----------
+    head_y = 14
     if LOGO_PATH.exists():
         try:
-            pdf.image(str(LOGO_PATH), x=(M if rtl else 210 - M - 34), y=14, h=12)
+            pdf.image(str(LOGO_PATH), x=(M if rtl else 210 - M - 34), y=head_y, h=12)
         except Exception:
             pass
-    pdf.set_y(16)
+    pdf.set_font(FONT, "", 8.5)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_xy(M if rtl else 210 - M - 60, head_y + 14)
+    pdf.cell(60, 4.5, "anasrashed.com", 0, 2, "L" if rtl else "R")
+    pdf.cell(60, 4.5, "anas@anasrashed.com", 0, 0, "L" if rtl else "R")
+
+    # العنوان في الجهة المقابلة للشعار حتى لا يتداخلا
+    tx = (M + 70) if rtl else M
+    tw = W - 70
+    pdf.set_xy(tx, head_y + 1)
     pdf.set_font(FONT, B, 20)
     pdf.set_text_color(*C_INK)
-    pdf.cell(W, 9, fmt(T['title']), ln=True, align=ALIGN)
+    pdf.cell(tw, 9, fmt(T['title']), 0, 2, ALIGN)
     pdf.set_font(FONT, "", 10)
     pdf.set_text_color(*C_MUTED)
-    pdf.cell(W, 6, fmt(T['sub']), ln=True, align=ALIGN)
-    pdf.ln(3)
+    pdf.cell(tw, 6, fmt(T['sub']), 0, 0, ALIGN)
+
+    pdf.set_y(head_y + 24)
     pdf.set_draw_color(*C_LINE)
     pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
     pdf.ln(5)
@@ -3376,30 +3483,30 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     for lbl, val in [(T['to'], store_name or dom), (T['no'], ref),
                      (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
         pdf.set_x(M)
-        pdf.cell(W, 6.5, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
+        pdf.cell(W, 6.2, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
     pdf.ln(4)
 
-    wq, wu, wt = 24, 34, 34
+    # ---------- جدول البنود ----------
+    wq, wu, wt = 24, 32, 32
     wn = W - wq - wu - wt
     pdf.set_fill_color(*C_INK)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font(FONT, B, 9.5)
     pdf.set_x(M)
-    heads = [(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq), (T['h_item'], wn)] \
-        if rtl else [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu),
-                     (T['h_total'], wt)]
+    heads = ([(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq),
+              (T['h_item'], wn)] if rtl else
+             [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu),
+              (T['h_total'], wt)])
     for i, (h, w) in enumerate(heads):
         pdf.cell(w, 8, fmt(h), 0, 1 if i == len(heads) - 1 else 0,
-                 'C' if w != wn else ('R' if rtl else 'L'), fill=True)
+                 'C' if w != wn else ALIGN, fill=True)
 
     for idx, it in enumerate(quote['items']):
         name = T[it['key']]
-        desc = T[it['key'] + '_d']
         unit_lbl = T['unit_img'] if it['key'] == 'image_alt' else T['unit_page']
-        lines = []
         pdf.set_font(FONT, "", 8.5)
-        cur = ""
-        for word in desc.split():
+        lines, cur = [], ""
+        for word in T[it['key'] + '_d'].split():
             trial = (cur + " " + word).strip()
             if pdf.get_string_width(fmt(trial)) <= wn - 4:
                 cur = trial
@@ -3408,29 +3515,34 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
                 cur = word
         if cur:
             lines.append(cur)
-        h = 7 + len(lines) * 4.4 + 2
+        h = 7.5 + len(lines) * 4.4 + 2
         y = pdf.get_y()
         if idx % 2 == 0:
             pdf.set_fill_color(*C_BG)
             pdf.rect(M, y, W, h, 'F')
-        cells = [(f"{it['total']:,.0f}", wt), (f"{it['unit']:,.0f}", wu),
-                 (f"{it['qty']} {unit_lbl}", wq)] if rtl else []
         pdf.set_font(FONT, B, 10)
         pdf.set_text_color(*C_INK)
         if rtl:
-            pdf.set_xy(M, y + 1.5)
-            for v, w in cells:
-                pdf.cell(w, 6, fmt(v), 0, 0, 'C')
+            money(it['total'], M, wt, y + 2, 10, True, C_INK)
+            money(it['unit'], M + wt, wu, y + 2, 10, False, C_MUTED)
+            pdf.set_xy(M + wt + wu, y + 1.5)
+            pdf.set_font(FONT, "", 10)
+            pdf.set_text_color(*C_MUTED)
+            pdf.cell(wq, 6, fmt(f"{it['qty']} {unit_lbl}"), 0, 0, 'C')
+            pdf.set_font(FONT, B, 10)
+            pdf.set_text_color(*C_INK)
             pdf.cell(wn, 6, fmt(name), 0, 1, 'R')
         else:
             pdf.set_xy(M, y + 1.5)
             pdf.cell(wn, 6, fmt(name), 0, 0, 'L')
+            pdf.set_font(FONT, "", 10)
+            pdf.set_text_color(*C_MUTED)
             pdf.cell(wq, 6, fmt(f"{it['qty']} {unit_lbl}"), 0, 0, 'C')
-            pdf.cell(wu, 6, f"{it['unit']:,.0f}", 0, 0, 'C')
-            pdf.cell(wt, 6, f"{it['total']:,.0f}", 0, 1, 'C')
+            money(it['unit'], M + wn + wq, wu, y + 2, 10, False, C_MUTED)
+            money(it['total'], M + wn + wq + wu, wt, y + 2, 10, True, C_INK)
         pdf.set_font(FONT, "", 8.5)
         pdf.set_text_color(*C_MUTED)
-        yy = y + 7.5
+        yy = y + 8
         for ln_ in lines:
             pdf.set_xy(M + (0 if rtl else 2), yy)
             pdf.cell(wn, 4.4, fmt(ln_), 0, 0, ALIGN)
@@ -3439,32 +3551,40 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
         pdf.set_draw_color(*C_LINE)
         pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
 
+    # ---------- المجاميع ----------
     pdf.ln(4)
-    pdf.set_font(FONT, "", 10)
-    rows = [(T['subtotal'], f"{quote['subtotal']:,.0f} {T['currency']}", False)]
+    rows = [(T['subtotal'], quote['subtotal'], False)]
     if quote['discount']:
         rows.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%",
-                     f"-{quote['discount']:,.0f} {T['currency']}", False))
-    rows.append((T['total'], f"{quote['total']:,.0f} {T['currency']}", True))
+                     -quote['discount'], False))
+    rows.append((T['total'], quote['total'], True))
     for lbl, val, strong in rows:
+        y = pdf.get_y()
         pdf.set_font(FONT, B if strong else "", 12 if strong else 10)
         pdf.set_text_color(*(C_INK if strong else C_MUTED))
-        pdf.set_x(M)
         if rtl:
-            pdf.cell(W - 60, 8, fmt(val), 0, 0, 'L')
-            pdf.cell(60, 8, fmt(lbl), 0, 1, 'R')
+            pdf.set_xy(M + 60, y)
+            pdf.cell(W - 60, 8, "", 0, 0)
+            money(val, M, 70, y + 1.5, 12 if strong else 10, strong,
+                  C_INK if strong else C_MUTED, center=False)
+            pdf.set_xy(M + 90, y)
+            pdf.cell(W - 90, 8, fmt(lbl), 0, 1, 'R')
         else:
-            pdf.cell(60, 8, fmt(lbl), 0, 0, 'L')
-            pdf.cell(W - 60, 8, fmt(val), 0, 1, 'R')
+            pdf.set_xy(M, y)
+            pdf.cell(70, 8, fmt(lbl), 0, 0, 'L')
+            money(val, M + 80, 70, y + 1.5, 12 if strong else 10, strong,
+                  C_INK if strong else C_MUTED, center=False)
+            pdf.ln(8)
     pdf.set_font(FONT, "", 8.5)
     pdf.set_text_color(*C_MUTED)
     pdf.set_x(M)
     pdf.cell(W, 5, fmt(T['novat']), ln=True, align=ALIGN)
     pdf.ln(4)
 
+    # ---------- الدفع ----------
     y = pdf.get_y()
     pdf.set_fill_color(*C_BG)
-    pdf.rect(M, y, W, 26, 'F')
+    pdf.rect(M, y, W, 25, 'F')
     pdf.set_font(FONT, B, 10)
     pdf.set_text_color(*C_INK)
     pdf.set_xy(M + 5, y + 3)
@@ -3474,21 +3594,13 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     for lbl, val in [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])]:
         pdf.set_x(M + 5)
         pdf.cell(W - 10, 6, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
-    pdf.set_y(y + 30)
+    pdf.set_y(y + 29)
 
     pdf.set_font(FONT, "", 8.5)
     pdf.set_text_color(*C_MUTED)
     for line in (T['scope'], T['note'], T['valid']):
         pdf.set_x(M)
         pdf.cell(W, 5, fmt(line), ln=True, align=ALIGN)
-
-    pdf.set_y(-22)
-    pdf.set_draw_color(*C_LINE)
-    pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
-    pdf.ln(2)
-    pdf.set_font(FONT, "", 9)
-    pdf.cell(0, 6, fmt(f"{PDF_TXT[lang]['owner']}  |  anasrashed.com  |  "
-                       "anas@anasrashed.com"), align="C")
     return bytes(pdf.output())
 
 
@@ -3505,7 +3617,7 @@ ZIP_NAMES = {
            'orphan': "10_صفحات_يتيمة.csv",
            'scroll': "15_منتجات_بالتمرير_فقط.csv",
            'fix': "00_صفحات_تحتاج_إصلاح.csv",
-           'noalt': "00_صور_بلا_وصف.csv",
+           'noalt': "00_صور_تحتاج_وصفاً.csv",
            'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
            'imggap': "12_صفحات_صورها_ناقصة.csv",
            'namegap': "13_اسم_معلن_مختلف.csv",
@@ -3520,7 +3632,7 @@ ZIP_NAMES = {
            'orphan': "10_orphan_pages.csv",
            'scroll': "15_scroll_only_products.csv",
            'fix': "00_pages_to_fix.csv",
-           'noalt': "00_images_without_alt.csv",
+           'noalt': "00_images_needing_alt.csv",
            'redirect': "11_dead_urls_in_sitemap.csv",
            'imggap': "12_pages_with_missing_images.csv",
            'namegap': "13_declared_name_mismatch.csv",
@@ -3580,9 +3692,16 @@ def build_fix_lists(df, images_df, lang='ar'):
     noalt = pd.DataFrame()
     uimg = unique_images(images_df)
     if uimg is not None and not uimg.empty:
-        sub = uimg[uimg['حالة النص البديل'] == 'alt_missing'].copy()
+        need = ['alt_missing'] + list(ALT_WEAK_STATES)
+        sub = uimg[uimg['حالة النص البديل'].isin(need)].copy()
         if not sub.empty:
-            sub = sub[['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة', 'عدد الصفحات']]
+            order = {'alt_missing': 0, 'alt_generic': 1, 'alt_duplicate': 2,
+                     'alt_stuffed': 3, 'alt_long': 4}
+            sub['_o'] = sub['حالة النص البديل'].map(order).fillna(9)
+            sub = sub.sort_values(['_o', 'رابط الصفحة']).drop(columns=['_o'])
+            cols = ['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة',
+                    'النص البديل الحالي (Alt)', 'حالة النص البديل', 'عدد الصفحات']
+            sub = sub[[c for c in cols if c in sub.columns]]
             sub.insert(0, 'م', range(1, len(sub) + 1))
             noalt = localize_df(sub, lang)
     return fix, noalt
@@ -4282,17 +4401,25 @@ if nav == "🔍 فحص متجر جديد":
             with pc3:
                 p_alt = st.number_input("سعر وصف الصورة (ريال)",
                                         0.5, 100.0, DEFAULT_PRICES['image_alt'], 0.5)
-            quote = build_quote(summary, {'meta_title': p_title, 'meta_desc': p_desc,
-                                          'image_alt': p_alt})
+            dc1, dc2 = st.columns([1, 3])
+            with dc1:
+                use_disc = st.checkbox("إضافة خصم", value=False)
+            with dc2:
+                disc_pct = st.slider("نسبة الخصم %", 0, 50, 10,
+                                     disabled=not use_disc)
+            quote = build_quote(summary,
+                                {'meta_title': p_title, 'meta_desc': p_desc,
+                                 'image_alt': p_alt},
+                                discount_rate=(disc_pct / 100 if use_disc else 0.0))
             qc = st.columns(4)
             qc[0].metric("عناوين وروابط", f"{summary.get('bad_titles', 0)}")
             qc[1].metric("أوصاف ميتا", f"{summary.get('bad_descs', 0)}")
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
-            qc[3].metric("الإجمالي المستحق", f"{quote['total']:,.0f} ريال")
+            qc[3].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
             if quote['discount']:
-                st.caption(f"شمل خصم كمية {int(quote['discount_rate'] * 100)}% "
-                           f"({quote['discount']:,.0f} ريال) · الأسعار غير شاملة "
+                st.caption(f"شمل خصماً {int(quote['discount_rate'] * 100)}% "
+                           f"({quote['discount']:,.0f}) · الأسعار غير شاملة "
                            "ضريبة القيمة المضافة")
             else:
                 st.caption("الأسعار غير شاملة ضريبة القيمة المضافة")
