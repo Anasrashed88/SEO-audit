@@ -478,9 +478,27 @@ def fetch_sitemap_urls(base_url):
         parse_map(c)
 
     # 2. حلقة استكشاف خرائط سلة وزد المقسمة تلقائياً (_2.xml, _3.xml, _4.xml...)
-    prefixes = ['sitemap_products', 'sitemap-products', 'sitemap_categories', 'sitemap_pages']
+   # 2. حلقة استكشاف خرائط سلة وزد الحقيقية (sitemap-1.xml, sitemap-2.xml, sitemap_2.xml...)
+    prefixes = [
+        'sitemap-', 'sitemap_', 'sitemap_products_', 'sitemap-products-',
+        'sitemap_categories_', 'sitemap_pages_'
+    ]
     for pfx in prefixes:
-        idx = 2
+        idx = 1
+        consecutive_fails = 0
+        while idx <= 40:  # يدعم حتى 40 ملف خريطة متتالي
+            sm_numbered = f"{base_clean}/{pfx}{idx}.xml"
+            res = safe_get(sm_numbered, timeout=8, retries=0)
+            if not res or res.status_code != 200 or '<loc' not in res.text.lower():
+                consecutive_fails += 1
+                if consecutive_fails >= 2:
+                    break
+                idx += 1
+                continue
+
+            consecutive_fails = 0
+            parse_map(sm_numbered)
+            idx += 1
         consecutive_fails = 0
         while idx <= 40:  # يدعم حتى 4000 منتج مقسم في سلة
             sm_numbered = f"{base_clean}/{pfx}_{idx}.xml"
