@@ -126,6 +126,10 @@ if nav == "🔍 فحص المتجر":
         start_btn = st.button("بدء الفحص", type="primary", use_container_width=True)
 
     if start_btn and target_input:
+        # تفريغ أي جلسة فحص سابقة لمنع التداخل
+        for k in ['audit_df', 'images_df', 'summary', 'coverage', 'dup_titles', 'dup_descs']:
+            st.session_state[k] = None
+
         target_clean = normalize_url(target_input)
         st.session_state.current_url = target_clean
 
@@ -192,7 +196,7 @@ if nav == "🔍 فحص المتجر":
                 st.markdown(metric_card(v, l, c), unsafe_allow_html=True)
 
         st.write("")
-        tabs = st.tabs(["📊 الملخص والنتائج", "🏷️ العناوين و H1", "📝 أوصاف الميتا", "🖼️ تدقيق الصور", "🗺️ الخريطة والظهور", "📥 التصدير والتقارير"])
+        tabs = st.tabs(["📊 الملخص والنتائج", "🏷️ العناوين و H1", "📝 أوصاف الميتا", "🖼️ تدقيق الصور الفريدة", "🗺️ الخريطة والظهور", "📥 التصدير والتقارير"])
 
         with tabs[0]:
             c1, c2 = st.columns(2)
@@ -209,7 +213,7 @@ if nav == "🔍 فحص المتجر":
                     ("مكرر", int((imgs_df['حالة النص البديل'] == 'alt_duplicate').sum())),
                     ("غير وصفي", int((imgs_df['حالة النص البديل'] == 'alt_generic').sum())),
                 ] if imgs_df is not None and not imgs_df.empty else []
-                st.markdown(bar_chart("جودة نصوص الصور البديلة (Alt)", alt_items, {
+                st.markdown(bar_chart("جودة نصوص الصور الفريدة (Alt)", alt_items, {
                     "سليم": COLOR['ok'], "مفقود": COLOR['bad'], "مكرر": COLOR['warn'], "غير وصفي": COLOR['bad']
                 }), unsafe_allow_html=True)
 
@@ -247,6 +251,7 @@ if nav == "🔍 فحص المتجر":
                 v_imgs['نوع الصفحة'] = v_imgs['نوع الصفحة'].map(lambda x: PAGE_TYPE_LABEL['ar'].get(x, x))
                 v_imgs['حالة النص البديل'] = v_imgs['حالة النص البديل'].map(lambda x: STATUS_LABEL['ar'].get(x, x))
                 st.dataframe(v_imgs, use_container_width=True)
+                st.caption(f"تم حصر {len(v_imgs)} صورة محتوى فريدة (تم استبعاد الصور المكررة وأصول القوالب والشعارات).")
             else:
                 st.info("لم يتم العثور على صور محتوى مفحوصة.")
 
