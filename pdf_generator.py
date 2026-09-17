@@ -57,7 +57,7 @@ def setup_pdf_fonts(pdf, rtl):
         bold_path = str(FONT_BOLD_PATH) if (FONT_BOLD_PATH and FONT_BOLD_PATH.exists()) else str(FONT_PATH)
         pdf.add_font(font_family, "B", bold_path)
         has_bold = True
-        # إذا كانت مكتبة uharfbuzz متوفرة، نفعل التشكيل المباشر لمنع سقوط الحروف
+        # تفعيل التشكيل الأصلي الحديث عبر uharfbuzz
         if HAS_SHAPING:
             try:
                 pdf.set_text_shaping(True, direction="rtl")
@@ -65,12 +65,11 @@ def setup_pdf_fonts(pdf, rtl):
                 pass
     return font_family, has_font, has_bold
 
-# نصوص الشرح والأثر لتقرير العميل الأصلي
 IMPACT_TEXTS = {
-    'structure': 'هذه الأرقام هي ما تراه محركات البحث فعلياً عند زحفها للمتجر. أي رابط معطل يصل إليه الزائر يهدر جزءاً من ميزانية الزحف المخصصة للمتجر ويقلل فرص أرشفة صفحات المنتجات.',
-    'meta': 'العنوان القصير يضيع مساحة في نتائج البحث، والطويل يتم اقتطاعه. عنوان الميتا الذي لا يطابق H1 يربك الزائر ومحركات البحث ويرفع معدل الارتداد.',
-    'images': 'بحث صور جوجل مصدر زيارات بيعي مهم للمتاجر. الصورة بدون نص بديل لا تفهمها محركات البحث وتعتبرها غير موجودة في نتائج البحث الصوري.',
-    'sitemap': 'الصفحات المعروضة الغائبة عن الخريطة قد تتأخر فهرستها لشهور. والصفحات اليتيمة المدرجة بالخريطة بدون روابط داخلية تفقد قوة أصل المتجر.'
+    'structure': 'هذه الأرقام هي ما تراه محركات البحث فعلياً عند زحفها للمتجر. أي رابط معطل يصل إليه الزائر يهدر جزءاً من ميزانية الزحف المخصصة للمتجر ويقلل فرص أرشفة صفحات المنتجات المهمة.',
+    'meta': 'العنوان القصير يضيع مساحة مجانية في نتائج البحث، والطويل يتم اقتطاعه بثلاث نقاط. عنوان الميتا الذي لا يطابق H1 يربك الزبون وجوجل ويرفع معدل المغادرة الفورية.',
+    'images': 'بحث صور جوجل مصدر مبيعات مباشر في المتاجر. الصورة بدون نص بديل وصفي لا تفهمها محركات البحث وتعتبرها غير موجودة في نتائج البحث الصوري.',
+    'sitemap': 'الصفحات المعروضة الغائبة عن الخريطة قد تتأخر فهرستها لشهور طويلة. والصفحات اليتيمة المدرجة بالخريطة بدون روابط داخلية تفقد قوة أصل المتجر ولا تفيد السيو.'
 }
 
 def generate_client_pdf(domain, score, summary, coverage, lang='ar'):
@@ -80,7 +79,7 @@ def generate_client_pdf(domain, score, summary, coverage, lang='ar'):
     M, W = 18, 174
     verdict_rgb = C_BAD if score < 60 else (C_WARN if score < 80 else C_OK)
 
-    # دالة التنسيق الذكية: عند وجود uharfbuzz نمرر النص مباشرة لمنع سقوط الحروف
+    # مع uharfbuzz نمرر النص مباشرة دون إعادة تشكيل لمنع سقوط حروف مثل (ض، ت، ر)
     def fmt(t):
         if not rtl: return str(t)
         return str(t) if HAS_SHAPING else shape_ar(t)
@@ -102,7 +101,7 @@ def generate_client_pdf(domain, score, summary, coverage, lang='ar'):
     pdf.cell(0, 6, fmt("تحسين محركات البحث للمتاجر الإلكترونية"), ln=True, align="C")
     pdf.ln(6)
 
-    # بطاقة النتيجة
+    # بطاقة النتيجة الكبيرة
     y = pdf.get_y()
     pdf.set_fill_color(*C_BG)
     pdf.rect(M, y, W, 42, 'F')
@@ -118,7 +117,7 @@ def generate_client_pdf(domain, score, summary, coverage, lang='ar'):
     pdf.cell(W, 6, fmt("درجة التوافق الفعلية مع محركات البحث"), align="C")
     pdf.set_y(y + 48)
 
-    # بطاقات موجزة في الغلاف
+    # البطاقات المصغرة في الغلاف
     cards = [
         (str(summary['total_pages']), "صفحة مفحوصة"),
         (str(summary['products']), "منتج معروض"),
@@ -161,7 +160,7 @@ def generate_client_pdf(domain, score, summary, coverage, lang='ar'):
     pdf.set_text_color(*C_MUTED)
     pdf.cell(W, 5, fmt("نطاق الفحص: جميع الصفحات والمنتجات المعروضة فعلياً لزوار المتجر"), ln=True, align="R")
 
-    # أداة رسم الأقسام وجداول النتائج مع صندوق الأثر
+    # دالة الأقسام مع الجداول وصناديق الأثر
     def render_section(title, rows, impact_key):
         pdf.add_page()
         pdf.set_font(font_family, "B" if has_bold else "", 14)
@@ -224,7 +223,7 @@ def generate_client_pdf(domain, score, summary, coverage, lang='ar'):
         ("أوصاف ميتا مكررة بين الصفحات", summary['duplicate_descs'], 'warn' if summary['duplicate_descs'] else 'ok'),
     ], 'meta')
 
-    # 3. تدقيق الصور
+    # 3. تدقيق الصور الفريدة
     render_section("3. صور المتجر والنصوص البديلة (Alt)", [
         ("إجمالي صور المحتوى والمنتجات الفريدة", summary['total_images'], 'neutral'),
         ("صور بدون نص بديل إطلاقاً (Alt)", summary['missing_alts'], 'bad' if summary['missing_alts'] else 'ok'),
