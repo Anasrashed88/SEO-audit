@@ -44,18 +44,6 @@ STATUS_LABEL = {
         'alt_ok': 'سليم', 'alt_empty': 'لا يوجد (فارغ)',
         'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
         'match_ok': 'متطابق مع H1', 'match_diff': 'مختلف عن H1', 'match_empty': 'غير متوفر',
-    },
-    'en': {
-        'missing': 'Missing', 'very_short': 'Too short', 'acceptable': 'Acceptable',
-        'optimal': 'Optimal', 'long': 'Too long', 'failed': 'Failed',
-        'good': 'Good', 'thin': 'Thin', 'na': 'N/A',
-        'alt_missing': 'Missing', 'alt_generic': 'Not descriptive',
-        'alt_stuffed': 'Keyword stuffed', 'alt_long': 'Over 125 chars',
-        'alt_duplicate': 'Duplicate', 'alt_ok': 'Good',
-        'alt_empty': '(empty)',
-        'canon_same': 'Self-referencing', 'canon_diff': 'Differs from URL',
-        'canon_missing': 'Missing',
-        'match_ok': 'Matches H1', 'match_diff': 'Differs from H1', 'match_empty': 'N/A',
     }
 }
 
@@ -256,13 +244,38 @@ def extract_image_src(img):
         if val and val.strip(): return val.strip()
     return img.get('src', '').strip()
 
-def is_product_content_image(src, img):
-    if not src or src.startswith('data:image'): return False
-    s = src.lower()
-    if any(k in s for k in ['favicon', 'avatar', 'payment', 'tamara', 'tabby', 'mada', 'visa', 'mastercard', 'pixel', 'spinner', 'loader']):
+# فلتر استبعاد صور القوالب وأصول المنصة (مثل static.zid.store والشعارات)
+def is_relevant_seo_image(src, img):
+    if not src or src.startswith('data:image'):
         return False
+    s = src.lower()
+
+    # 1. استبعاد ملفات وأصول منصات زد وسلة وشوبيفاي الثابتة
+    if any(k in s for k in [
+        'static.zid.store', 'cdn.zid.store/assets', 'assets.salla.sa',
+        'cdn.salla.network/assets', 'shopifycloud', '/static/', 'static.'
+    ]):
+        return False
+
+    # 2. استبعاد صور النظام والشعارات الشائعة وأيقونات الدفع والشحن
+    junk = [
+        'favicon', 'avatar', 'payment', 'tamara', 'tabby', 'mada', 'visa', 'mastercard',
+        'apple-pay', 'applepay', 'stc-pay', 'stcpay', 'pixel', 'spinner', 'loader',
+        'business_center', 'maroof', 'vat', 'tax', 'badge', 'icon', 'logo', 'brand',
+        'whatsapp', 'snapchat', 'instagram', 'tiktok', 'twitter', 'smsa', 'aramex',
+        'redbox', 'zidship', 'placeholder', 'empty.png', 'transparent', 'dummy'
+    ]
+    if any(k in s for k in junk):
+        return False
+
     classes = ' '.join(img.get('class', [])).lower()
-    if any(k in classes for k in ['logo', 'icon', 'badge', 'payment']): return False
+    img_id = (img.get('id') or '').lower()
+    if any(k in classes or k in img_id for k in ['logo', 'brand', 'badge', 'icon', 'footer', 'header']):
+        return False
+
+    if s.split('?')[0].endswith(('.svg', '.ico', '.gif')):
+        return False
+
     return True
 
 def extract_page_links(soup, page_url, base_netloc):
@@ -349,7 +362,7 @@ def audit_single_page(task):
     total_img, missing_alt, weak_alt = 0, 0, 0
     for img in soup.find_all('img'):
         src = extract_image_src(img)
-        if src and is_product_content_image(src, img):
+        if src and is_relevant_seo_image(src, img):
             total_img += 1
             full_img_url = urljoin(final_url, src)
             alt_text = (img.get('alt') or '').strip()
@@ -437,6 +450,15 @@ def fetch_sitemap_urls(base_url):
     for c in candidates: parse_map(c)
     return found_urls
 
+# دالة فلترة وتوحيد الصور الفريدة مع حساب مرات الظهور
+def get_unique_images(images_df):
+    if images_df is None or images_df.empty:
+        return images_df
+    counts = images_df.groupby('رابط الصورة')['رابط الصفحة'].nunique()
+    u_df = images_df.drop_duplicates(subset=['رابط الصورة']).copy()
+    u_df['عدد الصفحات'] = u_df['رابط الصورة'].map(counts)
+    return u_df.reset_index(drop=True)
+
 def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     target = normalize_url(target_url)
     if progress_cb: progress_cb(0.05, "جلب وفحص خريطة الموقع (Sitemap)... (5%)")
@@ -479,9 +501,12 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
                 progress_cb(pct, f"جارٍ الفحص: {done_count} من أصل {est_total} صفحة ({int(pct * 100)}%)")
 
     df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
-    imgs_df = pd.DataFrame(images_result)
+    raw_imgs_df = pd.DataFrame(images_result)
 
-    if not imgs_df.empty:
+    # احتساب وتحليل الصور بناءً على الصور الفريدة فقط لمنع التكرار
+    imgs_df = get_unique_images(raw_imgs_df)
+
+    if imgs_df is not None and not imgs_df.empty:
         counts = imgs_df[imgs_df['حالة النص البديل'] == 'alt_ok']['النص البديل الحالي (Alt)'].value_counts()
         dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
         if dupes:
@@ -520,9 +545,9 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
         'missing_descs': int((df['حالة الوصف'] == 'missing').sum()),
         'short_descs': int((df['حالة الوصف'] == 'very_short').sum()),
         'duplicate_descs': len(dup_descs),
-        'total_images': len(imgs_df),
-        'missing_alts': int((imgs_df['حالة النص البديل'] == 'alt_missing').sum()) if not imgs_df.empty else 0,
-        'weak_alts': int(imgs_df['حالة النص البديل'].isin(['alt_generic', 'alt_stuffed', 'alt_duplicate', 'alt_long']).sum()) if not imgs_df.empty else 0,
+        'total_images': len(imgs_df) if imgs_df is not None and not imgs_df.empty else 0,
+        'missing_alts': int((imgs_df['حالة النص البديل'] == 'alt_missing').sum()) if imgs_df is not None and not imgs_df.empty else 0,
+        'weak_alts': int(imgs_df['حالة النص البديل'].isin(['alt_generic', 'alt_stuffed', 'alt_duplicate', 'alt_long']).sum()) if imgs_df is not None and not imgs_df.empty else 0,
         'platform': platform
     }
 
