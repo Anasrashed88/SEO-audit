@@ -552,12 +552,14 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     sitemap_urls = fetch_sitemap_urls(target)
     
     # بذور القوائم الأساسية لضمان كشف الأقسام حتى لو غابت عن السايت ماب
-    platform_seeds = [
-        target, f"{target}/products", f"{target}/latest-products",
-        f"{target}/categories", f"{target}/collections/all"
-    ]
-    
-    queue = list(dict.fromkeys(list(sitemap_urls) + platform_seeds))
+# فحص صامت للمسارات التخمينية: إن كانت تعمل نأخذ روابطها، وإن كانت 404 نتجاهلها دون تسجيلها كخطأ
+    discovered_seeds = set()
+    for seed in [f"{target}/products", f"{target}/latest-products", f"{target}/categories"]:
+        res_seed = safe_get(seed, timeout=6, retries=0)
+        if res_seed and res_seed.status_code == 200:
+            discovered_seeds.add(seed)
+
+    queue = list(dict.fromkeys([target] + list(sitemap_urls) + list(discovered_seeds)))
     seen = {url_key(u) for u in queue}
     
     pages_result, images_result, visited_keys = [], [], set()
