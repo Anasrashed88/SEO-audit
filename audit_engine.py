@@ -124,7 +124,7 @@ def make_soup(markup):
 EXCLUDE_PATH_PARTS = [
     '/cart', '/checkout', '/login', '/signin', '/register', '/signup', '/account',
     '/my-account', '/wishlist', '/favorites', '/compare', '/search', '/orders',
-    '/customer', '/password', '/thank-you', '/logout', '/cdn-cgi/', '/email-protection',
+    '/customer', '/password', '/thank-you', '/logout', '/email-protection',
     '/سلة', '/حسابي', '/تسجيل', '/الدفع', '/بحث', '/المفضلة'
 ]
 BAD_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.avif', '.pdf',
@@ -151,9 +151,12 @@ def detect_platform(html, headers=None, url=""):
     if 'woocommerce' in blob or 'wp-content' in blob: return 'woocommerce'
     return 'unknown'
 
+# الكلمات المفتاحية المحدثة لتصنيف جميع صفحات السياسات والأسئلة بدقة
 POLICY_KEYWORDS = [
     'سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى',
-    'من-نحن', 'اتصل', 'ضمان', 'أحكام', 'الاستخدام', 'about', 'contact', 'terms', 'privacy'
+    'من-نحن', 'اتصل', 'ضمان', 'أحكام', 'الاستخدام', 'أسئلة', 'اسئلة', 'مساعدة',
+    'about', 'contact', 'terms', 'privacy', 'faq', 'faqs', 'shipping', 'delivery',
+    'payment', 'returns', 'refund', 'refunds', 'legal', 'policies', 'policy', 'help'
 ]
 
 def detect_page_type(url, base_url, soup=None):
@@ -210,8 +213,10 @@ def grade_length(length, min_ok, min_optimal, max_len):
     return 'long'
 
 GENERIC_ALTS = {
-    'image', 'img', 'photo', 'picture', 'pic', 'icon', 'logo', 'product',
-    'صورة', 'صوره', 'صور', 'منتج', 'شعار', 'غلاف', 'رئيسية', 'جديد'
+    'image', 'images', 'img', 'photo', 'photos', 'picture', 'pic', 'icon', 'logo', 'product',
+    'mobile image', 'desktop image', 'banner', 'slider', 'slide', 'hero', 'thumbnail',
+    'thumb', 'mobile', 'desktop', 'cover', 'default', 'untitled',
+    'صورة', 'صوره', 'صور', 'منتج', 'شعار', 'غلاف', 'رئيسية', 'جديد', 'خلفية'
 }
 
 def grade_alt(alt_text):
@@ -221,6 +226,9 @@ def grade_alt(alt_text):
     low = txt.lower()
 
     if re.search(r'\.(jpg|jpeg|png|webp|gif|svg)$', low) or re.fullmatch(r'[\d\W_]+', txt):
+        return 'alt_generic', length
+
+    if low in GENERIC_ALTS:
         return 'alt_generic', length
 
     words = [w.strip('.,،؛:!?|-()[]') for w in low.split()]
@@ -250,20 +258,31 @@ def extract_image_src(img):
         if val and val.strip(): return val.strip()
     return img.get('src', '').strip()
 
-# فلترة ذكية ومتقدمة لاستبعاد أصول المنصات والشعارات وأيقونات القوالب
+# تنظيف وتوحيد روابط الصور بحذف بادئات Cloudflare Resizing لدمج الصور المكررة
+def clean_image_url(url):
+    if not url: return ""
+    u = url.strip()
+    # كشف وإزالة وسيط Cloudflare Resizing المستخدم في زد
+    mo = re.search(r'/cdn-cgi/image/[^/]+/(https?://.+)$', u, re.I)
+    if mo:
+        u = mo.group(1)
+    elif '/cdn-cgi/image/' in u.lower():
+        u = re.sub(r'/cdn-cgi/image/[^/]+/', '/', u, flags=re.I)
+    # تنظيف وسائط العرض بعد علامة الاستفهام لتوحيد الصورة الأصلية
+    return u.split('?')[0].split('#')[0]
+
+# استبعاد صور وأصول المنصة الثابتة والشعارات وأيقونات القوالب
 def is_relevant_seo_image(src, img):
     if not src or src.startswith('data:image'):
         return False
     s = src.lower()
 
-    # 1. استبعاد ملفات وأصول منصات زد وسلة وشوبيفاي
     if any(k in s for k in [
         'static.zid.store', 'cdn.zid.store', 'assets.salla.sa',
         'cdn.salla.network/assets', 'shopifycloud', '/static/', 'static.'
     ]):
         return False
 
-    # 2. استبعاد أيقونات الشحن، الدفع، ومراكز الأعمال والشعارات
     junk = [
         'favicon', 'avatar', 'payment', 'tamara', 'tabby', 'mada', 'visa', 'mastercard',
         'apple-pay', 'applepay', 'stc-pay', 'stcpay', 'pixel', 'spinner', 'loader',
@@ -367,10 +386,13 @@ def audit_single_page(task):
     page_images = []
     total_img, missing_alt, weak_alt = 0, 0, 0
     for img in soup.find_all('img'):
-        src = extract_image_src(img)
-        if src and is_relevant_seo_image(src, img):
+        raw_src = extract_image_src(img)
+        if raw_src and is_relevant_seo_image(raw_src, img):
+            # تنظيف الرابط لمنع احتساب نفس الصورة مرتين
+            clean_src = clean_image_url(urljoin(final_url, raw_src))
+            if not clean_src: continue
+
             total_img += 1
-            full_img_url = urljoin(final_url, src)
             alt_text = (img.get('alt') or '').strip()
             alt_st, alt_l = grade_alt(alt_text)
             if alt_st == 'alt_missing': missing_alt += 1
@@ -378,7 +400,7 @@ def audit_single_page(task):
 
             page_images.append({
                 'رابط الصفحة': final_url, 'نوع الصفحة': page_type,
-                'رابط الصورة': full_img_url,
+                'رابط الصورة': clean_src,
                 'النص البديل الحالي (Alt)': alt_text,
                 'حالة النص البديل': alt_st,
                 'طول النص البديل': alt_l
@@ -414,13 +436,11 @@ def audit_single_page(task):
         'html': res.text[:20000] if page_type == T_HOME else ''
     }
 
-# جلب خرائط الموقع بالاستعانة بمكتبة advertools مع وجود خطة احتياطية مدمجة
 def fetch_sitemap_urls(base_url):
     base_clean = normalize_url(base_url)
     target_netloc = normalize_domain(urlparse(base_clean).netloc)
     found_urls = set()
 
-    # محاولة استخدام advertools لجلب الخرائط بدقة قياسية
     if HAS_ADVERTOOLS:
         try:
             sm_df = adv.sitemap_to_df(f"{base_clean}/sitemap.xml")
@@ -433,7 +453,6 @@ def fetch_sitemap_urls(base_url):
         except Exception:
             pass
 
-    # محرك احتياطي مدمج عالي الدقة يدعم الفهارس والملفات المضغوطة
     visited_maps = set()
     candidates = [
         f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
@@ -472,7 +491,7 @@ def fetch_sitemap_urls(base_url):
     for c in candidates: parse_map(c)
     return found_urls
 
-# دالة توحيد وفلترة الصور الفريدة لمنع تكرار الصورة عبر الصفحات
+# تجميع الصور الفريدة مع حذف المكرر عبر صفحات المتجر
 def get_unique_images(images_df):
     if images_df is None or images_df.empty:
         return images_df
@@ -491,6 +510,7 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
 
     seen = {url_key(u) for u in queue}
     pages_result, images_result, visited_keys = [], [], set()
+    internally_linked_keys = set()
     platform, done_count = 'unknown', 0
 
     while queue and len(pages_result) < max_pages:
@@ -510,8 +530,10 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
             if res.get('html') and platform == 'unknown':
                 platform = detect_platform(res['html'], url=target)
 
+            # تسجيل جميع الروابط الداخلية المكتشفة لرصد الصفحات اليتيمة الحقيقية
             for link in res['links']:
                 k = url_key(link)
+                internally_linked_keys.add(k)
                 if k not in seen and len(seen) < max_pages * 2:
                     seen.add(k)
                     queue.append(link)
@@ -525,7 +547,7 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
     raw_imgs_df = pd.DataFrame(images_result)
 
-    # احتساب وتحليل الصور بناءً على الصور الفريدة فقط لمنع التكرار
+    # احتساب وتحليل الصور بناءً على الصور الفريدة الموحدة فقط
     imgs_df = get_unique_images(raw_imgs_df)
 
     if imgs_df is not None and not imgs_df.empty:
@@ -541,10 +563,20 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
 
     sitemap_keys = {url_key(u) for u in sitemap_urls}
     live_keys = {url_key(r['الرابط']) for _, r in df[df['متاحة'] == True].iterrows()}
+    target_k = url_key(target)
 
+    # 1. الصفحات المعروضة الغائبة عن الخريطة
     unlisted_pages = df[(df['متاحة'] == True) & (~df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
-    orphan_pages = [u for u in sitemap_urls if url_key(u) in live_keys and df[df['الرابط'].map(url_key) == url_key(u)]['مصدر الاكتشاف'].iloc[0] == 'خريطة الموقع']
-    dead_pages = df[(df['متاحة'] == False) & (df['مصدر الاكتشاف'] == 'خريطة الموقع')]['الرابط'].tolist()
+
+    # 2. الصفحات اليتيمة الحقيقية: في السايت ماب وتعمل ولكن لا يوجد أي رابط داخلي يشير إليها
+    orphan_pages = []
+    for u in sitemap_urls:
+        k = url_key(u)
+        if k in live_keys and k != target_k and k not in internally_linked_keys:
+            orphan_pages.append(u)
+
+    # 3. الروابط الميتة بالخريطة
+    dead_pages = df[(df['متاحة'] == False) & (df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
 
     coverage = {
         'sitemap_count': len(sitemap_urls),
