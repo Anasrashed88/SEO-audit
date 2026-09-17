@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from datetime import datetime
 from pathlib import Path
 
-# استيراد المحركات والوظائف من الملفات المنفصلة
 from audit_engine import (
     run_full_audit, normalize_url, PAGE_TYPE_ORDER, PAGE_TYPE_LABEL,
     STATUS_LABEL, PLATFORM_LABEL, COLOR
@@ -155,7 +154,7 @@ if nav == "🔍 فحص المتجر":
             (target_clean, datetime.now().strftime("%Y-%m-%d %H:%M"), summary['score'],
              summary['total_pages'], summary['products'], summary['categories'],
              summary['info_pages'], summary['blog_pages'], df.to_json(orient='records'),
-             imgs_df.to_json(orient='records') if not imgs_df.empty else '',
+             imgs_df.to_json(orient='records') if imgs_df is not None and not imgs_df.empty else '',
              json.dumps(coverage, ensure_ascii=False), summary['platform'])
         )
         conn.commit()
@@ -185,7 +184,7 @@ if nav == "🔍 فحص المتجر":
             (summary["missing_titles"] + summary["duplicate_titles"], "مشاكل العناوين", COLOR['bad'] if summary["missing_titles"] else COLOR['ok']),
             (summary["title_mismatch"], "عناوين تخالف H1", COLOR['warn'] if summary["title_mismatch"] else COLOR['ok']),
             (summary["missing_descs"] + summary["duplicate_descs"], "مشاكل الأوصاف", COLOR['bad'] if summary["missing_descs"] else COLOR['ok']),
-            (summary["missing_alts"], "صور بدون Alt", COLOR['bad'] if summary["missing_alts"] else COLOR['ok']),
+            (summary["missing_alts"], "صور فريدة بدون Alt", COLOR['bad'] if summary["missing_alts"] else COLOR['ok']),
         ]
         cols = st.columns(len(cards))
         for col, (v, l, c) in zip(cols, cards):
@@ -209,7 +208,7 @@ if nav == "🔍 فحص المتجر":
                     ("مفقود", int((imgs_df['حالة النص البديل'] == 'alt_missing').sum())),
                     ("مكرر", int((imgs_df['حالة النص البديل'] == 'alt_duplicate').sum())),
                     ("غير وصفي", int((imgs_df['حالة النص البديل'] == 'alt_generic').sum())),
-                ] if not imgs_df.empty else []
+                ] if imgs_df is not None and not imgs_df.empty else []
                 st.markdown(bar_chart("جودة نصوص الصور البديلة (Alt)", alt_items, {
                     "سليم": COLOR['ok'], "مفقود": COLOR['bad'], "مكرر": COLOR['warn'], "غير وصفي": COLOR['bad']
                 }), unsafe_allow_html=True)
@@ -222,7 +221,7 @@ if nav == "🔍 فحص المتجر":
             if summary['title_mismatch']:
                 st.markdown(finding(f"يوجد <b>{summary['title_mismatch']}</b> صفحة عنوان الميتا فيها لا يطابق اسم المنتج/القسم الظاهر (H1).", 'warn'), unsafe_allow_html=True)
             if summary['missing_alts']:
-                st.markdown(finding(f"يوجد <b>{summary['missing_alts']}</b> صورة منتج لا تحمل أي نص بديل وتغيب عن بحث صور جوجل.", 'bad'), unsafe_allow_html=True)
+                st.markdown(finding(f"يوجد <b>{summary['missing_alts']}</b> صورة فريدة لا تحمل أي نص بديل وتغيب عن بحث صور جوجل.", 'bad'), unsafe_allow_html=True)
             if coverage['unlisted_pages']:
                 st.markdown(finding(f"تم اكتشاف <b>{len(coverage['unlisted_pages'])}</b> صفحة معروضة في المتجر ولكنها غائبة تماماً عن خريطة الموقع (Sitemap).", 'warn'), unsafe_allow_html=True)
 
@@ -242,8 +241,8 @@ if nav == "🔍 فحص المتجر":
             st.dataframe(view_descs, use_container_width=True)
 
         with tabs[3]:
-            st.markdown("#### تدقيق نصوص الصور (Alt Text)")
-            if not imgs_df.empty:
+            st.markdown("#### تدقيق نصوص الصور الفريدة (Alt Text)")
+            if imgs_df is not None and not imgs_df.empty:
                 v_imgs = imgs_df.copy()
                 v_imgs['نوع الصفحة'] = v_imgs['نوع الصفحة'].map(lambda x: PAGE_TYPE_LABEL['ar'].get(x, x))
                 v_imgs['حالة النص البديل'] = v_imgs['حالة النص البديل'].map(lambda x: STATUS_LABEL['ar'].get(x, x))
@@ -269,9 +268,11 @@ if nav == "🔍 فحص المتجر":
             st.markdown("#### 📥 تصدير البيانات والتقارير")
             clean_dom = urlparse(st.session_state.current_url).netloc or "store"
 
+            # إنشاء الحزم والملفات
             zip_bytes = build_zip_package(df, imgs_df, coverage, lang='ar')
             client_pdf = generate_client_pdf(clean_dom, summary['score'], summary, coverage, lang='ar')
 
+            # إعدادات عرض السعر
             p_title = 15.0
             p_desc = 10.0
             p_alt = 3.0
@@ -284,7 +285,7 @@ if nav == "🔍 فحص المتجر":
                 'items': [
                     {'name': 'إصلاح وصياغة عناوين الميتا و H1', 'qty': qty_titles, 'unit': p_title, 'total': qty_titles * p_title},
                     {'name': 'كتابة أوصاف ميتا فريدة وجذابة', 'qty': qty_descs, 'unit': p_desc, 'total': qty_descs * p_desc},
-                    {'name': 'صياغة نصوص بديلة للصور (Alt Text)', 'qty': qty_alts, 'unit': p_alt, 'total': qty_alts * p_alt},
+                    {'name': 'صياغة نصوص بديلة للصور الفريدة (Alt Text)', 'qty': qty_alts, 'unit': p_alt, 'total': qty_alts * p_alt},
                 ],
                 'total': (qty_titles * p_title) + (qty_descs * p_desc) + (qty_alts * p_alt)
             }
