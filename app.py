@@ -5,6 +5,16 @@ import pandas as pd
 from urllib.parse import urlparse
 from datetime import datetime
 from pathlib import Path
+import importlib
+
+# استيراد وإجبار بايثون على تحديث الملفات ومنع كاش السيرفر
+import audit_engine
+import pdf_generator
+import export_utils
+
+importlib.reload(audit_engine)
+importlib.reload(pdf_generator)
+importlib.reload(export_utils)
 
 from audit_engine import (
     run_full_audit, normalize_url, PAGE_TYPE_ORDER, PAGE_TYPE_LABEL,
@@ -126,7 +136,6 @@ if nav == "🔍 فحص المتجر":
         start_btn = st.button("بدء الفحص", type="primary", use_container_width=True)
 
     if start_btn and target_input:
-        # تفريغ أي جلسة فحص سابقة لمنع التداخل
         for k in ['audit_df', 'images_df', 'summary', 'coverage', 'dup_titles', 'dup_descs']:
             st.session_state[k] = None
 
@@ -273,11 +282,9 @@ if nav == "🔍 فحص المتجر":
             st.markdown("#### 📥 تصدير البيانات والتقارير")
             clean_dom = urlparse(st.session_state.current_url).netloc or "store"
 
-            # إنشاء الحزم والملفات
             zip_bytes = build_zip_package(df, imgs_df, coverage, lang='ar')
             client_pdf = generate_client_pdf(clean_dom, summary['score'], summary, coverage, lang='ar')
 
-            # إعدادات عرض السعر
             p_title = 15.0
             p_desc = 10.0
             p_alt = 3.0
