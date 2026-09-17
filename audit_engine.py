@@ -151,7 +151,6 @@ def detect_platform(html, headers=None, url=""):
     if 'woocommerce' in blob or 'wp-content' in blob: return 'woocommerce'
     return 'unknown'
 
-# الكلمات المفتاحية المحدثة لتصنيف جميع صفحات السياسات والأسئلة بدقة
 POLICY_KEYWORDS = [
     'سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى',
     'من-نحن', 'اتصل', 'ضمان', 'أحكام', 'الاستخدام', 'أسئلة', 'اسئلة', 'مساعدة',
@@ -262,16 +261,13 @@ def extract_image_src(img):
 def clean_image_url(url):
     if not url: return ""
     u = url.strip()
-    # كشف وإزالة وسيط Cloudflare Resizing المستخدم في زد
     mo = re.search(r'/cdn-cgi/image/[^/]+/(https?://.+)$', u, re.I)
     if mo:
         u = mo.group(1)
     elif '/cdn-cgi/image/' in u.lower():
         u = re.sub(r'/cdn-cgi/image/[^/]+/', '/', u, flags=re.I)
-    # تنظيف وسائط العرض بعد علامة الاستفهام لتوحيد الصورة الأصلية
     return u.split('?')[0].split('#')[0]
 
-# استبعاد صور وأصول المنصة الثابتة والشعارات وأيقونات القوالب
 def is_relevant_seo_image(src, img):
     if not src or src.startswith('data:image'):
         return False
@@ -388,7 +384,6 @@ def audit_single_page(task):
     for img in soup.find_all('img'):
         raw_src = extract_image_src(img)
         if raw_src and is_relevant_seo_image(raw_src, img):
-            # تنظيف الرابط لمنع احتساب نفس الصورة مرتين
             clean_src = clean_image_url(urljoin(final_url, raw_src))
             if not clean_src: continue
 
@@ -491,7 +486,6 @@ def fetch_sitemap_urls(base_url):
     for c in candidates: parse_map(c)
     return found_urls
 
-# تجميع الصور الفريدة مع حذف المكرر عبر صفحات المتجر
 def get_unique_images(images_df):
     if images_df is None or images_df.empty:
         return images_df
@@ -530,7 +524,6 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
             if res.get('html') and platform == 'unknown':
                 platform = detect_platform(res['html'], url=target)
 
-            # تسجيل جميع الروابط الداخلية المكتشفة لرصد الصفحات اليتيمة الحقيقية
             for link in res['links']:
                 k = url_key(link)
                 internally_linked_keys.add(k)
@@ -547,7 +540,6 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
     raw_imgs_df = pd.DataFrame(images_result)
 
-    # احتساب وتحليل الصور بناءً على الصور الفريدة الموحدة فقط
     imgs_df = get_unique_images(raw_imgs_df)
 
     if imgs_df is not None and not imgs_df.empty:
@@ -565,17 +557,14 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     live_keys = {url_key(r['الرابط']) for _, r in df[df['متاحة'] == True].iterrows()}
     target_k = url_key(target)
 
-    # 1. الصفحات المعروضة الغائبة عن الخريطة
     unlisted_pages = df[(df['متاحة'] == True) & (~df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
 
-    # 2. الصفحات اليتيمة الحقيقية: في السايت ماب وتعمل ولكن لا يوجد أي رابط داخلي يشير إليها
     orphan_pages = []
     for u in sitemap_urls:
         k = url_key(u)
         if k in live_keys and k != target_k and k not in internally_linked_keys:
             orphan_pages.append(u)
 
-    # 3. الروابط الميتة بالخريطة
     dead_pages = df[(df['متاحة'] == False) & (df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
 
     coverage = {
