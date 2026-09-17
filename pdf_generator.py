@@ -1068,11 +1068,14 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
 
     # ---------- المجاميع ----------
     pdf.ln(4)
-    rows = [(T['subtotal'], quote['subtotal'], False)]
+    subtotal_val = quote.get('subtotal', quote.get('total', 0.0))
+    total_val = quote.get('total', subtotal_val)
+    rows = [(T['subtotal'], subtotal_val, False)]
     if quote.get('discount'):
-        rows.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%",
+        disc_rate = quote.get('discount_rate', 0.0)
+        rows.append((f"{T['discount']} {int(disc_rate * 100)}%",
                      -quote['discount'], False))
-    rows.append((T['total'], quote['total'], True))
+    rows.append((T['total'], total_val, True))
     for lbl, val, strong in rows:
         y = pdf.get_y()
         pdf.set_font(FONT, B if strong else "", 12 if strong else 10)
