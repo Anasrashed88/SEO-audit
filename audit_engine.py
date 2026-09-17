@@ -66,6 +66,16 @@ DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
 ALT_MAX = 125
 ALT_DUP_THRESHOLD = 3
 
+COLOR = {
+    'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
+    'accent': '#0f172a', 'muted': '#94a3b8'
+}
+
+PLATFORM_LABEL = {
+    'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
+    'shopify': 'شوبيفاي (Shopify)', 'woocommerce': 'ووكومرس', 'unknown': 'غير محددة'
+}
+
 REDIRECT_HOME = 'تحويل للرئيسية'
 GONE_CODES = {'404', '410', REDIRECT_HOME}
 RETRYABLE_CODES = {'فشل اتصال', '403', '429', '500', '502', '503', '504',
