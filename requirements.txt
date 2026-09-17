@@ -4,7 +4,6 @@ beautifulsoup4
 lxml
 pandas
 openpyxl
+fpdf2
 arabic-reshaper
 python-bidi
-fpdf2
-uharfbuzz
