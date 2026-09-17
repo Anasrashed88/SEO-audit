@@ -31,7 +31,7 @@ HEADERS = {
 }
 
 # ==============================================================
-#  أنواع الصفحات والتصنيفات الأصلية
+#  أنواع الصفحات والتصنيفات
 # ==============================================================
 T_HOME, T_PRODUCT, T_CATEGORY = 'home', 'product', 'category'
 T_BLOG, T_INFO, T_UNKNOWN, T_BROKEN = 'blog', 'info', 'unknown', 'broken'
@@ -68,8 +68,14 @@ ALT_DUP_THRESHOLD = 3
 COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
          'accent': '#0f172a', 'muted': '#94a3b8'}
 
+# أكواد تعني أن الصفحة محذوفة فعلاً (تُستبعد من التقرير)
+GONE_CODES = {'404', '410'}
+# أكواد تعني أن المتجر أبطأنا أو تعطل مؤقتاً (تستحق إعادة محاولة هادئة)
+RETRYABLE_CODES = {'فشل اتصال', '403', '429', '500', '502', '503', '504',
+                   '520', '521', '522', '523', '524'}
+
 # ==============================================================
-#  محرك الاتصال فائق السرعة (Connection Pooling & Keep-Alive)
+#  محرك الاتصال (Connection Pooling & Keep-Alive)
 # ==============================================================
 _SHARED_SESSION = None
 _SESSION_LOCK = threading.Lock()
@@ -89,19 +95,25 @@ def get_shared_session(pool_size=32):
                 _SHARED_SESSION = sess
     return _SHARED_SESSION
 
-def safe_get(url, timeout=7, retries=1):
+def safe_get(url, timeout=10, retries=2):
+    """يعيد الاستجابة دائماً إن وصلت (حتى لو كانت 404 أو 429)، و None فقط عند انقطاع الاتصال."""
     sess = get_shared_session()
+    last = None
     for attempt in range(retries + 1):
         try:
             res = sess.get(url, timeout=timeout, allow_redirects=True)
-            if res.status_code == 429:
-                time.sleep(2.0 * (attempt + 1))
-                continue
-            return res
         except Exception:
             if attempt < retries:
-                time.sleep(0.3)
-    return None
+                time.sleep(1.0 * (attempt + 1))
+            continue
+        if res.status_code in (429, 503) and attempt < retries:
+            last = res
+            wait = (res.headers.get('Retry-After') or '').strip()
+            delay = float(wait) if wait.isdigit() else 2.0 * (attempt + 1)
+            time.sleep(min(delay, 10))
+            continue
+        return res
+    return last
 
 def normalize_domain(netloc):
     netloc = netloc.lower().split(':')[0]
@@ -133,17 +145,21 @@ def url_key(url):
         mo = PLATFORM_ID_RE.match(segs[-1])
         if mo:
             return f"{host}/#{mo.group(1).lower()}{mo.group(2)}"
-    return f"{host}{path}"
+    if segs and segs[0].lower() in LANG_SEGMENTS:
+        segs = segs[1:]
+    return f"{host}/{'/'.join(segs)}".rstrip('/')
 
 def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
-EXCLUDE_PATH_PARTS = [
-    '/cart', '/checkout', '/login', '/signin', '/register', '/signup', '/account',
-    '/my-account', '/wishlist', '/favorites', '/compare', '/search', '/orders',
-    '/customer', '/password', '/thank-you', '/logout', '/email-protection',
-    '/سلة', '/حسابي', '/تسجيل', '/الدفع', '/بحث', '/المفضلة'
-]
+# مقارنة بجزء الرابط كاملاً (وليس بجزء من النص)
+# حتى لا يُستبعد تصنيف مثل «سلة-هدايا» بسبب كلمة «سلة»
+EXCLUDE_SEGMENTS = {
+    'cart', 'checkout', 'login', 'signin', 'register', 'signup', 'account',
+    'my-account', 'wishlist', 'favorites', 'compare', 'search', 'orders',
+    'customer', 'password', 'thank-you', 'logout', 'email-protection', 'cdn-cgi',
+    'سلة', 'حسابي', 'تسجيل', 'الدفع', 'بحث', 'المفضلة'
+}
 BAD_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.avif', '.pdf',
                   '.zip', '.rar', '.xml', '.css', '.js', '.ico', '.mp4', '.mp3')
 
@@ -154,7 +170,8 @@ def is_crawlable(url, base_netloc):
     if normalize_domain(p.netloc) != normalize_domain(base_netloc): return False
     path = unquote(p.path.lower())
     if path.endswith(BAD_EXTENSIONS): return False
-    if any(part in path for part in EXCLUDE_PATH_PARTS): return False
+    segs = [s for s in path.split('/') if s]
+    if any(s in EXCLUDE_SEGMENTS for s in segs): return False
     return True
 
 PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
@@ -169,7 +186,8 @@ def detect_platform(html, headers=None, url=""):
     return 'unknown'
 
 # ==============================================================
-#  طريقة الكشف الأصلية عن أنواع الصفحات (مطابقة 100% لكودك الأصلي)
+#  تحديد نوع الصفحة
+#  الترتيب: أنماط الرابط القاطعة ← إشارات الصفحة ← الكلمات المفتاحية
 # ==============================================================
 AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
 
@@ -193,12 +211,21 @@ POLICY_KEYWORDS = [
     'shipping', 'delivery', 'complaint', 'complaints', 'returns', 'return',
     'refund', 'refunds', 'payment', 'warranty', 'support', 'legal',
 ]
-CATALOG_ROOTS = ['products', 'product', 'all-products', 'catalog', 'catalogue',
-                 'collections/all', 'shop', 'store']
+CATALOG_ROOTS = {'products', 'product', 'all-products', 'latest-products', 'catalog',
+                 'catalogue', 'collections/all', 'shop', 'store', 'categories'}
 BLOG_SEGMENTS = ('blog', 'blogs', 'articles', 'article', 'post', 'posts', 'news',
                  'مدونة', 'مقالات', 'اخبار', 'أخبار')
 CATEGORY_SEGMENTS = ('category', 'categories', 'collection', 'collections',
                      'department', 'departments', 'قسم', 'اقسام', 'أقسام', 'تصنيف')
+ARCHIVE_PARENT_SEGMENTS = ('tag', 'tags', 'author', 'authors', 'archive',
+                           'وسم', 'وسوم', 'ماركة', 'ماركات')
+LANG_SEGMENTS = {'ar', 'en'}
+
+# أنماط سلة: /اسم-المنتج/p123 ، /اسم-التصنيف/c123 ، /اسم-الصفحة/page-123
+PRODUCT_ID_RE = re.compile(r'^p-?\d+$', re.I)
+CATEGORY_ID_RE = re.compile(r'^c-?\d+$', re.I)
+INFO_ID_RE = re.compile(r'^page-?\d+$', re.I)
+ARCHIVE_LAST_RE = re.compile(r'^(tag|author|category|archive)-?\d*$', re.I)
 
 POLICY_KEYWORDS_NORM = None
 
@@ -211,10 +238,21 @@ def _policy_keywords_norm():
                 POLICY_KEYWORDS_NORM.add(normalize_ar_token(part.lower()))
     return POLICY_KEYWORDS_NORM
 
+def _slug_tokens(seg):
+    return [normalize_ar_token(p.lower()) for p in seg.split('-') if p]
+
 def segment_is_policy(seg):
+    """كلمة واحدة من كلمات السياسات تكفي (للصفحات العامة)."""
     norm = _policy_keywords_norm()
-    parts = [normalize_ar_token(p.lower()) for p in seg.split('-') if p]
-    return any(p in norm for p in parts if len(p) > 2)
+    return any(p in norm for p in _slug_tokens(seg) if len(p) > 2)
+
+def segment_is_mostly_policy(seg):
+    """نصف كلمات الرابط على الأقل من كلمات السياسات (داخل المدونة فقط)،
+    حتى لا يتحول مقال مثل «افضل-شركات-الشحن» إلى صفحة سياسة."""
+    norm = _policy_keywords_norm()
+    toks = [p for p in _slug_tokens(seg) if len(p) > 2]
+    if not toks: return False
+    return sum(1 for p in toks if p in norm) / len(toks) >= 0.5
 
 def _has_jsonld_type(soup, wanted):
     if not soup: return False
@@ -229,6 +267,8 @@ def _has_jsonld_type(soup, wanted):
                 continue
             if '@graph' in b and isinstance(b['@graph'], list):
                 for item in b['@graph']:
+                    if not isinstance(item, dict):
+                        continue
                     t = item.get('@type')
                     types = t if isinstance(t, list) else [t]
                     if any(str(x) in wanted for x in types if x):
@@ -239,72 +279,102 @@ def _has_jsonld_type(soup, wanted):
                 return True
     return False
 
+def _html_signals(soup):
+    """يقرأ ما تعلنه الصفحة عن نفسها: product / article / collection / None"""
+    if not soup: return None
+    og_type = ""
+    tag = soup.find('meta', attrs={'property': 'og:type'})
+    if tag and tag.get('content'):
+        og_type = tag['content'].lower()
+
+    if 'product' in og_type \
+            or soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}) \
+            or _has_jsonld_type(soup, ('Product', 'IndividualProduct')):
+        return 'product'
+    if 'article' in og_type or 'blog' in og_type \
+            or soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}) \
+            or _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
+        return 'article'
+    if soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}) \
+            or _has_jsonld_type(soup, ('CollectionPage',)):
+        return 'collection'
+    return None
+
+def _url_segments(url):
+    path = unquote(urlparse(clean_url(url)).path.lower()).strip('/')
+    segs = [s for s in path.split('/') if s]
+    if segs and segs[0] in LANG_SEGMENTS:   # /ar/... و /en/...
+        segs = segs[1:]
+    return segs
+
 @lru_cache(maxsize=60000)
 def _detect_type_by_url(url, base_url):
     return detect_page_type(url, base_url, None)
 
 def detect_page_type(url, base_url, soup=None):
-    base_clean = normalize_url(base_url)
     url_clean = clean_url(url)
+    segments = _url_segments(url_clean)
 
-    if url_key(url_clean) == url_key(base_clean) or urlparse(url_clean).path in ('', '/'):
+    # 1) الرئيسية (بما فيها /ar و /en)
+    if not segments or url_key(url_clean) == url_key(normalize_url(base_url)):
         return T_HOME
 
-    path = unquote(urlparse(url_clean).path.lower())
-    path_clean = path.strip('/')
-    segments = [s for s in path_clean.split('/') if s]
+    last = segments[-1]
+    path_clean = '/'.join(segments)
+    in_blog = any(s in BLOG_SEGMENTS for s in segments)
 
-    og_type = ""
-    if soup:
-        tag = soup.find('meta', attrs={'property': 'og:type'})
-        if tag and tag.get('content'):
-            og_type = tag['content'].lower()
-
-    if 'product' in og_type:
+    # 2) أنماط الرابط القاطعة
+    if PRODUCT_ID_RE.match(last):
         return T_PRODUCT
-    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
+    if not in_blog and ('products' in segments[:-1] or 'product' in segments[:-1]):
         return T_PRODUCT
-    if soup and _has_jsonld_type(soup, ('Product', 'IndividualProduct')):
-        return T_PRODUCT
-    if ('products' in segments or 'product' in segments) and len(segments) >= 2:
-        return T_PRODUCT
-    if re.search(r'/p\d+', path) or '-p-' in path or re.search(r'[-/]p-?\d{4,}', url_clean):
-        return T_PRODUCT
-    if any(re.match(r'^p-?\d+$', s) for s in segments):
-        return T_PRODUCT
-
-    # السياسات قبل المدونة: بعض المتاجر تنشر السياسات تحت مسار /blogs/
-    if any(segment_is_policy(seg) for seg in segments if seg not in BLOG_SEGMENTS):
+    if INFO_ID_RE.match(last):
         return T_INFO
 
-    # صفحات الأرشيف (وسم/كاتب/تاريخ): تعرض قوائم لا محتوى أصلياً
-    if segments:
-        last = segments[-1]
-        if re.match(r'^(tag|author|category|archive)-?\d*$', last) or re.match(r'^\d{4}$', last):
+    # 3) المدونة: تُحسم قبل كلمات السياسات
+    if in_blog:
+        if last in BLOG_SEGMENTS:                       # صفحة المدونة الرئيسية (قائمة مقالات)
             return T_ARCHIVE
-        if re.match(r'^c-?\d{4,}$', last) and any(x in BLOG_SEGMENTS for x in segments[:-1]):
+        if CATEGORY_ID_RE.match(last) or ARCHIVE_LAST_RE.match(last) \
+                or any(s in ARCHIVE_PARENT_SEGMENTS for s in segments[:-1]):
             return T_ARCHIVE
-        if len(segments) >= 2 and any(
-                x in ('tag', 'tags', 'author', 'authors', 'archive', 'وسم', 'وسوم', 'ماركة', 'ماركات')
-                for x in segments[:-1]):
-            return T_ARCHIVE
-
-    if 'article' in og_type or 'blog' in og_type:
-        return T_BLOG
-    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}):
-        return T_BLOG
-    if soup and _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
-        return T_BLOG
-    if any(s in BLOG_SEGMENTS for s in segments):
+        sig = _html_signals(soup)
+        if sig == 'article':
+            return T_BLOG
+        if sig == 'product':
+            return T_PRODUCT
+        slug = segments[-2] if re.fullmatch(r'[a-z]?-?\d+', last) and len(segments) >= 2 else last
+        if segment_is_mostly_policy(slug):
+            return T_INFO
         return T_BLOG
 
-    if path_clean in CATALOG_ROOTS:
+    # 4) التصنيفات بالرابط
+    if CATEGORY_ID_RE.match(last) or path_clean in CATALOG_ROOTS \
+            or any(s in CATEGORY_SEGMENTS for s in segments):
         return T_CATEGORY
-    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
+
+    # 5) إشارات الصفحة نفسها (للمتاجر غير سلة وزد)
+    sig = _html_signals(soup)
+    if sig == 'product':
+        return T_PRODUCT
+    if sig == 'article':
+        return T_BLOG
+    if sig == 'collection':
         return T_CATEGORY
-    if any(s in CATEGORY_SEGMENTS for s in segments):
-        return T_CATEGORY
-    if re.search(r'/c\d+', path) or re.search(r'[-/]c-?\d{3,}', url_clean) or any(re.match(r'^c-?\d+$', s) for s in segments):
+
+    # 6) الأرشيف (وسم/كاتب/سنة/ماركة)
+    if ARCHIVE_LAST_RE.match(last) or re.match(r'^\d{4}$', last) \
+            or (len(segments) >= 2 and any(s in ARCHIVE_PARENT_SEGMENTS for s in segments[:-1])):
+        return T_ARCHIVE
+
+    # 7) السياسات والصفحات التعريفية
+    if any(segment_is_policy(seg) for seg in segments):
+        return T_INFO
+
+    # 8) أنماط ضعيفة أخيرة
+    if '-p-' in path_clean or re.search(r'[-/]p-?\d{4,}', url_clean):
+        return T_PRODUCT
+    if re.search(r'[-/]c-?\d{3,}', url_clean):
         return T_CATEGORY
 
     return T_UNKNOWN
@@ -439,17 +509,29 @@ def extract_page_links(soup, page_url, base_netloc):
 
     return links
 
-def audit_single_page(task):
+def is_noindex(soup, res):
+    header = (res.headers.get('X-Robots-Tag') or '').lower()
+    if 'noindex' in header:
+        return True
+    for m in soup.find_all('meta', attrs={'name': re.compile(r'^(robots|googlebot)$', re.I)}):
+        if 'noindex' in (m.get('content') or '').lower():
+            return True
+    return False
+
+def audit_single_page(task, timeout=10):
     url, base_url, source = task
     base_netloc = urlparse(normalize_url(base_url)).netloc
-    res = safe_get(url)
+    res = safe_get(url, timeout=timeout)
 
     if res is None or res.status_code != 200:
-        code = str(res.status_code) if res else 'فشل اتصال'
+        # ملاحظة: لا نستخدم «if res» لأن الاستجابة 404/429 تُعتبر False في مكتبة requests
+        code = str(res.status_code) if res is not None else 'فشل اتصال'
         return {
             'page_data': {
-                'نوع الصفحة': T_BROKEN, 'الرابط': url, 'مصدر الاكتشاف': source,
-                'متاحة': False, 'كود الاستجابة': code,
+                # النوع يُستنتج من الرابط حتى لو لم تُفتح الصفحة
+                'نوع الصفحة': _detect_type_by_url(clean_url(url), base_url),
+                'الرابط': url, 'مصدر الاكتشاف': source,
+                'متاحة': False, 'كود الاستجابة': code, 'قابلة للأرشفة': False,
                 'عنوان الميتا': '', 'طول العنوان': 0, 'حالة العنوان': 'failed',
                 'عنوان الصفحة (H1)': '', 'مطابقة العنوان مع H1': 'match_empty',
                 'وصف الميتا': '', 'طول الوصف': 0, 'حالة الوصف': 'failed',
@@ -465,6 +547,7 @@ def audit_single_page(task):
     soup = make_soup(res.text)
     page_type = detect_page_type(final_url, base_url, soup)
     links = extract_page_links(soup, final_url, base_netloc)
+    indexable = not is_noindex(soup, res)
 
     canonical = ''
     for link in soup.find_all('link', href=True):
@@ -521,6 +604,8 @@ def audit_single_page(task):
                 'طول النص البديل': alt_l
             })
 
+    html_snippet = res.text[:20000] if page_type == T_HOME else ''
+
     for s in soup(['script', 'style', 'nav', 'footer']): s.decompose()
     words = len(soup.get_text(separator=' ', strip=True).split())
     content_status = 'good' if words >= 40 else 'thin'
@@ -537,7 +622,7 @@ def audit_single_page(task):
     return {
         'page_data': {
             'نوع الصفحة': page_type, 'الرابط': final_url, 'مصدر الاكتشاف': source,
-            'متاحة': True, 'كود الاستجابة': '200',
+            'متاحة': True, 'كود الاستجابة': '200', 'قابلة للأرشفة': indexable,
             'عنوان الميتا': meta_title, 'طول العنوان': title_len, 'حالة العنوان': title_status,
             'عنوان الصفحة (H1)': h1_text, 'مطابقة العنوان مع H1': match_status,
             'وصف الميتا': meta_desc, 'طول الوصف': desc_len, 'حالة الوصف': desc_status,
@@ -548,11 +633,11 @@ def audit_single_page(task):
         },
         'images_data': page_images,
         'links': links,
-        'html': res.text[:20000] if page_type == T_HOME else ''
+        'html': html_snippet
     }
 
 # ==============================================================
-#  قارئ الخرائط المتقدم وحلقة الاستكشاف للملفات المقسمة
+#  قارئ الخرائط وحلقة الاستكشاف للملفات المقسمة
 # ==============================================================
 def fetch_sitemap_urls(base_url):
     base_clean = normalize_url(base_url)
@@ -581,7 +666,7 @@ def fetch_sitemap_urls(base_url):
     ]
 
     res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
-    if res_r and res_r.status_code == 200:
+    if res_r is not None and res_r.status_code == 200:
         for line in res_r.text.splitlines():
             if line.lower().strip().startswith('sitemap:'):
                 sm = line.split(':', 1)[1].strip()
@@ -593,7 +678,7 @@ def fetch_sitemap_urls(base_url):
         if sm_url in visited_maps or len(visited_maps) > 60: return
         visited_maps.add(sm_url)
         res = safe_get(sm_url, timeout=8, retries=1)
-        if not res or res.status_code != 200: return
+        if res is None or res.status_code != 200: return
         content = res.content
         if sm_url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
             try: content = gzip.decompress(content)
@@ -611,7 +696,7 @@ def fetch_sitemap_urls(base_url):
     for c in candidates:
         parse_map(c)
 
-    # حلقة استكشاف خرائط سلة وزد الحقيقية (sitemap-1.xml, sitemap-2.xml, sitemap_products_2.xml...)
+    # حلقة استكشاف خرائط سلة وزد المقسمة (sitemap-2.xml, sitemap_products_2.xml...)
     patterns = [
         ('sitemap-', ''),
         ('sitemap_', ''),
@@ -626,7 +711,7 @@ def fetch_sitemap_urls(base_url):
         while idx <= 40:
             sm_url = f"{base_clean}/{prefix}{idx}{suffix}.xml"
             res = safe_get(sm_url, timeout=5, retries=0)
-            if not res or res.status_code != 200 or '<loc' not in res.text.lower():
+            if res is None or res.status_code != 200 or '<loc' not in res.text.lower():
                 fails += 1
                 if fails >= 2:
                     break
@@ -646,7 +731,7 @@ def get_unique_images(images_df):
     u_df['عدد الصفحات'] = u_df['رابط الصورة'].map(counts)
     return u_df.reset_index(drop=True)
 
-# محرك حصد ترقيم الأقسام المتوازي فائق السرعة
+# حصد ترقيم الأقسام
 def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, workers=6, progress_cb=None):
     base_netloc = urlparse(normalize_url(base_url)).netloc
     new_links = []
@@ -656,7 +741,7 @@ def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, wo
         sep = '&' if '?' in cat_url else '?'
         paged_url = f"{cat_url}{sep}page={page_num}"
         res = safe_get(paged_url, timeout=6, retries=0)
-        if not res or res.status_code != 200:
+        if res is None or res.status_code != 200:
             return []
         soup = make_soup(res.text)
         return list(extract_page_links(soup, paged_url, base_netloc))
@@ -666,7 +751,7 @@ def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, wo
         while page_idx <= 25:
             if len(seen_keys) + len(new_links) >= max_pages:
                 break
-            
+
             tasks = [(cat_url, p) for p in range(page_idx, min(page_idx + workers, 26))]
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 batch_results = list(ex.map(probe_page, tasks))
@@ -686,31 +771,52 @@ def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, wo
 
     return new_links
 
+# جولة إعادة هادئة للصفحات التي رفضها المتجر مؤقتاً (صفحة واحدة كل مرة)
+def retry_failed_pages(pages_result, images_result, target, linked_keys,
+                       progress_cb=None, delay=1.0, limit=300):
+    idxs = [i for i, p in enumerate(pages_result)
+            if not p['متاحة'] and p['كود الاستجابة'] in RETRYABLE_CODES][:limit]
+    if not idxs:
+        return
+    time.sleep(3)  # نعطي المتجر فرصة يهدأ
+    for n, i in enumerate(idxs, 1):
+        old = pages_result[i]
+        res = audit_single_page((old['الرابط'], target, old['مصدر الاكتشاف']), timeout=15)
+        pages_result[i] = res['page_data']
+        images_result.extend(res['images_data'])
+        for link in res['links']:
+            linked_keys.add(url_key(link))
+        if progress_cb:
+            pct = 0.94 + 0.04 * (n / len(idxs))
+            progress_cb(pct, f"إعادة فحص هادئة للصفحات المتعثرة: {n}/{len(idxs)} ({int(pct * 100)}%)")
+        time.sleep(delay)
+
 # ==============================================================
-#  محرك الزحف الشامل المسرّع (Run Full Audit)
+#  محرك الفحص الشامل (Run Full Audit)
 # ==============================================================
+CONTENT_TYPES = {T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO}
+
 def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
     target = normalize_url(target_url)
     if progress_cb: progress_cb(0.05, "جلب وقراءة خرائط الموقع... (5%)")
 
     sitemap_urls = fetch_sitemap_urls(target)
-    
-    # فحص صامت للمسارات التخمينية دون تسجيل أخطاء
+
     discovered_seeds = set()
     for seed in [f"{target}/products", f"{target}/latest-products", f"{target}/categories"]:
         res_seed = safe_get(seed, timeout=5, retries=0)
-        if res_seed and res_seed.status_code == 200:
+        if res_seed is not None and res_seed.status_code == 200:
             discovered_seeds.add(seed)
 
     queue = list(dict.fromkeys([target] + list(sitemap_urls) + list(discovered_seeds)))
     seen = {url_key(u) for u in queue}
-    
-    pages_result, images_result, visited_keys = [], [], set()
+
+    pages_result, images_result = [], []
     internally_linked_keys = set()
     category_urls = set()
     platform, done_count = 'unknown', 0
 
-    # الجولة الأولى: فحص الصفحات المكتشفة بالدفعات الموسعة السريعة
+    # الجولة الأولى
     while queue and len(pages_result) < max_pages:
         batch = queue[:workers * 4]
         queue = queue[workers * 4:]
@@ -723,12 +829,11 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
             p_data = res['page_data']
             pages_result.append(p_data)
             images_result.extend(res['images_data'])
-            visited_keys.add(url_key(p_data['الرابط']))
 
             if res.get('html') and platform == 'unknown':
                 platform = detect_platform(res['html'], url=target)
 
-            if p_data['نوع الصفحة'] == T_CATEGORY:
+            if p_data['نوع الصفحة'] == T_CATEGORY and p_data['متاحة']:
                 category_urls.add(p_data['الرابط'])
 
             for link in res['links']:
@@ -744,12 +849,12 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
                 pct = min(0.92, 0.05 + 0.87 * (done_count / est_total))
                 progress_cb(pct, f"جارٍ الفحص: {done_count} صفحة ({int(pct * 100)}%)")
 
-    # الجولة الثانية: تتبع التمرير في الأقسام وصفحات القوائم بالتوازي
+    # الجولة الثانية: ترقيم الأقسام
     if len(pages_result) < max_pages:
-        if progress_cb: progress_cb(0.93, "متابعة ترقيم الأقسام وتجاوز التمرير اللانهائي... (93%)")
+        if progress_cb: progress_cb(0.93, "متابعة ترقيم الأقسام... (93%)")
         harvest_seeds = list(category_urls) + [f"{target}/products", f"{target}/latest-products"]
         extra_products = harvest_category_pagination(target, harvest_seeds, seen, max_pages, workers=workers)
-        
+
         if extra_products:
             extra_tasks = [(u, target, 'ترقيم وتمرير') for u in extra_products[:max_pages - len(pages_result)]]
             with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -758,10 +863,29 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
                 pages_result.append(res['page_data'])
                 images_result.extend(res['images_data'])
 
-    df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
-    raw_imgs_df = pd.DataFrame(images_result)
+    # الجولة الثالثة: إعادة هادئة للصفحات المتعثرة
+    retry_failed_pages(pages_result, images_result, target, internally_linked_keys, progress_cb)
 
-    # تجميع الصور الفريدة واستبعاد التكرار
+    full_df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
+    full_df['_key'] = full_df['الرابط'].map(url_key)
+    full_df = full_df.drop_duplicates(subset=['_key']).reset_index(drop=True)
+
+    sitemap_keys = {url_key(u) for u in sitemap_urls}
+
+    # الصفحات المستبعدة: محذوفة (404/410) أو مخفية عن جوجل (noindex)
+    gone_mask = full_df['كود الاستجابة'].isin(GONE_CODES)
+    noindex_mask = (full_df['متاحة'] == True) & (full_df['قابلة للأرشفة'] == False)
+    dead_pages = full_df[gone_mask & full_df['_key'].isin(sitemap_keys)]['الرابط'].tolist()
+    noindex_pages = full_df[noindex_mask]['الرابط'].tolist()
+
+    # التقرير يشمل فقط الصفحات الموجودة والمسموح لجوجل بعرضها
+    df = full_df[~gone_mask & ~noindex_mask].reset_index(drop=True)
+    kept_keys = set(df['_key'])
+    df = df.drop(columns=['_key'])
+
+    raw_imgs_df = pd.DataFrame(images_result)
+    if not raw_imgs_df.empty:
+        raw_imgs_df = raw_imgs_df[raw_imgs_df['رابط الصفحة'].map(url_key).isin(kept_keys)]
     imgs_df = get_unique_images(raw_imgs_df)
 
     if imgs_df is not None and not imgs_df.empty:
@@ -775,39 +899,49 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
     valid_descs = df[df['وصف الميتا'].str.strip() != '']['وصف الميتا']
     dup_descs = set(valid_descs[valid_descs.duplicated()].unique())
 
-    sitemap_keys = {url_key(u) for u in sitemap_urls}
-    live_keys = {url_key(r['الرابط']) for _, r in df[df['متاحة'] == True].iterrows()}
+    live_df = df[df['متاحة'] == True]
+    live_keys = set(live_df['الرابط'].map(url_key))
     target_k = url_key(target)
 
-    # 1. الصفحات المعروضة الغائبة عن السايت ماب
-    unlisted_pages = df[(df['متاحة'] == True) & (~df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
+    # 1. صفحات محتوى حقيقية (منتج/تصنيف/مقال/صفحة تعريفية) غائبة عن الخريطة
+    unlisted_pages = live_df[
+        live_df['نوع الصفحة'].isin(CONTENT_TYPES) &
+        (~live_df['الرابط'].map(url_key).isin(sitemap_keys))
+    ]['الرابط'].tolist()
 
-    # 2. الصفحات اليتيمة الحقيقية: بالخريطة وليست الرئيسية وبلا أي رابط داخلي
+    # 2. الصفحات اليتيمة: بالخريطة وليست الرئيسية وبلا أي رابط داخلي
     orphan_pages = []
     for u in sitemap_urls:
         k = url_key(u)
         if k in live_keys and k != target_k and k not in internally_linked_keys:
             orphan_pages.append(u)
 
-    # 3. الروابط الميتة بالخريطة
-    dead_pages = df[(df['متاحة'] == False) & (df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
+    unreachable = df[df['متاحة'] == False]
 
     coverage = {
         'sitemap_count': len(sitemap_urls),
         'unlisted_pages': unlisted_pages,
         'orphan_pages': orphan_pages,
-        'dead_pages': dead_pages
+        'dead_pages': dead_pages,
+        'noindex_pages': noindex_pages,
+        'unreachable_pages': unreachable['الرابط'].tolist(),
+        'unreachable_codes': unreachable['كود الاستجابة'].value_counts().to_dict(),
     }
+
+    def type_count(t):
+        return int((df['نوع الصفحة'] == t).sum())
 
     summary = {
         'total_pages': len(df),
-        'score': round(df[df['متاحة'] == True]['درجة السيو'].mean(), 1) if not df.empty else 0,
-        'products': int((df['نوع الصفحة'] == T_PRODUCT).sum()),
-        'categories': int((df['نوع الصفحة'] == T_CATEGORY).sum()),
-        'info_pages': int((df['نوع الصفحة'] == T_INFO).sum()),
-        'blog_pages': int((df['نوع الصفحة'] == T_BLOG).sum()),
-        'archive_pages': int((df['نوع الصفحة'] == T_ARCHIVE).sum()),
-        'broken_pages': int((df['متاحة'] == False).sum()),
+        'score': round(live_df['درجة السيو'].mean(), 1) if not live_df.empty else 0,
+        'products': type_count(T_PRODUCT),
+        'categories': type_count(T_CATEGORY),
+        'info_pages': type_count(T_INFO),
+        'blog_pages': type_count(T_BLOG),
+        'archive_pages': type_count(T_ARCHIVE),
+        'unknown_pages': type_count(T_UNKNOWN),
+        'broken_pages': len(unreachable),
+        'excluded_pages': len(dead_pages) + len(noindex_pages),
         'missing_titles': int((df['حالة العنوان'] == 'missing').sum()),
         'duplicate_titles': len(dup_titles),
         'title_mismatch': int((df['مطابقة العنوان مع H1'] == 'match_diff').sum()),
