@@ -12,7 +12,7 @@ ZIP_NAMES = {
         T_HOME: "5_الصفحة_الرئيسية.csv",
         T_UNKNOWN: "6_غير_مصنفة.csv",
         T_BROKEN: "7_روابط_معطلة.csv",
-        'images': "8_تدقيق_الصور.csv",
+        'images': "8_تدقيق_الصور_الفريدة.csv",
         'notidx': "9_صفحات_غير_مدرجة_في_الخريطة.csv",
         'orphan': "10_صفحات_يتيمة.csv",
         'dead': "11_روابط_معطلة_في_الخريطة.csv",
@@ -62,7 +62,10 @@ def build_fix_lists(df, images_df, lang='ar'):
         if not bad_imgs.empty:
             bad_imgs['نوع الصفحة'] = bad_imgs['نوع الصفحة'].map(lambda x: PAGE_TYPE_LABEL[lang].get(x, x))
             bad_imgs['حالة النص البديل'] = bad_imgs['حالة النص البديل'].map(lambda x: STATUS_LABEL[lang].get(x, x))
-            noalt_df = bad_imgs[['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة', 'النص البديل الحالي (Alt)', 'حالة النص البديل']].reset_index(drop=True)
+            cols = ['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة', 'النص البديل الحالي (Alt)', 'حالة النص البديل']
+            if 'عدد الصفحات' in bad_imgs.columns:
+                cols.append('عدد الصفحات')
+            noalt_df = bad_imgs[cols].reset_index(drop=True)
             noalt_df.insert(0, 'م', range(1, len(noalt_df) + 1))
 
     return fix_df, noalt_df
@@ -106,7 +109,7 @@ def build_zip_package(df, images_df, coverage=None, lang='ar'):
         with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
             df.to_excel(w, index=False, sheet_name='فحص الصفحات')
             if images_df is not None and not images_df.empty:
-                images_df.to_excel(w, index=False, sheet_name='فحص الصور')
+                images_df.to_excel(w, index=False, sheet_name='فحص الصور الفريدة')
             if not fix_df.empty:
                 fix_df.to_excel(w, index=False, sheet_name='يحتاج إصلاح')
             if not noalt_df.empty:
