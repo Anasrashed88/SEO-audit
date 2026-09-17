@@ -11,6 +11,12 @@ from urllib.parse import urlparse, urljoin, unquote
 from concurrent.futures import ThreadPoolExecutor
 
 try:
+    import advertools as adv
+    HAS_ADVERTOOLS = True
+except Exception:
+    HAS_ADVERTOOLS = False
+
+try:
     import lxml  # noqa: F401
     PARSER = "lxml"
 except Exception:
@@ -244,20 +250,20 @@ def extract_image_src(img):
         if val and val.strip(): return val.strip()
     return img.get('src', '').strip()
 
-# فلتر استبعاد صور القوالب وأصول المنصة (مثل static.zid.store والشعارات)
+# فلترة ذكية ومتقدمة لاستبعاد أصول المنصات والشعارات وأيقونات القوالب
 def is_relevant_seo_image(src, img):
     if not src or src.startswith('data:image'):
         return False
     s = src.lower()
 
-    # 1. استبعاد ملفات وأصول منصات زد وسلة وشوبيفاي الثابتة
+    # 1. استبعاد ملفات وأصول منصات زد وسلة وشوبيفاي
     if any(k in s for k in [
-        'static.zid.store', 'cdn.zid.store/assets', 'assets.salla.sa',
+        'static.zid.store', 'cdn.zid.store', 'assets.salla.sa',
         'cdn.salla.network/assets', 'shopifycloud', '/static/', 'static.'
     ]):
         return False
 
-    # 2. استبعاد صور النظام والشعارات الشائعة وأيقونات الدفع والشحن
+    # 2. استبعاد أيقونات الشحن، الدفع، ومراكز الأعمال والشعارات
     junk = [
         'favicon', 'avatar', 'payment', 'tamara', 'tabby', 'mada', 'visa', 'mastercard',
         'apple-pay', 'applepay', 'stc-pay', 'stcpay', 'pixel', 'spinner', 'loader',
@@ -408,13 +414,27 @@ def audit_single_page(task):
         'html': res.text[:20000] if page_type == T_HOME else ''
     }
 
-LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
-
+# جلب خرائط الموقع بالاستعانة بمكتبة advertools مع وجود خطة احتياطية مدمجة
 def fetch_sitemap_urls(base_url):
     base_clean = normalize_url(base_url)
     target_netloc = normalize_domain(urlparse(base_clean).netloc)
-    found_urls, visited_maps = set(), set()
+    found_urls = set()
 
+    # محاولة استخدام advertools لجلب الخرائط بدقة قياسية
+    if HAS_ADVERTOOLS:
+        try:
+            sm_df = adv.sitemap_to_df(f"{base_clean}/sitemap.xml")
+            if sm_df is not None and 'loc' in sm_df.columns:
+                for loc in sm_df['loc'].dropna().tolist():
+                    if normalize_domain(urlparse(loc).netloc) == target_netloc:
+                        found_urls.add(clean_url(loc))
+                if len(found_urls) > 5:
+                    return found_urls
+        except Exception:
+            pass
+
+    # محرك احتياطي مدمج عالي الدقة يدعم الفهارس والملفات المضغوطة
+    visited_maps = set()
     candidates = [
         f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
         f"{base_clean}/sitemap_products_1.xml", f"{base_clean}/sitemap_categories_1.xml",
@@ -428,8 +448,10 @@ def fetch_sitemap_urls(base_url):
                 sm = line.split(':', 1)[1].strip()
                 if sm and sm not in candidates: candidates.append(sm)
 
+    LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
+
     def parse_map(sm_url):
-        if sm_url in visited_maps or len(visited_maps) > 25: return
+        if sm_url in visited_maps or len(visited_maps) > 30: return
         visited_maps.add(sm_url)
         res = safe_get(sm_url, timeout=15, retries=1)
         if not res or res.status_code != 200: return
@@ -450,7 +472,7 @@ def fetch_sitemap_urls(base_url):
     for c in candidates: parse_map(c)
     return found_urls
 
-# دالة فلترة وتوحيد الصور الفريدة مع حساب مرات الظهور
+# دالة توحيد وفلترة الصور الفريدة لمنع تكرار الصورة عبر الصفحات
 def get_unique_images(images_df):
     if images_df is None or images_df.empty:
         return images_df
@@ -461,7 +483,7 @@ def get_unique_images(images_df):
 
 def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     target = normalize_url(target_url)
-    if progress_cb: progress_cb(0.05, "جلب وفحص خريطة الموقع (Sitemap)... (5%)")
+    if progress_cb: progress_cb(0.05, "جلب وقراءة خريطة الموقع (Sitemap)... (5%)")
 
     sitemap_urls = fetch_sitemap_urls(target)
     queue = list(sitemap_urls) if sitemap_urls else []
