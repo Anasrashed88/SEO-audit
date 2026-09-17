@@ -67,7 +67,7 @@ def _session():
     sess = getattr(_TL, 'sess', None)
     if sess is None:
         sess = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=12, pool_maxsize=24, max_retries=1)
         sess.mount('https://', adapter)
         sess.mount('http://', adapter)
         sess.headers.update(HEADERS)
@@ -158,6 +158,8 @@ POLICY_KEYWORDS = [
     'payment', 'returns', 'refund', 'refunds', 'legal', 'policies', 'policy', 'help'
 ]
 
+CATALOG_ROOTS = ['products', 'latest-products', 'collections/all', 'shop', 'store']
+
 def detect_page_type(url, base_url, soup=None):
     base_clean = normalize_url(base_url)
     url_clean = clean_url(url)
@@ -184,7 +186,7 @@ def detect_page_type(url, base_url, soup=None):
     if 'article' in og_type or 'blog' in og_type or any(s in ('blog', 'blogs', 'articles', 'مدونة', 'مقالات') for s in segs):
         return T_BLOG
 
-    if any(s in ('category', 'categories', 'collection', 'collections', 'قسم', 'أقسام', 'تصنيف') for s in segs):
+    if path in CATALOG_ROOTS or any(s in ('category', 'categories', 'collection', 'collections', 'قسم', 'أقسام', 'تصنيف') for s in segs):
         return T_CATEGORY
     if re.search(r'/c\d+', url_clean) or any(re.match(r'^c\d+$', s) for s in segs):
         return T_CATEGORY
@@ -257,7 +259,6 @@ def extract_image_src(img):
         if val and val.strip(): return val.strip()
     return img.get('src', '').strip()
 
-# تنظيف وتوحيد روابط الصور بحذف بادئات Cloudflare Resizing لدمج الصور المكررة
 def clean_image_url(url):
     if not url: return ""
     u = url.strip()
@@ -307,6 +308,7 @@ def extract_page_links(soup, page_url, base_netloc):
         full = clean_url(urljoin(page_url, href))
         if is_crawlable(full, base_netloc): links.add(full)
 
+    # وسوم سلة لكروت المنتجات والتمرير
     for card in soup.find_all(['salla-product-card', 'div', 'article'], attrs={'data-url': True}):
         full = clean_url(urljoin(page_url, card['data-url']))
         if is_crawlable(full, base_netloc): links.add(full)
@@ -431,43 +433,18 @@ def audit_single_page(task):
         'html': res.text[:20000] if page_type == T_HOME else ''
     }
 
+# جلب خرائط الموقع مع حلقة استكشاف خرائط سلة وزد المرقمة تلقائياً
 def fetch_sitemap_urls(base_url):
     base_clean = normalize_url(base_url)
     target_netloc = normalize_domain(urlparse(base_clean).netloc)
     found_urls = set()
-
-    if HAS_ADVERTOOLS:
-        try:
-            sm_df = adv.sitemap_to_df(f"{base_clean}/sitemap.xml")
-            if sm_df is not None and 'loc' in sm_df.columns:
-                for loc in sm_df['loc'].dropna().tolist():
-                    if normalize_domain(urlparse(loc).netloc) == target_netloc:
-                        found_urls.add(clean_url(loc))
-                if len(found_urls) > 5:
-                    return found_urls
-        except Exception:
-            pass
-
     visited_maps = set()
-    candidates = [
-        f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
-        f"{base_clean}/sitemap_products_1.xml", f"{base_clean}/sitemap_categories_1.xml",
-        f"{base_clean}/sitemap_pages_1.xml",
-    ]
-
-    res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
-    if res_r and res_r.status_code == 200:
-        for line in res_r.text.splitlines():
-            if line.lower().strip().startswith('sitemap:'):
-                sm = line.split(':', 1)[1].strip()
-                if sm and sm not in candidates: candidates.append(sm)
-
     LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
 
     def parse_map(sm_url):
-        if sm_url in visited_maps or len(visited_maps) > 30: return
+        if sm_url in visited_maps or len(visited_maps) > 60: return
         visited_maps.add(sm_url)
-        res = safe_get(sm_url, timeout=15, retries=1)
+        res = safe_get(sm_url, timeout=12, retries=1)
         if not res or res.status_code != 200: return
         content = res.content
         if sm_url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
@@ -483,7 +460,46 @@ def fetch_sitemap_urls(base_url):
                 if normalize_domain(urlparse(loc).netloc) == target_netloc:
                     found_urls.add(clean_url(loc))
 
-    for c in candidates: parse_map(c)
+    # 1. فحص خرائط الموقع الأساسية
+    candidates = [
+        f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
+        f"{base_clean}/sitemap_products_1.xml", f"{base_clean}/sitemap_categories_1.xml",
+        f"{base_clean}/sitemap_pages_1.xml", f"{base_clean}/sitemap_brands_1.xml"
+    ]
+
+    res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
+    if res_r and res_r.status_code == 200:
+        for line in res_r.text.splitlines():
+            if line.lower().strip().startswith('sitemap:'):
+                sm = line.split(':', 1)[1].strip()
+                if sm and sm not in candidates: candidates.append(sm)
+
+    for c in candidates:
+        parse_map(c)
+
+    # 2. حلقة استكشاف خرائط سلة وزد المقسمة تلقائياً (_2.xml, _3.xml, _4.xml...)
+    prefixes = ['sitemap_products', 'sitemap-products', 'sitemap_categories', 'sitemap_pages']
+    for pfx in prefixes:
+        idx = 2
+        consecutive_fails = 0
+        while idx <= 40:  # يدعم حتى 4000 منتج مقسم في سلة
+            sm_numbered = f"{base_clean}/{pfx}_{idx}.xml"
+            res = safe_get(sm_numbered, timeout=6, retries=0)
+            if not res or res.status_code != 200 or '<loc' not in res.text.lower():
+                sm_hyphen = f"{base_clean}/{pfx}-{idx}.xml"
+                res = safe_get(sm_hyphen, timeout=6, retries=0)
+                if not res or res.status_code != 200 or '<loc' not in res.text.lower():
+                    consecutive_fails += 1
+                    if consecutive_fails >= 2:
+                        break
+                    idx += 1
+                    continue
+                sm_numbered = sm_hyphen
+
+            consecutive_fails = 0
+            parse_map(sm_numbered)
+            idx += 1
+
     return found_urls
 
 def get_unique_images(images_df):
@@ -494,19 +510,62 @@ def get_unique_images(images_df):
     u_df['عدد الصفحات'] = u_df['رابط الصورة'].map(counts)
     return u_df.reset_index(drop=True)
 
+# محرك حصد ترقيم الأقسام وقوائم المنتجات لتجاوز التمرير اللانهائي
+def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, progress_cb=None):
+    base_netloc = urlparse(normalize_url(base_url)).netloc
+    new_links = []
+    
+    for cat_url in list(listing_urls)[:25]:  # حتى 25 قسماً رئيسياً
+        for page_num in range(2, 25):  # فحص حتى 24 صفحة تالية لكل قسم
+            if len(seen_keys) + len(new_links) >= max_pages:
+                break
+                
+            paged_url = f"{cat_url}?page={page_num}"
+            res = safe_get(paged_url, timeout=8, retries=0)
+            if not res or res.status_code != 200:
+                break
+                
+            soup = make_soup(res.text)
+            page_links = extract_page_links(soup, paged_url, base_netloc)
+            
+            fresh_in_page = 0
+            for link in page_links:
+                k = url_key(link)
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    new_links.append(link)
+                    fresh_in_page += 1
+                    
+            # إذا لم تعد الصفحة تحتوي على أي منتجات جديدة، نتوقف عن التمرير في هذا القسم
+            if fresh_in_page == 0:
+                break
+                
+            if progress_cb:
+                progress_cb(f"تم حصد {len(new_links)} منتج إضافي عبر تتبع التمرير...")
+                
+    return new_links
+
 def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     target = normalize_url(target_url)
-    if progress_cb: progress_cb(0.05, "جلب وقراءة خريطة الموقع (Sitemap)... (5%)")
+    if progress_cb: progress_cb(0.05, "جلب خرائط الموقع والملفات المقسمة... (5%)")
 
     sitemap_urls = fetch_sitemap_urls(target)
-    queue = list(sitemap_urls) if sitemap_urls else []
-    if target not in queue: queue.insert(0, target)
-
+    
+    # بذور القوائم الأساسية لضمان كشف الأقسام حتى لو غابت عن السايت ماب
+    platform_seeds = [
+        target, f"{target}/products", f"{target}/latest-products",
+        f"{target}/categories", f"{target}/collections/all"
+    ]
+    
+    queue = list(dict.fromkeys(list(sitemap_urls) + platform_seeds))
     seen = {url_key(u) for u in queue}
+    
     pages_result, images_result, visited_keys = [], [], set()
     internally_linked_keys = set()
+    category_urls = set()
     platform, done_count = 'unknown', 0
 
+    # الجولة الأولى: فحص الصفحات المكتشفة
     while queue and len(pages_result) < max_pages:
         batch = queue[:workers * 2]
         queue = queue[workers * 2:]
@@ -524,22 +583,41 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
             if res.get('html') and platform == 'unknown':
                 platform = detect_platform(res['html'], url=target)
 
+            # جمع روابط الأقسام لاستخدامها في محرك متابعة التمرير
+            if p_data['نوع الصفحة'] == T_CATEGORY:
+                category_urls.add(p_data['الرابط'])
+
             for link in res['links']:
                 k = url_key(link)
                 internally_linked_keys.add(k)
-                if k not in seen and len(seen) < max_pages * 2:
+                if k not in seen and len(seen) < max_pages:
                     seen.add(k)
                     queue.append(link)
 
             done_count += 1
             if progress_cb:
                 est_total = min(max_pages, max(done_count + len(queue), 1))
-                pct = min(1.0, 0.05 + 0.95 * (done_count / est_total))
-                progress_cb(pct, f"جارٍ الفحص: {done_count} من أصل {est_total} صفحة ({int(pct * 100)}%)")
+                pct = min(0.92, 0.05 + 0.87 * (done_count / est_total))
+                progress_cb(pct, f"جارٍ الفحص: {done_count} صفحة ({int(pct * 100)}%)")
+
+    # الجولة الثانية: تتبع التمرير في الأقسام وصفحة كل المنتجات
+    if len(pages_result) < max_pages:
+        if progress_cb: progress_cb(0.93, "متابعة ترقيم الأقسام وتجاوز التمرير اللانهائي... (93%)")
+        harvest_seeds = list(category_urls) + [f"{target}/products", f"{target}/latest-products"]
+        extra_products = harvest_category_pagination(target, harvest_seeds, seen, max_pages)
+        
+        if extra_products:
+            extra_tasks = [(u, target, 'ترقيم وتمرير') for u in extra_products[:max_pages - len(pages_result)]]
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                extra_results = list(ex.map(audit_single_page, extra_tasks))
+            for res in extra_results:
+                pages_result.append(res['page_data'])
+                images_result.extend(res['images_data'])
 
     df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
     raw_imgs_df = pd.DataFrame(images_result)
 
+    # تجميع الصور الفريدة الموحدة واستبعاد التكرار
     imgs_df = get_unique_images(raw_imgs_df)
 
     if imgs_df is not None and not imgs_df.empty:
@@ -557,14 +635,17 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     live_keys = {url_key(r['الرابط']) for _, r in df[df['متاحة'] == True].iterrows()}
     target_k = url_key(target)
 
+    # 1. الصفحات المعروضة الغائبة عن السايت ماب
     unlisted_pages = df[(df['متاحة'] == True) & (~df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
 
+    # 2. الصفحات اليتيمة الحقيقية: بالخريطة وليست الرئيسية وبلا أي رابط داخلي
     orphan_pages = []
     for u in sitemap_urls:
         k = url_key(u)
         if k in live_keys and k != target_k and k not in internally_linked_keys:
             orphan_pages.append(u)
 
+    # 3. الروابط الميتة بالخريطة
     dead_pages = df[(df['متاحة'] == False) & (df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
 
     coverage = {
