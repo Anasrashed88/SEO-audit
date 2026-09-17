@@ -69,7 +69,9 @@ COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#4755
          'accent': '#0f172a', 'muted': '#94a3b8'}
 
 # أكواد تعني أن الصفحة محذوفة فعلاً (تُستبعد من التقرير)
-GONE_CODES = {'404', '410'}
+REDIRECT_HOME = 'تحويل للرئيسية'
+# سلة تحوّل المنتج المحذوف أو المخفي إلى الصفحة الرئيسية بدل 404
+GONE_CODES = {'404', '410', REDIRECT_HOME}
 # أكواد تعني أن المتجر أبطأنا أو تعطل مؤقتاً (تستحق إعادة محاولة هادئة)
 RETRYABLE_CODES = {'فشل اتصال', '403', '429', '500', '502', '503', '504',
                    '520', '521', '522', '523', '524'}
@@ -523,6 +525,32 @@ def is_noindex(soup, res):
             return True
     return False
 
+def _unreachable_record(url, base_url, source, code):
+    return {
+        'page_data': {
+            # النوع يُستنتج من الرابط حتى لو لم تُفتح الصفحة
+            'نوع الصفحة': _detect_type_by_url(clean_url(url), base_url),
+            'الرابط': url, 'مصدر الاكتشاف': source,
+            'متاحة': False, 'كود الاستجابة': code, 'قابلة للأرشفة': False,
+            'عنوان الميتا': '', 'طول العنوان': 0, 'حالة العنوان': 'failed',
+            'عنوان الصفحة (H1)': '', 'مطابقة العنوان مع H1': 'match_empty',
+            'وصف الميتا': '', 'طول الوصف': 0, 'حالة الوصف': 'failed',
+            'إجمالي الصور': 0, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
+            'عدد الكلمات': 0, 'حالة المحتوى': 'na',
+            'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '',
+            'درجة السيو': 0
+        },
+        'images_data': [], 'links': set()
+    }
+
+def _canonical_of(soup, page_url):
+    for link in soup.find_all('link', href=True):
+        rel = link.get('rel') or []
+        if isinstance(rel, str): rel = [rel]
+        if 'canonical' in [r.lower() for r in rel]:
+            return clean_url(urljoin(page_url, link['href']))
+    return ''
+
 def audit_single_page(task, timeout=10):
     url, base_url, source = task
     base_netloc = urlparse(normalize_url(base_url)).netloc
@@ -531,36 +559,24 @@ def audit_single_page(task, timeout=10):
     if res is None or res.status_code != 200:
         # ملاحظة: لا نستخدم «if res» لأن الاستجابة 404/429 تُعتبر False في مكتبة requests
         code = str(res.status_code) if res is not None else 'فشل اتصال'
-        return {
-            'page_data': {
-                # النوع يُستنتج من الرابط حتى لو لم تُفتح الصفحة
-                'نوع الصفحة': _detect_type_by_url(clean_url(url), base_url),
-                'الرابط': url, 'مصدر الاكتشاف': source,
-                'متاحة': False, 'كود الاستجابة': code, 'قابلة للأرشفة': False,
-                'عنوان الميتا': '', 'طول العنوان': 0, 'حالة العنوان': 'failed',
-                'عنوان الصفحة (H1)': '', 'مطابقة العنوان مع H1': 'match_empty',
-                'وصف الميتا': '', 'طول الوصف': 0, 'حالة الوصف': 'failed',
-                'إجمالي الصور': 0, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
-                'عدد الكلمات': 0, 'حالة المحتوى': 'na',
-                'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '',
-                'درجة السيو': 0
-            },
-            'images_data': [], 'links': set()
-        }
+        return _unreachable_record(url, base_url, source, code)
 
     final_url = clean_url(res.url)
     soup = make_soup(res.text)
+
+    # رابط ليس للرئيسية لكنه انتهى بالرئيسية (تحويل، أو canonical يشير للرئيسية)
+    # = منتج أو صفحة محذوفة/مخفية في سلة
+    home_key = url_key(normalize_url(base_url))
+    if url_key(clean_url(url)) != home_key:
+        canon_now = _canonical_of(soup, final_url)
+        if url_key(final_url) == home_key or (canon_now and url_key(canon_now) == home_key):
+            return _unreachable_record(url, base_url, source, REDIRECT_HOME)
+
     page_type = detect_page_type(final_url, base_url, soup)
     links = extract_page_links(soup, final_url, base_netloc)
     indexable = not is_noindex(soup, res)
 
-    canonical = ''
-    for link in soup.find_all('link', href=True):
-        rel = link.get('rel') or []
-        if isinstance(rel, str): rel = [rel]
-        if 'canonical' in [r.lower() for r in rel]:
-            canonical = clean_url(urljoin(final_url, link['href']))
-            break
+    canonical = _canonical_of(soup, final_url)
     if not canonical:
         canon_status, canonical = 'canon_missing', final_url
     elif url_key(canonical) == url_key(final_url):
@@ -880,7 +896,10 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
     # الصفحات المستبعدة: محذوفة (404/410) أو مخفية عن جوجل (noindex)
     gone_mask = full_df['كود الاستجابة'].isin(GONE_CODES)
     noindex_mask = (full_df['متاحة'] == True) & (full_df['قابلة للأرشفة'] == False)
-    dead_pages = full_df[gone_mask & full_df['_key'].isin(sitemap_keys)]['الرابط'].tolist()
+    in_sitemap = full_df['_key'].isin(sitemap_keys)
+    redirect_mask = full_df['كود الاستجابة'] == REDIRECT_HOME
+    dead_pages = full_df[gone_mask & ~redirect_mask & in_sitemap]['الرابط'].tolist()
+    redirect_home_pages = full_df[redirect_mask & in_sitemap]['الرابط'].tolist()
     noindex_pages = full_df[noindex_mask]['الرابط'].tolist()
 
     # التقرير يشمل فقط الصفحات الموجودة والمسموح لجوجل بعرضها
@@ -928,6 +947,9 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
         'unlisted_pages': unlisted_pages,
         'orphan_pages': orphan_pages,
         'dead_pages': dead_pages,
+        'redirect_home_pages': redirect_home_pages,
+        'redirect_home_by_type': {str(k): int(v) for k, v in
+                                  full_df[redirect_mask]['نوع الصفحة'].value_counts().items()},
         'noindex_pages': noindex_pages,
         'unreachable_pages': unreachable['الرابط'].tolist(),
         'unreachable_codes': {str(k): int(v) for k, v in unreachable['كود الاستجابة'].value_counts().items()},
@@ -946,7 +968,8 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
         'archive_pages': type_count(T_ARCHIVE),
         'unknown_pages': type_count(T_UNKNOWN),
         'broken_pages': len(unreachable),
-        'excluded_pages': len(dead_pages) + len(noindex_pages),
+        'excluded_pages': int(gone_mask.sum()) + len(noindex_pages),
+        'redirect_home_count': int(redirect_mask.sum()),
         'missing_titles': int((df['حالة العنوان'] == 'missing').sum()),
         'duplicate_titles': len(dup_titles),
         'title_mismatch': int((df['مطابقة العنوان مع H1'] == 'match_diff').sum()),
