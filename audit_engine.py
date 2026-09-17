@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import time
 import gzip
+import json
 import re
 from functools import lru_cache
 import threading
@@ -160,6 +161,29 @@ POLICY_KEYWORDS = [
 
 CATALOG_ROOTS = ['products', 'latest-products', 'collections/all', 'shop', 'store']
 
+# دالة مساعدة لقراءة بيانات الـ JSON-LD لمحركات البحث
+def _has_jsonld_type(soup, wanted):
+    if not soup: return False
+    for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
+        try:
+            data = json.loads(tag.string or '{}')
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                stack.extend(node)
+            elif isinstance(node, dict):
+                if '@graph' in node and isinstance(node['@graph'], list):
+                    stack.extend(node['@graph'])
+                t = node.get('@type')
+                types = t if isinstance(t, list) else [t]
+                if any(str(x).lower() in [w.lower() for w in wanted] for x in types if x):
+                    return True
+    return False
+
+# دالة تصنيف نوع الصفحة الشاملة والذكية
 def detect_page_type(url, base_url, soup=None):
     base_clean = normalize_url(base_url)
     url_clean = clean_url(url)
@@ -169,26 +193,52 @@ def detect_page_type(url, base_url, soup=None):
     path = unquote(urlparse(url_clean).path.lower()).strip('/')
     segs = [s for s in path.split('/') if s]
 
+    # 1. فحص بيانات محركات البحث الرسمية (JSON-LD) - أدق تصنيف
+    if soup:
+        if _has_jsonld_type(soup, ('Product', 'IndividualProduct')):
+            return T_PRODUCT
+        if _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
+            return T_BLOG
+        if _has_jsonld_type(soup, ('CollectionPage',)):
+            return T_CATEGORY
+
+    # 2. فحص أوسمة الميكروداتا و OpenGraph
     og_type = ""
     if soup:
-        tag = soup.find('meta', attrs={'property': 'og:type'})
+        tag = soup.find('meta', attrs={'property': re.compile(r'^(og:type|twitter:card)$', re.I)})
         if tag and tag.get('content'):
             og_type = tag['content'].lower()
+        if soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
+            return T_PRODUCT
 
-    if 'product' in og_type or re.search(r'/p\d+', url_clean) or any(re.match(r'^p\d+$', s) for s in segs):
+    if 'product' in og_type:
+        return T_PRODUCT
+
+    # 3. فحص مكونات منصتي سلة وزد الخاصة بصفحات المنتجات
+    if soup:
+        if soup.find(['salla-add-product-button', 'salla-price']) or soup.find(attrs={'data-product-id': True}):
+            return T_PRODUCT
+        if soup.find('form', action=re.compile(r'/cart/add', re.I)):
+            return T_PRODUCT
+
+    # 4. فحص الروابط الموسع (يدعم p123 و p-123 و -p123 و /products/)
+    if re.search(r'[-/]p-?\d{4,}', url_clean) or any(re.match(r'^p-?\d+$', s) for s in segs):
         return T_PRODUCT
     if ('products' in segs or 'product' in segs) and len(segs) >= 2:
         return T_PRODUCT
 
+    # 5. الصفحات التعريفية والسياسات
     if any(k in path for k in POLICY_KEYWORDS):
         return T_INFO
 
+    # 6. المدونة والمقالات
     if 'article' in og_type or 'blog' in og_type or any(s in ('blog', 'blogs', 'articles', 'مدونة', 'مقالات') for s in segs):
         return T_BLOG
 
+    # 7. الأقسام والتصنيفات
     if path in CATALOG_ROOTS or any(s in ('category', 'categories', 'collection', 'collections', 'قسم', 'أقسام', 'تصنيف') for s in segs):
         return T_CATEGORY
-    if re.search(r'/c\d+', url_clean) or any(re.match(r'^c\d+$', s) for s in segs):
+    if re.search(r'[-/]c-?\d{3,}', url_clean) or any(re.match(r'^c-?\d+$', s) for s in segs):
         return T_CATEGORY
 
     return T_UNKNOWN
@@ -308,7 +358,6 @@ def extract_page_links(soup, page_url, base_netloc):
         full = clean_url(urljoin(page_url, href))
         if is_crawlable(full, base_netloc): links.add(full)
 
-    # وسوم سلة لكروت المنتجات والتمرير
     for card in soup.find_all(['salla-product-card', 'div', 'article'], attrs={'data-url': True}):
         full = clean_url(urljoin(page_url, card['data-url']))
         if is_crawlable(full, base_netloc): links.add(full)
@@ -433,12 +482,40 @@ def audit_single_page(task):
         'html': res.text[:20000] if page_type == T_HOME else ''
     }
 
-# جلب خرائط الموقع مع حلقة استكشاف خرائط سلة وزد المرقمة تلقائياً
+# جلب خرائط الموقع وقراءة الملفات المقسمة (sitemap-1.xml, sitemap-2.xml...)
 def fetch_sitemap_urls(base_url):
     base_clean = normalize_url(base_url)
     target_netloc = normalize_domain(urlparse(base_clean).netloc)
     found_urls = set()
+
+    if HAS_ADVERTOOLS:
+        try:
+            sm_df = adv.sitemap_to_df(f"{base_clean}/sitemap.xml")
+            if sm_df is not None and 'loc' in sm_df.columns:
+                for loc in sm_df['loc'].dropna().tolist():
+                    if normalize_domain(urlparse(loc).netloc) == target_netloc:
+                        found_urls.add(clean_url(loc))
+                if len(found_urls) > 5:
+                    return found_urls
+        except Exception:
+            pass
+
     visited_maps = set()
+    candidates = [
+        f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
+        f"{base_clean}/sitemap-1.xml", f"{base_clean}/sitemap_1.xml",
+        f"{base_clean}/sitemap_products_1.xml", f"{base_clean}/sitemap-products-1.xml",
+        f"{base_clean}/sitemap_categories_1.xml", f"{base_clean}/sitemap_pages_1.xml",
+        f"{base_clean}/sitemap_brands_1.xml"
+    ]
+
+    res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
+    if res_r and res_r.status_code == 200:
+        for line in res_r.text.splitlines():
+            if line.lower().strip().startswith('sitemap:'):
+                sm = line.split(':', 1)[1].strip()
+                if sm and sm not in candidates: candidates.append(sm)
+
     LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
 
     def parse_map(sm_url):
@@ -460,62 +537,32 @@ def fetch_sitemap_urls(base_url):
                 if normalize_domain(urlparse(loc).netloc) == target_netloc:
                     found_urls.add(clean_url(loc))
 
-    # 1. فحص خرائط الموقع الأساسية
-    candidates = [
-        f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
-        f"{base_clean}/sitemap_products_1.xml", f"{base_clean}/sitemap_categories_1.xml",
-        f"{base_clean}/sitemap_pages_1.xml", f"{base_clean}/sitemap_brands_1.xml"
-    ]
-
-    res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
-    if res_r and res_r.status_code == 200:
-        for line in res_r.text.splitlines():
-            if line.lower().strip().startswith('sitemap:'):
-                sm = line.split(':', 1)[1].strip()
-                if sm and sm not in candidates: candidates.append(sm)
-
     for c in candidates:
         parse_map(c)
 
-    # 2. حلقة استكشاف خرائط سلة وزد المقسمة تلقائياً (_2.xml, _3.xml, _4.xml...)
-   # 2. حلقة استكشاف خرائط سلة وزد الحقيقية (sitemap-1.xml, sitemap-2.xml, sitemap_2.xml...)
-    prefixes = [
-        'sitemap-', 'sitemap_', 'sitemap_products_', 'sitemap-products-',
-        'sitemap_categories_', 'sitemap_pages_'
+    # حلقة استكشاف خرائط سلة وزد الحقيقية (sitemap-1.xml, sitemap-2.xml, sitemap_products_2.xml...)
+    patterns = [
+        ('sitemap-', ''),
+        ('sitemap_', ''),
+        ('sitemap_products_', ''),
+        ('sitemap-products-', ''),
+        ('sitemap_categories_', ''),
+        ('sitemap_pages_', ''),
     ]
-    for pfx in prefixes:
-        idx = 1
-        consecutive_fails = 0
-        while idx <= 40:  # يدعم حتى 40 ملف خريطة متتالي
-            sm_numbered = f"{base_clean}/{pfx}{idx}.xml"
-            res = safe_get(sm_numbered, timeout=8, retries=0)
+    for prefix, suffix in patterns:
+        idx = 2
+        fails = 0
+        while idx <= 40:
+            sm_url = f"{base_clean}/{prefix}{idx}{suffix}.xml"
+            res = safe_get(sm_url, timeout=6, retries=0)
             if not res or res.status_code != 200 or '<loc' not in res.text.lower():
-                consecutive_fails += 1
-                if consecutive_fails >= 2:
+                fails += 1
+                if fails >= 2:
                     break
                 idx += 1
                 continue
-
-            consecutive_fails = 0
-            parse_map(sm_numbered)
-            idx += 1
-        consecutive_fails = 0
-        while idx <= 40:  # يدعم حتى 4000 منتج مقسم في سلة
-            sm_numbered = f"{base_clean}/{pfx}_{idx}.xml"
-            res = safe_get(sm_numbered, timeout=6, retries=0)
-            if not res or res.status_code != 200 or '<loc' not in res.text.lower():
-                sm_hyphen = f"{base_clean}/{pfx}-{idx}.xml"
-                res = safe_get(sm_hyphen, timeout=6, retries=0)
-                if not res or res.status_code != 200 or '<loc' not in res.text.lower():
-                    consecutive_fails += 1
-                    if consecutive_fails >= 2:
-                        break
-                    idx += 1
-                    continue
-                sm_numbered = sm_hyphen
-
-            consecutive_fails = 0
-            parse_map(sm_numbered)
+            fails = 0
+            parse_map(sm_url)
             idx += 1
 
     return found_urls
@@ -533,12 +580,13 @@ def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, pr
     base_netloc = urlparse(normalize_url(base_url)).netloc
     new_links = []
     
-    for cat_url in list(listing_urls)[:25]:  # حتى 25 قسماً رئيسياً
-        for page_num in range(2, 25):  # فحص حتى 24 صفحة تالية لكل قسم
+    for cat_url in list(listing_urls)[:25]:
+        for page_num in range(2, 25):
             if len(seen_keys) + len(new_links) >= max_pages:
                 break
                 
-            paged_url = f"{cat_url}?page={page_num}"
+            sep = '&' if '?' in cat_url else '?'
+            paged_url = f"{cat_url}{sep}page={page_num}"
             res = safe_get(paged_url, timeout=8, retries=0)
             if not res or res.status_code != 200:
                 break
@@ -554,7 +602,6 @@ def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, pr
                     new_links.append(link)
                     fresh_in_page += 1
                     
-            # إذا لم تعد الصفحة تحتوي على أي منتجات جديدة، نتوقف عن التمرير في هذا القسم
             if fresh_in_page == 0:
                 break
                 
@@ -569,8 +616,7 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
 
     sitemap_urls = fetch_sitemap_urls(target)
     
-    # بذور القوائم الأساسية لضمان كشف الأقسام حتى لو غابت عن السايت ماب
-# فحص صامت للمسارات التخمينية: إن كانت تعمل نأخذ روابطها، وإن كانت 404 نتجاهلها دون تسجيلها كخطأ
+    # فحص صامت للمسارات التخمينية: إن كانت تعمل نأخذ روابطها، وإن كانت 404 نتجاهلها دون تسجيلها كخطأ
     discovered_seeds = set()
     for seed in [f"{target}/products", f"{target}/latest-products", f"{target}/categories"]:
         res_seed = safe_get(seed, timeout=6, retries=0)
@@ -603,7 +649,6 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
             if res.get('html') and platform == 'unknown':
                 platform = detect_platform(res['html'], url=target)
 
-            # جمع روابط الأقسام لاستخدامها في محرك متابعة التمرير
             if p_data['نوع الصفحة'] == T_CATEGORY:
                 category_urls.add(p_data['الرابط'])
 
