@@ -736,7 +736,7 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     return df, imgs_df, summary, coverage, dup_titles, dup_descs
 
 # ==============================================================
-#  توليد الفاتورة مع رمز الريال على اليسار وحل خطأ Bold
+#  توليد الفاتورة مع رمز الريال على اليسار وألوان RGB الصحيحة
 # ==============================================================
 def shape_ar(text):
     if not text:
@@ -765,7 +765,7 @@ def generate_invoice_pdf(domain, quote, lang='ar'):
     def print_price(val, x, y, size=10, bold=False):
         num_str = f"{val:,.0f}"
         pdf.set_font(font_family, "B" if (has_font and bold) else "", size)
-        pdf.set_text_color(*COLOR['accent'])
+        pdf.set_text_color(15, 23, 42)
         nw = pdf.get_string_width(num_str)
         sym_h = size * 0.32
         sym_w = sym_h * 0.95
@@ -786,7 +786,7 @@ def generate_invoice_pdf(domain, quote, lang='ar'):
             pdf.cell(10, 6, fmt("ر.س"), 0, 0, 'L')
 
     pdf.set_font(font_family, "B" if has_font else "", 18)
-    pdf.set_text_color(*COLOR['accent'])
+    pdf.set_text_color(15, 23, 42)
     pdf.set_xy(M, 18)
     pdf.cell(W, 8, fmt("عرض سعر وتهيئة السيو"), 0, 1, 'R')
     pdf.set_font(font_family, "", 9.5)
@@ -820,7 +820,7 @@ def generate_invoice_pdf(domain, quote, lang='ar'):
     pdf.ln(5)
     y_tot = pdf.get_y()
     pdf.set_font(font_family, "B" if has_font else "", 12)
-    pdf.set_text_color(*COLOR['accent'])
+    pdf.set_text_color(15, 23, 42)
     pdf.set_xy(M + 80, y_tot)
     pdf.cell(50, 8, fmt("الإجمالي المستحق:"), 0, 0, 'R')
     print_price(quote['total'], M + 135, y_tot + 1, 12, True)
