@@ -8,7 +8,6 @@ import io
 import gzip
 import json
 import re
-import zipfile
 from functools import lru_cache
 import sqlite3
 import threading
@@ -45,18 +44,16 @@ FONT_CANDIDATES = [
 def pick_font():
     for name, reg, bold in FONT_CANDIDATES:
         rp = BASE_DIR / reg
-        if rp.exists() and rp.stat().st_size > 20000:
+        if rp.exists() and rp.stat().st_size > 10000:
             bp = BASE_DIR / bold
-            return name, rp, (bp if bp.exists() and bp.stat().st_size > 20000 else None)
-    return "Amiri", BASE_DIR / "Amiri-Regular.ttf", None
+            has_b = bp.exists() and bp.stat().st_size > 10000
+            return name, rp, (bp if has_b else rp)
+    amiri = BASE_DIR / "Amiri-Regular.ttf"
+    if amiri.exists():
+        return "Amiri", amiri, amiri
+    return "Helvetica", None, None
 
 AR_FONT_NAME, FONT_PATH, FONT_BOLD_PATH = pick_font()
-
-try:
-    import uharfbuzz  # noqa: F401
-    HAS_SHAPING = True
-except Exception:
-    HAS_SHAPING = False
 
 LOGO_PATH = BASE_DIR / "brand_logo.png"
 RIYAL_PATH = BASE_DIR / "Saudi_Riyal_Symbol-1.png"
@@ -68,17 +65,11 @@ try:
 except Exception:
     PARSER = "html.parser"
 
-MAX_PAGES_DEFAULT = 1500
-MAX_PAGINATION_DEPTH = 30
-
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept-Language': 'ar,en;q=0.9',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
 }
 
 T_HOME, T_PRODUCT, T_CATEGORY = 'home', 'product', 'category'
@@ -102,19 +93,7 @@ STATUS_LABEL = {
         'alt_ok': 'سليم', 'alt_empty': 'لا يوجد (فارغ)',
         'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
         'match_ok': 'متطابق', 'match_diff': 'مختلف عن اسم المنتج', 'match_empty': 'غير متوفر',
-    },
-    'en': {
-        'missing': 'Missing', 'very_short': 'Too short', 'acceptable': 'Acceptable',
-        'optimal': 'Optimal', 'long': 'Too long', 'failed': 'Failed',
-        'good': 'Good', 'thin': 'Thin', 'na': 'N/A',
-        'alt_missing': 'Missing', 'alt_generic': 'Not descriptive',
-        'alt_stuffed': 'Keyword stuffed', 'alt_long': 'Over 125 chars',
-        'alt_duplicate': 'Duplicate', 'alt_ok': 'Good',
-        'alt_empty': '(empty)',
-        'canon_same': 'Self-referencing', 'canon_diff': 'Differs from URL',
-        'canon_missing': 'Missing',
-        'match_ok': 'Matching', 'match_diff': 'Mismatch with H1', 'match_empty': 'N/A',
-    },
+    }
 }
 
 TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
@@ -126,7 +105,7 @@ COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#4755
          'accent': '#0f172a', 'muted': '#94a3b8'}
 
 # ==============================================================
-#  قاعدة البيانات والذاكرة المحلية
+#  قاعدة البيانات
 # ==============================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -150,7 +129,7 @@ for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
         st.session_state[key] = default
 
 # ==============================================================
-#  تنسيق الواجهة
+#  التنسيق العام للواجهة
 # ==============================================================
 st.markdown("""
 <style>
@@ -216,7 +195,7 @@ def finding(text, level='warn'):
     return f'<div class="finding" style="border-right-color:{COLOR[level]}">{text}</div>'
 
 # ==============================================================
-#  أدوات الشبكة والاتصال
+#  أدوات الاتصال ومعالجة الروابط
 # ==============================================================
 _TL = threading.local()
 
@@ -306,7 +285,7 @@ def is_crawlable(url, base_netloc):
     return True
 
 # ==============================================================
-#  كشف المنصة وتصنيف الصفحات
+#  كشف المنصات والأنواع
 # ==============================================================
 PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
                   'shopify': 'شوبيفاي (Shopify)', 'woocommerce': 'ووكومرس', 'unknown': 'غير محددة'}
@@ -362,7 +341,7 @@ def detect_page_type(url, base_url, soup=None):
     return T_UNKNOWN
 
 # ==============================================================
-#  فحص معايير السيو (العناوين، الأوصاف، الصور، التطابق)
+#  فحص معايير السيو (العناوين، الرموز، الصور، H1)
 # ==============================================================
 PLACEHOLDER_PATTERNS = [
     r'^\s*\[\s*[\.\-_]*\s*\]\s*$',
@@ -450,11 +429,10 @@ def is_product_content_image(src, img):
     return True
 
 # ==============================================================
-#  استخراج الروابط مع معالجة التمرير ومكونات سلة وزد
+#  استخراج الروابط لتجاوز التمرير ومكونات سلة
 # ==============================================================
 def extract_page_links(soup, page_url, base_netloc):
     links = set()
-    # 1. روابط وسوم a التقليدية
     for a in soup.find_all('a', href=True):
         href = a['href'].strip()
         if href.startswith(('mailto:', 'tel:', 'javascript:', '#')):
@@ -463,13 +441,13 @@ def extract_page_links(soup, page_url, base_netloc):
         if is_crawlable(full, base_netloc):
             links.add(full)
 
-    # 2. وسوم ومكونات منصة سلة (Twilight components)
+    # وسوم سلة
     for card in soup.find_all(['salla-product-card', 'div', 'article'], attrs={'data-url': True}):
         full = clean_url(urljoin(page_url, card['data-url']))
         if is_crawlable(full, base_netloc):
             links.add(full)
 
-    # 3. تتبع الصفحات التالية في التمرير اللانهائي لسلة
+    # التمرير اللانهائي
     for el in soup.find_all(['salla-infinite-scroll', 'div'], attrs={'next-page': True}):
         next_p = el.get('next-page')
         if next_p:
@@ -486,7 +464,7 @@ def audit_single_page(task):
     url, base_url, source = task
     base_netloc = urlparse(normalize_url(base_url)).netloc
     res = safe_get(url)
-    
+
     if res is None or res.status_code != 200:
         code = str(res.status_code) if res else 'فشل اتصال'
         return {
@@ -508,10 +486,8 @@ def audit_single_page(task):
     soup = make_soup(res.text)
     page_type = detect_page_type(final_url, base_url, soup)
 
-    # استخراج الروابط لتجاوز التمرير ومتابعة الزحف
     links = extract_page_links(soup, final_url, base_netloc)
 
-    # الرابط الكانوني
     canonical = ''
     for link in soup.find_all('link', href=True):
         rel = link.get('rel') or []
@@ -527,11 +503,9 @@ def audit_single_page(task):
     else:
         canon_status = 'canon_diff'
 
-    # العنوان الظاهر للعميل H1
     h1 = soup.find('h1')
     h1_text = re.sub(r'\s+', ' ', h1.get_text(strip=True)).strip() if h1 else ''
 
-    # عنوان الميتا
     title_tag = soup.find('title')
     meta_title = re.sub(r'\s+', ' ', title_tag.get_text(strip=True)).strip() if title_tag else ''
     title_len = len(meta_title)
@@ -540,17 +514,14 @@ def audit_single_page(task):
     else:
         title_status = grade_length(title_len, TITLE_MIN_OK, TITLE_MIN_OPTIMAL, TITLE_MAX)
 
-    # مطابقة عنوان الميتا مع H1
     match_status = check_title_h1_match(meta_title, h1_text)
 
-    # وصف الميتا
     desc_tag = soup.find('meta', attrs={'name': re.compile(r'^description$', re.I)}) or \
                soup.find('meta', attrs={'property': 'og:description'})
     meta_desc = re.sub(r'\s+', ' ', desc_tag['content']).strip() if desc_tag and desc_tag.get('content') else ''
     desc_len = len(meta_desc)
     desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
-    # فحص الصور
     page_images = []
     total_img, missing_alt, weak_alt = 0, 0, 0
     for img in soup.find_all('img'):
@@ -573,13 +544,11 @@ def audit_single_page(task):
                 'طول النص البديل': alt_l
             })
 
-    # المحتوى النصي
     for s in soup(['script', 'style', 'nav', 'footer']):
         s.decompose()
     words = len(soup.get_text(separator=' ', strip=True).split())
     content_status = 'good' if words >= 40 else 'thin'
 
-    # حساب درجة السيو الأولية للصفحة
     score = 100
     if title_status == 'missing': score -= 30
     elif title_status in ('very_short', 'long'): score -= 15
@@ -607,7 +576,7 @@ def audit_single_page(task):
     }
 
 # ==============================================================
-#  قارئ خريطة الموقع المتقدم لسلة وزد
+#  قارئ خريطة الموقع (Sitemap)
 # ==============================================================
 LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
 
@@ -625,7 +594,6 @@ def fetch_sitemap_urls(base_url):
         f"{base_clean}/sitemap_pages_1.xml",
     ]
 
-    # جلب robots.txt أيضاً
     res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
     if res_r and res_r.status_code == 200:
         for line in res_r.text.splitlines():
@@ -665,26 +633,26 @@ def fetch_sitemap_urls(base_url):
     return found_urls
 
 # ==============================================================
-#  محرك الزحف الشامل (تجاوز التمرير + مطابقة الخريطة)
+#  محرك الزحف الشامل بالنسبة المئوية
 # ==============================================================
 def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     target = normalize_url(target_url)
-    base_netloc = urlparse(target).netloc
-    
-if progress_cb:
-        progress_cb(0.05, "جلب وفحص خريطة الموقع (Sitemap)... (5%)")    sitemap_urls = fetch_sitemap_urls(target)
-    
+
+    if progress_cb:
+        progress_cb(0.05, "جلب وفحص خريطة الموقع (Sitemap)... (5%)")
+
+    sitemap_urls = fetch_sitemap_urls(target)
+
     queue = list(sitemap_urls) if sitemap_urls else []
     if target not in queue:
         queue.insert(0, target)
-        
+
     seen = {url_key(u) for u in queue}
     pages_result = []
     images_result = []
     visited_keys = set()
     platform = 'unknown'
 
-    total_tasks = min(len(queue), max_pages)
     done_count = 0
 
     while queue and len(pages_result) < max_pages:
@@ -704,7 +672,6 @@ if progress_cb:
             if res.get('html') and platform == 'unknown':
                 platform = detect_platform(res['html'], url=target)
 
-            # إضافة الروابط المكتشفة من الواجهة والتمرير إلى الطابور
             for link in res['links']:
                 k = url_key(link)
                 if k not in seen and len(seen) < max_pages * 2:
@@ -721,25 +688,22 @@ if progress_cb:
     df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
     imgs_df = pd.DataFrame(images_result)
 
-    # كشف النصوص البديلة المكررة بين الصور
     if not imgs_df.empty:
         counts = imgs_df[imgs_df['حالة النص البديل'] == 'alt_ok']['النص البديل الحالي (Alt)'].value_counts()
         dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
         if dupes:
             imgs_df.loc[imgs_df['النص البديل الحالي (Alt)'].isin(dupes), 'حالة النص البديل'] = 'alt_duplicate'
 
-    # كشف تكرار العناوين والأوصاف بين الصفحات
     valid_titles = df[df['عنوان الميتا'].str.strip() != '']['عنوان الميتا']
     dup_titles = set(valid_titles[valid_titles.duplicated()].unique())
     valid_descs = df[df['وصف الميتا'].str.strip() != '']['وصف الميتا']
     dup_descs = set(valid_descs[valid_descs.duplicated()].unique())
 
-    # مقارنة الخريطة مع المتجر
     sitemap_keys = {url_key(u) for u in sitemap_urls}
     live_keys = {url_key(r['الرابط']) for _, r in df[df['متاحة'] == True].iterrows()}
 
     unlisted_pages = df[(df['متاحة'] == True) & (~df['الرابط'].map(url_key).isin(sitemap_keys))]['الرابط'].tolist()
-    orphan_pages = [u for u in sitemap_urls if url_key(u) in live_keys and df[df['الرابط'].map(url_key) == url_key(u)]['مصدر الاكتشاف'].iloc[0] == 'خريطة الموقع' and len(df[df['الرابط'].map(url_key) == url_key(u)]) > 0]
+    orphan_pages = [u for u in sitemap_urls if url_key(u) in live_keys and df[df['الرابط'].map(url_key) == url_key(u)]['مصدر الاكتشاف'].iloc[0] == 'خريطة الموقع']
     dead_pages = df[(df['متاحة'] == False) & (df['مصدر الاكتشاف'] == 'خريطة الموقع')]['الرابط'].tolist()
 
     coverage = {
@@ -772,68 +736,73 @@ if progress_cb:
     return df, imgs_df, summary, coverage, dup_titles, dup_descs
 
 # ==============================================================
-#  توليد الفاتورة والتقرير مع ضبط موضع رمز الريال (على اليسار)
+#  توليد الفاتورة مع رمز الريال على اليسار وحل خطأ Bold
 # ==============================================================
 def shape_ar(text):
-    return get_display(arabic_reshaper.reshape(str(text)))
+    if not text:
+        return ""
+    try:
+        return get_display(arabic_reshaper.reshape(str(text)))
+    except Exception:
+        return str(text)
 
 def generate_invoice_pdf(domain, quote, lang='ar'):
     rtl = (lang == 'ar')
     fmt = shape_ar if rtl else str
-    FONT = AR_FONT_NAME if rtl else "Helvetica"
-    
+
     pdf = FPDF()
-    has_font = rtl and FONT_PATH.exists()
-    
+    has_font = rtl and (FONT_PATH is not None) and FONT_PATH.exists()
+    font_family = AR_FONT_NAME if has_font else "Helvetica"
+
     if has_font:
-        pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
-        # إذا لم يتوفر ملف Bold في المستودع نستخدم الخط العادي لتفادي توقف fpdf
-        bold_path = str(FONT_BOLD_PATH) if (FONT_BOLD_PATH and FONT_BOLD_PATH.exists()) else str(FONT_PATH)
-        pdf.add_font(AR_FONT_NAME, "B", bold_path)
-    else:
-        FONT = "Helvetica"
+        pdf.add_font(font_family, "", str(FONT_PATH))
+        bold_file = str(FONT_BOLD_PATH) if (FONT_BOLD_PATH and FONT_BOLD_PATH.exists()) else str(FONT_PATH)
+        pdf.add_font(font_family, "B", bold_file)
 
     pdf.add_page()
     M, W = 18, 174
 
-    # دالة كتابة السعر مع رمز الريال على يسار الرقم
-    def print_price(val, x, y, size=11, bold=False):
+    def print_price(val, x, y, size=10, bold=False):
         num_str = f"{val:,.0f}"
-        pdf.set_font(FONT, "B" if bold else "", size)
+        pdf.set_font(font_family, "B" if (has_font and bold) else "", size)
         pdf.set_text_color(*COLOR['accent'])
         nw = pdf.get_string_width(num_str)
-        pdf.set_xy(x, y)
-        pdf.cell(nw, 6, num_str, 0, 0, 'L')
-        # رمز الريال بجانب الرقم وعلى يساره
+        sym_h = size * 0.32
+        sym_w = sym_h * 0.95
+        gap = 1.5
+
+        # رمز الريال يوضع أولاً من اليسار ثم الرقم على يمينه
         if RIYAL_PATH.exists():
             try:
-                pdf.image(str(RIYAL_PATH), x=x + nw + 1.5, y=y + 1, h=size * 0.32)
+                pdf.image(str(RIYAL_PATH), x=x, y=y + 0.8, h=sym_h)
             except Exception:
                 pass
+            pdf.set_xy(x + sym_w + gap, y)
+            pdf.cell(nw, 6, num_str, 0, 0, 'L')
         else:
-            pdf.set_xy(x + nw + 1.5, y)
-            pdf.cell(10, 6, fmt("ريال"), 0, 0, 'L')
+            pdf.set_xy(x, y)
+            pdf.cell(nw, 6, num_str, 0, 0, 'L')
+            pdf.set_xy(x + nw + gap, y)
+            pdf.cell(10, 6, fmt("ر.س"), 0, 0, 'L')
 
-    # الترويسة
-    pdf.set_font(FONT, "B", 18)
+    pdf.set_font(font_family, "B" if has_font else "", 18)
     pdf.set_text_color(*COLOR['accent'])
     pdf.set_xy(M, 18)
     pdf.cell(W, 8, fmt("عرض سعر وتهيئة السيو"), 0, 1, 'R')
-    pdf.set_font(FONT, "", 9.5)
+    pdf.set_font(font_family, "", 9.5)
     pdf.set_text_color(100, 116, 139)
     pdf.cell(W, 5, fmt(f"المتجر: {domain}  ·  التاريخ: {datetime.now().strftime('%Y-%m-%d')}"), 0, 1, 'R')
     pdf.ln(8)
 
-    # جدول البنود
     pdf.set_fill_color(15, 23, 42)
     pdf.set_text_color(255, 255, 255)
-    pdf.set_font(FONT, "B", 9.5)
+    pdf.set_font(font_family, "B" if has_font else "", 9.5)
     pdf.cell(35, 8, fmt("المبلغ"), 0, 0, 'C', fill=True)
     pdf.cell(30, 8, fmt("سعر الوحدة"), 0, 0, 'C', fill=True)
     pdf.cell(25, 8, fmt("الكمية"), 0, 0, 'C', fill=True)
     pdf.cell(W - 90, 8, fmt("الخدمة"), 0, 1, 'R', fill=True)
 
-    pdf.set_font(FONT, "", 9)
+    pdf.set_font(font_family, "", 9)
     pdf.set_text_color(15, 23, 42)
     for idx, item in enumerate(quote['items']):
         y = pdf.get_y()
@@ -850,7 +819,7 @@ def generate_invoice_pdf(domain, quote, lang='ar'):
 
     pdf.ln(5)
     y_tot = pdf.get_y()
-    pdf.set_font(FONT, "B", 12)
+    pdf.set_font(font_family, "B" if has_font else "", 12)
     pdf.set_text_color(*COLOR['accent'])
     pdf.set_xy(M + 80, y_tot)
     pdf.cell(50, 8, fmt("الإجمالي المستحق:"), 0, 0, 'R')
@@ -859,7 +828,7 @@ def generate_invoice_pdf(domain, quote, lang='ar'):
     return bytes(pdf.output())
 
 # ==============================================================
-#  واجهة المستخدم Streamlit
+#  الواجهة الرسومية (Streamlit)
 # ==============================================================
 render_brandbar()
 
@@ -869,7 +838,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### ⚙️ إعدادات الفحص")
     max_pages = st.slider("الحد الأقصى للصفحات", 50, 3000, 1000, 50)
-    workers = st.slider("عدد مسارات الزحف (Workers)", 1, 6, 3, help="القيم بين 2 و 4 هي الأفضل لتجنب حظر Cloudflare في سلة وزد")
+    workers = st.slider("عدد مسارات الزحف (Workers)", 1, 6, 3, help="القيم بين 2 و 4 هي الأنسب لتجنب حظر Cloudflare")
 
 if nav == "🔍 فحص المتجر":
     c1, c2 = st.columns([5, 1])
@@ -901,7 +870,6 @@ if nav == "🔍 فحص المتجر":
         st.session_state.dup_descs = dup_d
         st.session_state.platform = summary['platform']
 
-        # حفظ بالسجل المحلي
         conn = sqlite3.connect(DB_FILE)
         conn.cursor().execute(
             '''INSERT INTO audits (domain, scan_date, score, total_pages, products_count,
@@ -934,7 +902,6 @@ if nav == "🔍 فحص المتجر":
             unsafe_allow_html=True
         )
 
-        # البطاقات العلوية
         cards = [
             (summary["total_pages"], "الصفحات المفحوصة", COLOR['accent']),
             (summary["products"], "المنتجات", COLOR['accent']),
@@ -1026,7 +993,7 @@ if nav == "🔍 فحص المتجر":
                 with st.expander("👻 صفحات يتيمة (في السايت ماب ولا توجد روابط لها بالمتجر):"):
                     st.write(coverage['orphan_pages'])
 
-        # تبويب 6: عرض السعر والفاتورة
+        # تبويب 6: عرض السعر
         with tabs[5]:
             st.markdown("#### توليد عرض سعر مخصص للإصلاح")
             p_title = st.number_input("سعر كتابة وتعديل العنوان الواحد (ريال)", 5.0, 100.0, 15.0, 1.0)
