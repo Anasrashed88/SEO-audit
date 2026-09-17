@@ -469,14 +469,19 @@ def is_relevant_seo_image(src, img):
     ]):
         return False
 
-    junk = [
-        'favicon', 'avatar', 'payment', 'tamara', 'tabby', 'mada', 'visa', 'mastercard',
-        'apple-pay', 'applepay', 'stc-pay', 'stcpay', 'pixel', 'spinner', 'loader',
-        'business_center', 'maroof', 'vat', 'tax', 'badge', 'icon', 'logo', 'brand',
-        'whatsapp', 'snapchat', 'instagram', 'tiktok', 'twitter', 'smsa', 'aramex',
-        'redbox', 'zidship', 'placeholder', 'empty.png', 'transparent', 'dummy'
-    ]
-    if any(k in s for k in junk):
+    # صور زد تأتي من media.zid.store وتمر من الفلتر أعلاه.
+    # الكلمات تُقارن ككلمات كاملة في مسار الصورة، حتى لا تُستبعد صورة منتج
+    # مثل perfume-brand-oud.jpg أو cravat.jpg بسبب جزء من اسمها
+    junk_words = {
+        'favicon', 'avatar', 'payment', 'payments', 'tamara', 'tabby', 'mada', 'visa',
+        'mastercard', 'applepay', 'stcpay', 'pixel', 'spinner', 'loader', 'maroof',
+        'vat', 'badge', 'badges', 'icon', 'icons', 'logo', 'logos', 'whatsapp',
+        'snapchat', 'instagram', 'tiktok', 'twitter', 'smsa', 'aramex', 'redbox',
+        'zidship', 'placeholder', 'transparent', 'dummy'
+    }
+    junk_phrases = ('apple-pay', 'stc-pay', 'business_center', 'empty.png')
+    tokens = set(re.split(r'[^a-z0-9]+', urlparse(s).path))
+    if tokens & junk_words or any(p in s for p in junk_phrases):
         return False
 
     classes = ' '.join(img.get('class', [])).lower()
@@ -925,7 +930,7 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
         'dead_pages': dead_pages,
         'noindex_pages': noindex_pages,
         'unreachable_pages': unreachable['الرابط'].tolist(),
-        'unreachable_codes': unreachable['كود الاستجابة'].value_counts().to_dict(),
+        'unreachable_codes': {str(k): int(v) for k, v in unreachable['كود الاستجابة'].value_counts().items()},
     }
 
     def type_count(t):
