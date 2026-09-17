@@ -671,9 +671,8 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
     target = normalize_url(target_url)
     base_netloc = urlparse(target).netloc
     
-    if progress_cb:
-        progress_cb("جلب وفحص خريطة الموقع (Sitemap)...")
-    sitemap_urls = fetch_sitemap_urls(target)
+if progress_cb:
+        progress_cb(0.05, "جلب وفحص خريطة الموقع (Sitemap)... (5%)")    sitemap_urls = fetch_sitemap_urls(target)
     
     queue = list(sitemap_urls) if sitemap_urls else []
     if target not in queue:
@@ -714,7 +713,10 @@ def run_full_audit(target_url, max_pages=1500, workers=4, progress_cb=None):
 
             done_count += 1
             if progress_cb:
-                progress_cb(f"تم فحص {done_count} صفحة...")
+                est_total = min(max_pages, max(done_count + len(queue), 1))
+                pct = min(1.0, 0.05 + 0.95 * (done_count / est_total))
+                pct_int = int(pct * 100)
+                progress_cb(pct, f"جارٍ الفحص: {done_count} من أصل {est_total} صفحة ({pct_int}%)")
 
     df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
     imgs_df = pd.DataFrame(images_result)
@@ -781,10 +783,16 @@ def generate_invoice_pdf(domain, quote, lang='ar'):
     FONT = AR_FONT_NAME if rtl else "Helvetica"
     
     pdf = FPDF()
-    if rtl and FONT_PATH.exists():
+    has_font = rtl and FONT_PATH.exists()
+    
+    if has_font:
         pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
-        if FONT_BOLD_PATH and FONT_BOLD_PATH.exists():
-            pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
+        # إذا لم يتوفر ملف Bold في المستودع نستخدم الخط العادي لتفادي توقف fpdf
+        bold_path = str(FONT_BOLD_PATH) if (FONT_BOLD_PATH and FONT_BOLD_PATH.exists()) else str(FONT_PATH)
+        pdf.add_font(AR_FONT_NAME, "B", bold_path)
+    else:
+        FONT = "Helvetica"
+
     pdf.add_page()
     M, W = 18, 174
 
@@ -877,11 +885,12 @@ if nav == "🔍 فحص المتجر":
         st.session_state.current_url = target_clean
 
         with st.status("جارٍ فحص المتجر بدقة...", expanded=True) as status:
-            prog_text = st.empty()
+            prog_bar = st.progress(0.0, text="بدء تجهيز الفحص (0%)...")
             df, imgs_df, summary, coverage, dup_t, dup_d = run_full_audit(
                 target_clean, max_pages=max_pages, workers=workers,
-                progress_cb=lambda msg: prog_text.write(f"🔄 {msg}")
+                progress_cb=lambda pct, msg: prog_bar.progress(pct, text=msg)
             )
+            prog_bar.progress(1.0, text="اكتمل الفحص بالكامل (100%)")
             status.update(label="اكتمل الفحص بنجاح!", state="complete", expanded=False)
 
         st.session_state.audit_df = df
