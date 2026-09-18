@@ -1,33 +1,37 @@
-import streamlit as st
-import sqlite3
+import base64
+import io
 import json
-import pandas as pd
-from urllib.parse import urlparse
-from datetime import datetime
 from pathlib import Path
-import importlib
+import sqlite3
+import time
+from datetime import datetime
+from urllib.parse import urlparse
 
-# استيراد وإجبار بايثون على تحديث الملفات ومنع كاش السيرفر
-import audit_engine
-import pdf_generator
-import export_utils
+import pandas as pd
+import streamlit as st
 
-importlib.reload(audit_engine)
-importlib.reload(pdf_generator)
-importlib.reload(export_utils)
+# استيراد الوحدات الثلاث كحزم نظيفة ومباشرة
+import audit_engine as ae
+import export_utils as exp
+import pdf_generator as pdf_gen
 
 from audit_engine import (
-    run_full_audit, normalize_url, PAGE_TYPE_ORDER, PAGE_TYPE_LABEL,
-    STATUS_LABEL, PLATFORM_LABEL, COLOR
+    MAX_PAGES_DEFAULT, PAGE_TYPE_ORDER,
+    PLATFORM_LABEL, SUPPORTED_PLATFORMS,
+    TITLE_MIN_OK, TITLE_MAX, TITLE_MIN_OPTIMAL,
+    DESC_MIN_OK, DESC_MAX, DESC_MIN_OPTIMAL,
+    ALT_MAX, ALT_DUP_THRESHOLD, ALT_WEAK_STATES,
+    T_PRODUCT,
+    CHECK_FAIL, CHECK_WARN, CHECK_PASS,
+    normalize_url, unique_images, compute_summary, run_full_scan
 )
-from pdf_generator import generate_client_pdf, generate_invoice_pdf
-from export_utils import build_zip_package, build_fix_lists
-
-st.set_page_config(
-    page_title="مركز عمليات السيو | أنس راشد",
-    layout="wide",
-    page_icon="🚀",
-    initial_sidebar_state="expanded"
+from export_utils import (
+    PAGE_TYPE_LABEL, STATUS_LABEL, QUALITY_LABEL, URL_LABEL,
+    localize_df, build_zip
+)
+from pdf_generator import (
+    DEFAULT_PRICES, LOGO_PATH,
+    build_quote, generate_client_pdf, generate_invoice_pdf
 )
 
 DB_FILE = str(Path(__file__).parent / "store_history.db")
