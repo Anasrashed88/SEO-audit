@@ -124,7 +124,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### ⚙️ إعدادات الفحص")
     max_pages = st.slider("الحد الأقصى للصفحات", 50, 3000, 1000, 50)
-    workers = st.slider("عدد مسارات الزحف (Workers)", 1, 6, 3, help="القيم بين 2 و 4 هي الأنسب لتجنب حظر Cloudflare في سلة وزد")
+    workers = st.slider("عدد مسارات الزحف (Workers)", 1, 6, 3, help="القيم بين 2 و 4 هي الأنسب لتجنب حظر Cloudflare")
 
 if nav == "🔍 فحص المتجر":
     c1, c2 = st.columns([5, 1])
@@ -142,7 +142,7 @@ if nav == "🔍 فحص المتجر":
         target_clean = normalize_url(target_input)
         st.session_state.current_url = target_clean
 
-        with st.status("جارٍ فحص المتجر والخرائط بدقة...", expanded=True) as status:
+        with st.status("جارٍ فحص المتجر بدقة...", expanded=True) as status:
             prog_bar = st.progress(0.0, text="بدء تجهيز الفحص (0%)...")
             df, imgs_df, summary, coverage, dup_t, dup_d = run_full_audit(
                 target_clean, max_pages=max_pages, workers=workers,
@@ -191,13 +191,9 @@ if nav == "🔍 فحص المتجر":
             unsafe_allow_html=True
         )
 
-        prod_label = f"{summary['products']} نشط"
-        if summary.get('redirected_products', 0) > 0:
-            prod_label = f"{summary['products']} نشط ({summary.get('total_discovered_products', summary['products'])} بالخريطة)"
-
         cards = [
-            (summary["total_pages"], "الصفحات الحية المفحوصة", COLOR['accent']),
-            (prod_label, "المنتجات", COLOR['accent']),
+            (summary["total_pages"], "الصفحات المفحوصة", COLOR['accent']),
+            (summary["products"], "المنتجات", COLOR['accent']),
             (summary["missing_titles"] + summary["duplicate_titles"], "مشاكل العناوين", COLOR['bad'] if summary["missing_titles"] else COLOR['ok']),
             (summary["title_mismatch"], "عناوين تخالف H1", COLOR['warn'] if summary["title_mismatch"] else COLOR['ok']),
             (summary["missing_descs"] + summary["duplicate_descs"], "مشاكل الأوصاف", COLOR['bad'] if summary["missing_descs"] else COLOR['ok']),
@@ -218,7 +214,7 @@ if nav == "🔍 فحص المتجر":
                     (PAGE_TYPE_LABEL['ar'].get(k, k), int((df['نوع الصفحة'] == k).sum()))
                     for k in PAGE_TYPE_ORDER if (df['نوع الصفحة'] == k).any()
                 ]
-                st.markdown(bar_chart("توزيع صفحات المتجر الحية", t_items), unsafe_allow_html=True)
+                st.markdown(bar_chart("توزيع صفحات المتجر", t_items), unsafe_allow_html=True)
             with c2:
                 alt_items = [
                     ("سليم", int((imgs_df['حالة النص البديل'] == 'alt_ok').sum())),
@@ -231,8 +227,6 @@ if nav == "🔍 فحص المتجر":
                 }), unsafe_allow_html=True)
 
             st.markdown("#### أهم الملاحظات المكتشفة:")
-            if summary.get('redirected_products', 0) > 0:
-                st.markdown(finding(f"تم رصد <b>{summary['redirected_products']}</b> منتجاً في الخريطة يعاد توجيهها إلى الصفحة الرئيسية (منتجات محذوفة أو مخفية في سلة وتستنزف ميزانية الزحف).", 'warn'), unsafe_allow_html=True)
             if summary['missing_titles']:
                 st.markdown(finding(f"يوجد <b>{summary['missing_titles']}</b> صفحة بدون عنوان ميتا أو عنوانها عبارة عن رموز فقط.", 'bad'), unsafe_allow_html=True)
             if summary['duplicate_titles']:
@@ -242,7 +236,7 @@ if nav == "🔍 فحص المتجر":
             if summary['missing_alts']:
                 st.markdown(finding(f"يوجد <b>{summary['missing_alts']}</b> صورة فريدة لا تحمل أي نص بديل وتغيب عن بحث صور جوجل.", 'bad'), unsafe_allow_html=True)
             if coverage['unlisted_pages']:
-                st.markdown(finding(f"تم اكتشاف <b>{len(coverage['unlisted_pages'])}</b> صفحة معروضة في المتجر ولكنها غائبة عن خريطة الموقع (Sitemap).", 'warn'), unsafe_allow_html=True)
+                st.markdown(finding(f"تم اكتشاف <b>{len(coverage['unlisted_pages'])}</b> صفحة معروضة في المتجر ولكنها غائبة تماماً عن خريطة الموقع (Sitemap).", 'warn'), unsafe_allow_html=True)
 
         with tabs[1]:
             st.markdown("#### فحص العناوين ومطابقتها لـ H1")
@@ -272,24 +266,16 @@ if nav == "🔍 فحص المتجر":
 
         with tabs[4]:
             st.markdown("#### مطابقة صفحات المتجر مع خريطة الموقع")
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3 = st.columns(3)
             m1.metric("روابط الخريطة", coverage['sitemap_count'])
             m2.metric("صفحات معروضة خارج الخريطة", len(coverage['unlisted_pages']))
             m3.metric("صفحات يتيمة بالخريطة", len(coverage['orphan_pages']))
-            m4.metric("صفحات بالخريطة محولة للرئيسية", len(coverage.get('redirect_home_pages', [])))
             st.write("")
-            
-            if coverage.get('redirect_home_pages'):
-                with st.expander(f"🔄 روابط في الخريطة تحوّل للرئيسية - محذوفة في سلة ({len(coverage['redirect_home_pages'])}):"):
-                    st.write(coverage['redirect_home_pages'])
-                    st.caption("هذه الروابط موجودة في ملفات السايت ماب القديمة ولكن عند فتحها تقوم سلة بتحويلها للرئيسية. يُنصح بحذفها أو تحديث الخريطة.")
-
             if coverage['unlisted_pages']:
-                with st.expander(f"📄 صفحات معروضة لكنها مفقودة من السايت ماب ({len(coverage['unlisted_pages'])}):"):
+                with st.expander("📄 صفحات معروضة لكنها مفقودة من السايت ماب:"):
                     st.write(coverage['unlisted_pages'])
-
             if coverage['orphan_pages']:
-                with st.expander(f"👻 صفحات يتيمة (في السايت ماب ولا توجد روابط لها بالمتجر) ({len(coverage['orphan_pages'])}):"):
+                with st.expander("👻 صفحات يتيمة (في السايت ماب ولا توجد روابط لها بالمتجر):"):
                     st.write(coverage['orphan_pages'])
 
         with tabs[5]:
