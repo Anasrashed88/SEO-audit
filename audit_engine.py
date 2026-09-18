@@ -1,11 +1,10 @@
-
 import gzip
 import json
 import re
 import threading
 import time
 from functools import lru_cache
-from urllib.parse import clean_url as _clean, unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
