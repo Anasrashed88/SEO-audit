@@ -1,241 +1,268 @@
+
 import io
 import zipfile
 import pandas as pd
 from audit_engine import (
-    PAGE_TYPE_ORDER, PAGE_TYPE_LABEL, STATUS_LABEL, EXCLUDED_COLUMNS,
-    T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_HOME, T_ARCHIVE, T_UNKNOWN, T_BROKEN
+    PAGE_TYPE_ORDER, ALT_WEAK_STATES,
+    unique_images
 )
 
-ZIP_NAMES = {
+PAGE_TYPE_LABEL = {
+    'ar': {'home': 'صفحة رئيسية', 'product': 'صفحة منتج', 'category': 'صفحة تصنيف',
+           'blog': 'صفحة مدونة', 'info': 'صفحة تعريفية', 'archive': 'صفحة أرشيف',
+           'unknown': 'غير مصنفة', 'broken': 'صفحة غير متاحة'},
+    'en': {'home': 'Homepage', 'product': 'Product', 'category': 'Category',
+           'blog': 'Blog', 'info': 'Info / Policy', 'archive': 'Archive',
+           'unknown': 'Unclassified', 'broken': 'Unreachable'},
+}
+
+STATUS_LABEL = {
     'ar': {
-        T_PRODUCT: "1_المنتجات.csv",
-        T_CATEGORY: "2_التصنيفات.csv",
-        T_BLOG: "3_المدونة.csv",
-        T_INFO: "4_الصفحات_التعريفية.csv",
-        T_HOME: "5_الصفحة_الرئيسية.csv",
-        T_ARCHIVE: "6_صفحات_أرشيف.csv",
-        T_UNKNOWN: "7_غير_مصنفة.csv",
-        T_BROKEN: "8_روابط_معطلة.csv",
-        'images': "9_تدقيق_الصور_الفريدة.csv",
-        'notidx': "10_صفحات_غير_مدرجة_في_الخريطة.csv",
-        'orphan': "11_صفحات_يتيمة.csv",
-        'dead': "12_روابط_معطلة_في_الخريطة.csv",
-        'excluded': "13_روابط_مستبعدة_محذوفة_أو_محوّلة.csv",
-        'unreachable': "14_روابط_تعذر_فحصها.csv",
-        'fix': "00_صفحات_تحتاج_إصلاح.csv",
-        'noalt': "00_صور_تحتاج_وصفاً.csv",
-        'excel': "التقرير_الشامل.xlsx"
+        'missing': 'مفقود', 'very_short': 'قصير جداً', 'acceptable': 'مقبول',
+        'optimal': 'مثالي', 'long': 'طويل', 'failed': 'تعذر الفحص',
+        'good': 'جيد', 'thin': 'ضعيف جداً', 'na': 'غير متاح',
+        'alt_missing': 'مفقود', 'alt_generic': 'غير وصفي', 'alt_stuffed': 'حشو كلمات',
+        'alt_long': 'يتجاوز 125 حرفاً', 'alt_duplicate': 'مكرر على عدة صور',
+        'alt_ok': 'سليم', 'alt_empty': 'لا يوجد (فارغ)',
+        'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
+        'match_ok': 'مطابق', 'match_diff': 'مختلف عن عنوان الصفحة', 'match_na': '—',
     },
     'en': {
-        T_PRODUCT: "1_products.csv",
-        T_CATEGORY: "2_categories.csv",
-        T_BLOG: "3_blog.csv",
-        T_INFO: "4_info_pages.csv",
-        T_HOME: "5_homepage.csv",
-        T_ARCHIVE: "6_archive_pages.csv",
-        T_UNKNOWN: "7_unclassified.csv",
-        T_BROKEN: "8_broken_links.csv",
-        'images': "9_unique_images_audit.csv",
-        'notidx': "10_pages_missing_from_sitemap.csv",
-        'orphan': "11_orphan_pages.csv",
-        'dead': "12_dead_urls_in_sitemap.csv",
-        'excluded': "13_excluded_links_deleted_or_redirected.csv",
-        'unreachable': "14_unreachable_urls.csv",
-        'fix': "00_pages_to_fix.csv",
-        'noalt': "00_images_needing_alt.csv",
-        'excel': "full_audit_report.xlsx"
-    }
+        'missing': 'Missing', 'very_short': 'Too short', 'acceptable': 'Acceptable',
+        'optimal': 'Optimal', 'long': 'Too long', 'failed': 'Scan failed',
+        'good': 'Good', 'thin': 'Thin content', 'na': 'N/A',
+        'alt_missing': 'Missing', 'alt_generic': 'Not descriptive',
+        'alt_stuffed': 'Keyword stuffed', 'alt_long': 'Over 125 characters',
+        'alt_duplicate': 'Duplicated across images', 'alt_ok': 'Good',
+        'alt_empty': '(empty)',
+        'canon_same': 'Self-referencing', 'canon_diff': 'Differs from page URL',
+        'canon_missing': 'Missing',
+        'match_ok': 'Matches', 'match_diff': 'Differs from page heading',
+        'match_na': '—',
+    },
 }
 
-# تسميات إنجليزية لحالات الاستبعاد (النصوص تأتي من محرك الفحص بالعربية)
-EXCLUDED_STATUS_EN = {
-    'محذوفة (404)': 'Deleted (404)',
-    'محذوفة (410)': 'Deleted (410)',
-    'محوّلة للرئيسية': 'Redirected to homepage',
-    'مخفية عن جوجل (noindex)': 'Hidden from Google (noindex)',
+QUALITY_LABEL = {
+    'ar': {'q_ok': 'سليم', 'q_symbols': 'رموز بلا نص', 'q_placeholder': 'قيمة قالب افتراضية',
+           'q_brand_only': 'اسم المتجر فقط', 'q_duplicate': 'مكرر على عدة صفحات',
+           'q_one_word': 'كلمة واحدة بلا وصف', 'q_same_as_title': 'نسخة من العنوان',
+           'q_na': '—'},
+    'en': {'q_ok': 'Sound', 'q_symbols': 'Symbols only', 'q_placeholder': 'Template placeholder',
+           'q_brand_only': 'Store name only', 'q_duplicate': 'Duplicated across pages',
+           'q_one_word': 'Single word, no description', 'q_same_as_title': 'Copy of the title',
+           'q_na': '—'},
 }
 
-EXCLUDED_HEADERS_EN = {
-    'الرابط': 'URL',
-    'نوع الصفحة': 'Page Type',
-    'الحالة': 'Status',
-    'كود الاستجابة': 'Response Code',
-    'وجهة التحويل': 'Redirect Target',
-    'في خريطة الموقع': 'In Sitemap',
-    'مصدر الاكتشاف': 'Discovered Via',
+URL_LABEL = {
+    'ar': {'u_ok': 'سليم', 'u_clone': 'منتج مستنسخ', 'u_generic': 'رقم أو رمز بلا كلمات',
+           'u_wrongname': 'يشير لمنتج آخر',
+           'u_underscore': 'شرطة سفلية بدل الواصلة', 'u_uppercase': 'حروف كبيرة',
+           'u_long': 'طويل جداً', 'u_repeat': 'كلمة مكررة داخل الرابط',
+           'u_wordy': 'كلمات كثيرة', 'u_malformed': 'رابط معطوب فيه عنوان موقع',
+           'u_na': '—'},
+    'en': {'u_ok': 'Sound', 'u_clone': 'Cloned product', 'u_generic': 'ID or code, no words',
+           'u_wrongname': 'Points to a different product',
+           'u_underscore': 'Underscores instead of hyphens', 'u_uppercase': 'Uppercase letters',
+           'u_long': 'Too long', 'u_repeat': 'Repeated word in slug',
+           'u_wordy': 'Too many words', 'u_malformed': 'Malformed: contains a URL',
+           'u_na': '—'},
 }
 
-# دالة تعريب الحالات التقنية لعرضها للعميل باحترافية
-def localize_dataframe(df, lang='ar'):
+COL_EN = {
+    'نوع الصفحة': 'Page Type', 'الرابط': 'URL', 'الرابط الكانوني': 'Canonical URL',
+    'مصدر الاكتشاف': 'Discovered Via', 'متاحة': 'Reachable', 'كود الاستجابة': 'Status Code',
+    'درجة السيو': 'SEO Score', 'عنوان الميتا': 'Meta Title', 'طول العنوان': 'Title Length',
+    'حالة العنوان': 'Title Status', 'وصف الميتا': 'Meta Description',
+    'طول الوصف': 'Description Length', 'حالة الوصف': 'Description Status',
+    'إجمالي الصور': 'Total Images', 'صور بدون Alt': 'Images Missing Alt',
+    'صور Alt ضعيف': 'Images With Weak Alt', 'عدد الكلمات': 'Word Count',
+    'حالة المحتوى': 'Content Status', 'لغة الصفحة': 'Page Language',
+    'حالة الكانونيكال': 'Canonical Status', 'قابلة للأرشفة': 'Indexable',
+    'مطابقة العنوان مع H1': 'Title vs H1', 'عنوان الصفحة (H1)': 'Page H1', 'رابط الصفحة': 'Page URL',
+    'رابط الصورة': 'Image URL', 'النص البديل الحالي (Alt)': 'Current Alt Text',
+    'طول النص البديل': 'Alt Length', 'حالة النص البديل': 'Alt Status',
+    'عدد الصفحات': 'Appears On Pages',
+    'الوجهة النهائية': 'Final Destination',
+    'جودة العنوان': 'Title Quality', 'جودة الوصف': 'Description Quality',
+    'جودة الرابط': 'URL Quality', 'المسار': 'Slug', 'محتوى مكرر': 'Duplicate Content',
+    'اسم المنتج المعروض': 'Displayed Product Name', 'صيغة الصورة': 'Image Format',
+    'اسم منظم': 'Declared Name', 'صور معلنة': 'Declared Images',
+    'رقم المنتج': 'SKU', 'عدد معلن': 'Declared Count',
+    'الاسم المعلن': 'Declared Name', 'الاسم المعروض': 'Displayed Name',
+    'صور مرصودة': 'Images Detected', 'القسم': 'Category',
+    'في الخريطة': 'In Sitemap', 'مرتبط برابط': 'Internally Linked',
+    'الأولوية': 'Priority', 'ما يحتاج إصلاحاً': 'What Needs Fixing',
+    'عنوان الميتا الحالي': 'Current Meta Title',
+    'وصف الميتا الحالي': 'Current Meta Description', 'م': '#',
+    'مرصود': 'Detected', 'ناقص': 'Missing', 'عدد معلن': 'Declared Count',
+}
+
+ZIP_NAMES = {
+    'ar': {'product': "1_المنتجات.csv", 'category': "2_التصنيفات.csv",
+           'blog': "3_المدونة.csv", 'info': "4_الصفحات_التعريفية.csv",
+           'home': "5_الصفحة_الرئيسية.csv", 'archive': "6_صفحات_أرشيف.csv",
+           'unknown': "7_غير_مصنفة.csv", 'broken': "8_روابط_معطلة.csv",
+           'images': "9_تدقيق_الصور.csv",
+           'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
+           'orphan': "10_صفحات_يتيمة.csv",
+           'scroll': "15_منتجات_بالتمرير_فقط.csv",
+           'fix': "00_صفحات_تحتاج_إصلاح.csv",
+           'noalt': "00_صور_تحتاج_وصفاً.csv",
+           'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
+           'imggap': "12_صفحات_صورها_ناقصة.csv",
+           'namegap': "13_اسم_معلن_مختلف.csv",
+           'catgap': "14_مقارنة_عدادات_الأقسام.csv",
+           'excel': "التقرير_الشامل.xlsx"},
+    'en': {'product': "1_products.csv", 'category': "2_categories.csv",
+           'blog': "3_blog.csv", 'info': "4_info_pages.csv",
+           'home': "5_homepage.csv", 'archive': "6_archive_pages.csv",
+           'unknown': "7_unclassified.csv", 'broken': "8_broken_links.csv",
+           'images': "9_image_alt_audit.csv",
+           'notidx': "9_products_missing_from_sitemap.csv",
+           'orphan': "10_orphan_pages.csv",
+           'scroll': "15_scroll_only_products.csv",
+           'fix': "00_pages_to_fix.csv",
+           'noalt': "00_images_needing_alt.csv",
+           'redirect': "11_dead_urls_in_sitemap.csv",
+           'imggap': "12_pages_with_missing_images.csv",
+           'namegap': "13_declared_name_mismatch.csv",
+           'catgap': "14_category_counter_comparison.csv",
+           'excel': "full_audit_report.xlsx"},
+}
+
+
+def localize_df(df, lang):
     if df is None or df.empty:
         return df
     out = df.copy()
-    labels = PAGE_TYPE_LABEL.get(lang, PAGE_TYPE_LABEL['ar'])
-    statuses = STATUS_LABEL.get(lang, STATUS_LABEL['ar'])
+    if '_raw_url' in out.columns:
+        out = out.drop(columns=['_raw_url'])
     if 'نوع الصفحة' in out.columns:
-        out['نوع الصفحة'] = out['نوع الصفحة'].map(lambda x: labels.get(x, x))
-    for col in ['حالة العنوان', 'حالة الوصف', 'حالة المحتوى', 'حالة النص البديل', 'حالة الكانونيكال', 'مطابقة العنوان مع H1']:
+        out['نوع الصفحة'] = out['نوع الصفحة'].map(lambda v: PAGE_TYPE_LABEL[lang].get(v, v))
+    for col in ['حالة العنوان', 'حالة الوصف', 'حالة المحتوى', 'حالة النص البديل',
+                'حالة الكانونيكال', 'مطابقة العنوان مع H1']:
         if col in out.columns:
-            out[col] = out[col].map(lambda x: statuses.get(x, x))
-    return out
-
-def build_excluded_list(coverage, lang='ar'):
-    """جدول الروابط التي استبعدتها الأداة من التقرير، وسبب استبعاد كل رابط كما اكتشفته:
-    محذوفة (404) أو محوّلة للرئيسية أو مخفية عن جوجل (noindex)."""
-    rows = (coverage or {}).get('excluded_rows') or []
-    if not rows:
-        return pd.DataFrame(columns=EXCLUDED_COLUMNS)
-
-    out = pd.DataFrame(rows)
-    for col in EXCLUDED_COLUMNS:
-        if col not in out.columns:
-            out[col] = ''
-    out = out[EXCLUDED_COLUMNS].copy()
-
-    labels = PAGE_TYPE_LABEL.get(lang, PAGE_TYPE_LABEL['ar'])
-    out['نوع الصفحة'] = out['نوع الصفحة'].map(lambda x: labels.get(x, x))
-
-    # المحذوفة أولاً، ثم المحوّلة، ثم المخفية
-    order = {'محذوفة (404)': 0, 'محذوفة (410)': 0, 'محوّلة للرئيسية': 1}
-    out = out.assign(_o=out['الحالة'].map(lambda x: order.get(x, 2))) \
-             .sort_values(['_o', 'نوع الصفحة', 'الرابط']) \
-             .drop(columns=['_o']) \
-             .reset_index(drop=True)
-
+            out[col] = out[col].map(lambda v: STATUS_LABEL[lang].get(v, v))
+    for col in ['جودة العنوان', 'جودة الوصف']:
+        if col in out.columns:
+            out[col] = out[col].map(lambda v: QUALITY_LABEL[lang].get(v, v))
+    if 'جودة الرابط' in out.columns:
+        out['جودة الرابط'] = out['جودة الرابط'].map(lambda v: URL_LABEL[lang].get(v, v))
+    if 'النص البديل الحالي (Alt)' in out.columns:
+        empty = STATUS_LABEL[lang]['alt_empty']
+        out['النص البديل الحالي (Alt)'] = out['النص البديل الحالي (Alt)'].map(
+            lambda v: v if str(v).strip() else empty)
     if lang == 'en':
-        out['الحالة'] = out['الحالة'].map(lambda x: EXCLUDED_STATUS_EN.get(x, x))
-        out['في خريطة الموقع'] = out['في خريطة الموقع'].map({'نعم': 'Yes', 'لا': 'No'})
-        out = out.rename(columns=EXCLUDED_HEADERS_EN)
-
-    out.insert(0, 'م' if lang == 'ar' else '#', range(1, len(out) + 1))
+        out = out.rename(columns={k: v for k, v in COL_EN.items() if k in out.columns})
     return out
 
-def build_unreachable_list(df, lang='ar'):
-    """روابط موجودة لكن تعذّر فحصها (رفض مؤقت من المتجر أو انتهاء المهلة)،
-    وهي ليست مستبعدة بل تحتاج إعادة فحص."""
-    if df is None or df.empty or 'متاحة' not in df.columns:
-        return pd.DataFrame()
-    sub = df[df['متاحة'] == False].copy()
-    if sub.empty:
-        return pd.DataFrame()
-    labels = PAGE_TYPE_LABEL.get(lang, PAGE_TYPE_LABEL['ar'])
-    sub['نوع الصفحة'] = sub['نوع الصفحة'].map(lambda x: labels.get(x, x))
-    cols = [c for c in ['الرابط', 'نوع الصفحة', 'كود الاستجابة', 'مصدر الاكتشاف'] if c in sub.columns]
-    return sub[cols].reset_index(drop=True)
 
 def build_fix_lists(df, images_df, lang='ar'):
-    ok = df[df['متاحة'] == True].copy()
+    L = STATUS_LABEL[lang]
+    QL = QUALITY_LABEL[lang]
+    UL = URL_LABEL[lang]
+    ok = df[df['متاحة'] == True].copy()  # noqa: E712
     rows = []
     for _, r in ok.iterrows():
         need = []
         if r['حالة العنوان'] in ('missing', 'very_short', 'long'):
-            need.append('إصلاح العنوان' if lang == 'ar' else 'Fix Title')
-        if r.get('مطابقة العنوان مع H1') == 'match_diff':
-            need.append('العنوان لا يطابق H1' if lang == 'ar' else 'Title differs from H1')
+            need.append(('العنوان' if lang == 'ar' else 'Title') + f" ({L[r['حالة العنوان']]})")
+        elif r['حالة العنوان'] == 'acceptable':
+            need.append('تحسين العنوان' if lang == 'ar' else 'Improve title')
+        if r.get('جودة العنوان') not in ('q_ok', 'q_na', None):
+            need.append(QL.get(r.get('جودة العنوان'), ''))
         if r['حالة الوصف'] in ('missing', 'very_short', 'long'):
-            need.append('إصلاح الوصف' if lang == 'ar' else 'Fix Description')
-        if int(r.get('صور بدون Alt') or 0) > 0:
-            need.append(f"{int(r['صور بدون Alt'])} صورة بلا Alt" if lang == 'ar' else f"{int(r['صور بدون Alt'])} images missing Alt")
-        if int(r.get('صور Alt ضعيف') or 0) > 0:
-            need.append(f"{int(r['صور Alt ضعيف'])} صورة بوصف ضعيف" if lang == 'ar' else f"{int(r['صور Alt ضعيف'])} images with weak Alt")
+            need.append(('الوصف' if lang == 'ar' else 'Description') + f" ({L[r['حالة الوصف']]})")
+        elif r['حالة الوصف'] == 'acceptable':
+            need.append('تحسين الوصف' if lang == 'ar' else 'Improve description')
+        if r.get('جودة الرابط') not in ('u_ok', 'u_na', None):
+            need.append(UL.get(r.get('جودة الرابط'), ''))
+        if int(r.get('صور بدون Alt') or 0):
+            need.append((f"{int(r['صور بدون Alt'])} صورة بلا وصف" if lang == 'ar' else f"{int(r['صور بدون Alt'])} images without alt"))
+        if int(r.get('صور Alt ضعيف') or 0):
+            need.append((f"{int(r['صور Alt ضعيف'])} صورة بوصف ضعيف" if lang == 'ar' else f"{int(r['صور Alt ضعيف'])} images with weak alt"))
         if r['حالة المحتوى'] == 'thin':
             need.append('محتوى نصي ضعيف' if lang == 'ar' else 'Thin content')
+        if not need:
+            continue
+        rows.append({
+            'الأولوية': 0, 'نوع الصفحة': r['نوع الصفحة'], 'الرابط': r['الرابط'],
+            'درجة السيو': r['درجة السيو'],
+            'ما يحتاج إصلاحاً': ' · '.join([x for x in need if x]),
+            'عنوان الميتا الحالي': r['عنوان الميتا'], 'طول العنوان': r['طول العنوان'],
+            'وصف الميتا الحالي': r['وصف الميتا'], 'طول الوصف': r['طول الوصف'],
+        })
+    fix = pd.DataFrame(rows)
+    if not fix.empty:
+        fix['الأولوية'] = fix['درجة السيو'].rank(method='first').astype(int)
+        fix = fix.sort_values('درجة السيو').reset_index(drop=True)
+        fix['الأولوية'] = range(1, len(fix) + 1)
+        fix = localize_df(fix, lang)
 
-        if need:
-            rows.append({
-                'النوع': PAGE_TYPE_LABEL.get(lang, PAGE_TYPE_LABEL['ar']).get(r['نوع الصفحة'], r['نوع الصفحة']),
-                'الرابط': r['الرابط'],
-                'درجة السيو': r['درجة السيو'],
-                'المشاكل المرصودة': ' · '.join(need),
-                'عنوان الميتا الحالي': r['عنوان الميتا'],
-                'عنوان الصفحة (H1)': r.get('عنوان الصفحة (H1)', ''),
-                'وصف الميتا الحالي': r['وصف الميتا'],
-            })
+    noalt = pd.DataFrame()
+    uimg = unique_images(images_df)
+    if uimg is not None and not uimg.empty:
+        need = ['alt_missing'] + list(ALT_WEAK_STATES)
+        sub = uimg[uimg['حالة النص البديل'].isin(need)].copy()
+        if not sub.empty:
+            order = {'alt_missing': 0, 'alt_generic': 1, 'alt_duplicate': 2,
+                     'alt_stuffed': 3, 'alt_long': 4}
+            sub['_o'] = sub['حالة النص البديل'].map(order).fillna(9)
+            sub = sub.sort_values(['_o', 'رابط الصفحة']).drop(columns=['_o'])
+            cols = ['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة',
+                    'النص البديل الحالي (Alt)', 'حالة النص البديل', 'عدد الصفحات']
+            sub = sub[[c for c in cols if c in sub.columns]]
+            sub.insert(0, 'م', range(1, len(sub) + 1))
+            noalt = localize_df(sub, lang)
+    return fix, noalt
 
-    fix_df = pd.DataFrame(rows)
-    if not fix_df.empty:
-        fix_df = fix_df.sort_values('درجة السيو').reset_index(drop=True)
-        fix_df.insert(0, 'الأولوية', range(1, len(fix_df) + 1))
 
-    noalt_df = pd.DataFrame()
-    if images_df is not None and not images_df.empty:
-        bad_imgs = images_df[images_df['حالة النص البديل'] != 'alt_ok'].copy()
-        if not bad_imgs.empty:
-            bad_imgs['نوع الصفحة'] = bad_imgs['نوع الصفحة'].map(lambda x: PAGE_TYPE_LABEL.get(lang, PAGE_TYPE_LABEL['ar']).get(x, x))
-            bad_imgs['حالة النص البديل'] = bad_imgs['حالة النص البديل'].map(lambda x: STATUS_LABEL.get(lang, STATUS_LABEL['ar']).get(x, x))
-            cols = ['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة', 'النص البديل الحالي (Alt)', 'حالة النص البديل']
-            if 'عدد الصفحات' in bad_imgs.columns:
-                cols.append('عدد الصفحات')
-            noalt_df = bad_imgs[cols].reset_index(drop=True)
-            noalt_df.insert(0, 'م', range(1, len(noalt_df) + 1))
+def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
+    names = ZIP_NAMES[lang]
+    ldf = localize_df(df, lang)
+    limg = localize_df(unique_images(images_df), lang)
+    type_col = COL_EN['نوع الصفحة'] if lang == 'en' else 'نوع الصفحة'
 
-    return fix_df, noalt_df
-
-def build_zip_package(df, images_df, coverage=None, lang='ar'):
-    names = ZIP_NAMES.get(lang, ZIP_NAMES['ar'])
     buf = io.BytesIO()
-
-    # تجهيز نسخ معربة بالكامل من الجداول لضمان احترافية الملفات
-    loc_df = localize_dataframe(df, lang)
-    loc_imgs = localize_dataframe(images_df, lang) if images_df is not None and not images_df.empty else None
-
-    excluded_df = build_excluded_list(coverage, lang)
-    unreachable_df = build_unreachable_list(df, lang)
-
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        # 1. ملفات CSV لكل نوع صفحة معربة بالكامل
         for tkey in PAGE_TYPE_ORDER:
-            tlabel = PAGE_TYPE_LABEL.get(lang, PAGE_TYPE_LABEL['ar']).get(tkey, tkey)
-            sub = loc_df[loc_df['نوع الصفحة'] == tlabel].copy()
+            label = PAGE_TYPE_LABEL[lang][tkey]
+            sub = ldf[ldf[type_col] == label] if type_col in ldf.columns else pd.DataFrame()
             if not sub.empty:
                 fname = names.get(tkey, f"{tkey}.csv")
                 z.writestr(fname, sub.to_csv(index=False, encoding='utf-8-sig'))
+        if limg is not None and not limg.empty:
+            z.writestr(names['images'], limg.to_csv(index=False, encoding='utf-8-sig'))
 
-        # 2. ملف تدقيق الصور الفريدة
-        if loc_imgs is not None and not loc_imgs.empty:
-            z.writestr(names['images'], loc_imgs.to_csv(index=False, encoding='utf-8-sig'))
-
-        # 3. ملفات الخريطة
         if coverage:
-            if coverage.get('unlisted_pages'):
-                unl_df = pd.DataFrame({'الرابط': coverage['unlisted_pages']})
-                z.writestr(names['notidx'], unl_df.to_csv(index=False, encoding='utf-8-sig'))
-            if coverage.get('orphan_pages'):
-                orph_df = pd.DataFrame({'الرابط': coverage['orphan_pages']})
-                z.writestr(names['orphan'], orph_df.to_csv(index=False, encoding='utf-8-sig'))
-            if coverage.get('dead_pages'):
-                dead_df = pd.DataFrame({'الرابط': coverage['dead_pages']})
-                z.writestr(names['dead'], dead_df.to_csv(index=False, encoding='utf-8-sig'))
+            for key, data in [('notidx', coverage.get('unlisted_pages')),
+                              ('orphan', coverage.get('orphan_pages')),
+                              ('redirect', coverage.get('dead_pages')),
+                              ('scroll', coverage.get('scroll_only_products'))]:
+                if data:
+                    z.writestr(names[key], localize_df(pd.DataFrame(data), lang).to_csv(index=False, encoding='utf-8-sig'))
 
-        # 4. ملف الروابط المستبعدة (محذوفة 404 / محوّلة للرئيسية / مخفية عن جوجل)
-        if not excluded_df.empty:
-            z.writestr(names['excluded'], excluded_df.to_csv(index=False, encoding='utf-8-sig'))
+        if structured:
+            for key, data in [('imggap', structured.get('image_gap')),
+                              ('namegap', structured.get('name_mismatch')),
+                              ('catgap', structured.get('category_rows'))]:
+                if data:
+                    z.writestr(names[key], localize_df(pd.DataFrame(data), lang).to_csv(index=False, encoding='utf-8-sig'))
 
-        # 5. روابط تعذّر فحصها (تحتاج إعادة محاولة، وليست مستبعدة)
-        if not unreachable_df.empty:
-            z.writestr(names['unreachable'], unreachable_df.to_csv(index=False, encoding='utf-8-sig'))
+        fix, noalt = build_fix_lists(df, images_df, lang)
+        if fix is not None and not fix.empty:
+            z.writestr(names['fix'], fix.to_csv(index=False, encoding='utf-8-sig'))
+        if noalt is not None and not noalt.empty:
+            z.writestr(names['noalt'], noalt.to_csv(index=False, encoding='utf-8-sig'))
 
-        # 6. ملفات قوائم الإصلاح الفوري
-        fix_df, noalt_df = build_fix_lists(df, images_df, lang)
-        if not fix_df.empty:
-            z.writestr(names['fix'], fix_df.to_csv(index=False, encoding='utf-8-sig'))
-        if not noalt_df.empty:
-            z.writestr(names['noalt'], noalt_df.to_csv(index=False, encoding='utf-8-sig'))
-
-        # 7. ملف الإكسل الشامل متعدد الصفحات ببيانات عربية نظيفة
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
-            loc_df.to_excel(w, index=False, sheet_name='فحص الصفحات' if lang == 'ar' else 'Pages Audit')
-            if loc_imgs is not None and not loc_imgs.empty:
-                loc_imgs.to_excel(w, index=False, sheet_name='فحص الصور الفريدة' if lang == 'ar' else 'Images Audit')
-            if not fix_df.empty:
-                fix_df.to_excel(w, index=False, sheet_name='يحتاج إصلاح' if lang == 'ar' else 'To Fix')
-            if not noalt_df.empty:
-                noalt_df.to_excel(w, index=False, sheet_name='صور بلا وصف' if lang == 'ar' else 'Missing Alt')
-            if not excluded_df.empty:
-                excluded_df.to_excel(w, index=False, sheet_name='روابط مستبعدة' if lang == 'ar' else 'Excluded Links')
-            if not unreachable_df.empty:
-                unreachable_df.to_excel(w, index=False, sheet_name='تعذر فحصها' if lang == 'ar' else 'Unreachable')
+            ldf.to_excel(w, index=False, sheet_name='Pages Audit' if lang == 'en' else 'فحص الصفحات')
+            if limg is not None and not limg.empty:
+                limg.to_excel(w, index=False, sheet_name='Images Audit' if lang == 'en' else 'فحص الصور')
+            if fix is not None and not fix.empty:
+                fix.to_excel(w, index=False, sheet_name='To Fix' if lang == 'en' else 'يحتاج إصلاح')
+            if noalt is not None and not noalt.empty:
+                noalt.to_excel(w, index=False, sheet_name='No Alt' if lang == 'en' else 'صور بلا وصف')
         z.writestr(names['excel'], xbuf.getvalue())
-
     return buf.getvalue()
