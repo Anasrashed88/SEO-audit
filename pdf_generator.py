@@ -1,13 +1,17 @@
-import io
-import re
-from pathlib import Path
+
+
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
+from audit_engine import TITLE_MIN_OK, TITLE_MAX, TITLE_MIN_OPTIMAL, DESC_MIN_OK, DESC_MAX, DESC_MIN_OPTIMAL
 
 BASE_DIR = Path(__file__).parent
+LOGO_PATH = BASE_DIR / "brand_logo.png"
+RIYAL_PATH = BASE_DIR / "Saudi_Riyal_Symbol-1.png"
+
 FONT_CANDIDATES = [
     ("Tajawal", "Tajawal-Regular.ttf", "Tajawal-Bold.ttf"),
     ("Almarai", "Almarai-Regular.ttf", "Almarai-Bold.ttf"),
@@ -17,17 +21,15 @@ FONT_CANDIDATES = [
     ("Amiri", "Amiri-Regular.ttf", "Amiri-Bold.ttf"),
 ]
 
+
 def pick_font():
-    """يعيد (الاسم، مسار العادي، مسار العريض أو العادي كبديل آمن)."""
     for name, reg, bold in FONT_CANDIDATES:
         rp = BASE_DIR / reg
-        if rp.exists() and rp.stat().st_size > 10000:
+        if rp.exists() and rp.stat().st_size > 20000:
             bp = BASE_DIR / bold
-            return name, rp, (bp if bp.exists() and bp.stat().st_size > 10000 else rp)
-    amiri = BASE_DIR / "Amiri-Regular.ttf"
-    if amiri.exists():
-        return "Amiri", amiri, amiri
-    return "Helvetica", None, None
+            return name, rp, (bp if bp.exists() and bp.stat().st_size > 20000 else None)
+    return "Amiri", BASE_DIR / "Amiri-Regular.ttf", None
+
 
 AR_FONT_NAME, FONT_PATH, FONT_BOLD_PATH = pick_font()
 
@@ -36,12 +38,6 @@ try:
     HAS_SHAPING = True
 except Exception:
     HAS_SHAPING = False
-
-LOGO_PATH = BASE_DIR / "brand_logo.png"
-RIYAL_PATH = BASE_DIR / "Saudi_Riyal_Symbol-1.png"
-
-TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
-DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
 
 C_INK = (15, 23, 42)
 C_MUTED = (100, 116, 139)
@@ -96,52 +92,28 @@ SECTION_TXT = {
     'ar': {
         'structure': {
             'title': 'بنية المتجر ونطاق الفحص',
-            'intro': 'يبدأ الفحص من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه الزائر، '
-                     'متتبعاً الروابط الداخلية وصفحات الأقسام. لا تدخل التقرير أي صفحة '
-                     'لا يمكن للزائر الوصول إليها بالنقر.',
-            'impact': 'هذه الأرقام هي ما تراه محركات البحث فعلياً عند زحفها للمتجر. أي '
-                      'رابط معطل يصل إليه الزائر يهدر جزءاً من ميزانية الزحف المخصصة '
-                      'للمتجر، ويقلل فرص أرشفة الصفحات المهمة.',
+            'intro': 'يبدأ الفحص من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه الزائر، متتبعاً الروابط الداخلية وصفحات الأقسام. لا تدخل التقرير أي صفحة لا يمكن للزائر الوصول إليها بالنقر.',
+            'impact': 'هذه الأرقام هي ما تراه محركات البحث فعلياً عند زحفها للمتجر. أي رابط معطل يصل إليه الزائر يهدر جزءاً من ميزانية الزحف المخصصة للمتجر، ويقلل فرص أرشفة الصفحات المهمة.',
         },
         'meta': {
             'title': 'عناوين وأوصاف الميتا',
-            'intro': 'عنوان الميتا هو السطر الأزرق القابل للنقر في نتائج البحث، والوصف '
-                     'هو السطران تحته. المعيار المعتمد: العنوان بين 50 و60 حرفاً، والوصف '
-                     'بين 120 و150 حرفاً، ويُحسب الطول بالحروف شاملاً المسافات وعلامات '
-                     'الترقيم كما تحسبها محركات البحث.',
-            'impact': 'العنوان القصير جداً يضيّع مساحة مجانية في نتيجة البحث، والطويل '
-                      'يُقتطع بثلاث نقاط فتضيع نهايته. أما العنوان المفقود أو المكوّن من '
-                      'رموز فيجعل جوجل يختار نصاً عشوائياً من الصفحة بدلاً عنه، وغالباً '
-                      'ما يكون نصاً لا يشجع على النقر.',
+            'intro': 'عنوان الميتا هو السطر الأزرق القابل للنقر في نتائج البحث، والوصف هو السطران تحته. المعيار المعتمد: العنوان بين 50 و60 حرفاً، والوصف بين 120 و150 حرفاً، ويُحسب الطول بالحروف شاملاً المسافات وعلامات الترقيم كما تحسبها محركات البحث.',
+            'impact': 'العنوان القصير جداً يضيّع مساحة مجانية في نتيجة البحث، والطويل يُقتطع بثلاث نقاط فتضيع نهايته. أما العنوان المفقود أو المكوّن من رموز فيجعل جوجل يختار نصاً عشوائياً من الصفحة بدلاً عنه، وغالباً ما يكون نصاً لا يشجع على النقر.',
         },
         'urls': {
             'title': 'روابط صفحات المتجر',
-            'intro': 'الرابط عنصر سيو مستقل: تقرأه محركات البحث، ويظهر للزبون في نتيجة '
-                     'البحث وعند مشاركة المنتج. يفحص هذا القسم صياغة الرابط ومطابقته '
-                     'للمنتج المعروض، ووجود نسخ مكررة من منتج واحد.',
-            'impact': 'المنتجات المستنسخة تُنشئ صفحات متطابقة تتنافس فيما بينها، فيوزّع '
-                      'جوجل قوة الصفحة بين النسخ ثم يختار واحدة ويتجاهل الباقي. والرابط '
-                      'الذي يحمل اسم منتج مختلف يربك الزبون: ينقر على شيء ويصل إلى آخر، '
-                      'فترتفع نسبة المغادرة الفورية.',
+            'intro': 'الرابط عنصر سيو مستقل: تقرأه محركات البحث، ويظهر للزبون في نتيجة البحث وعند مشاركة المنتج. يفحص هذا القسم صياغة الرابط ومطابقته للمنتج المعروض، ووجود نسخ مكررة من منتج واحد.',
+            'impact': 'المنتجات المستنسخة تُنشئ صفحات متطابقة تتنافس فيما بينها، فيوزّع جوجل قوة الصفحة بين النسخ ثم يختار واحدة ويتجاهل الباقي. والرابط الذي يحمل اسم منتج مختلف يربك الزبون: ينقر على شيء ويصل إلى آخر، فترتفع نسبة المغادرة الفورية.',
         },
         'images': {
             'title': 'صور المتجر ونصوصها البديلة',
-            'intro': 'النص البديل هو الوصف المرفق بالصورة في كود الصفحة. محركات البحث '
-                     'لا ترى الصورة، بل تقرأ هذا النص. ويفحص هذا القسم أيضاً صيغة الصور، '
-                     'إذ تؤثر مباشرة في حجم الصفحة وسرعتها.',
-            'impact': 'بحث صور جوجل مصدر زيارات مهم في المتاجر البصرية كالأزياء والعطور '
-                      'والهدايا، حيث يبحث الزبون بالصورة قبل الكلمة. الصورة بلا نص بديل '
-                      'غير موجودة بالنسبة لجوجل. كما أن الصيغ الحديثة تخفض حجم الصورة '
-                      'بنحو الثلث بنفس الجودة، فتتحسن سرعة الجوال تلقائياً.',
+            'intro': 'النص البديل هو الوصف المرفق بالصورة في كود الصفحة. محركات البحث لا ترى الصورة، بل تقرأ هذا النص. ويفحص هذا القسم أيضاً صيغة الصور، إذ تؤثر مباشرة في حجم الصفحة وسرعتها.',
+            'impact': 'بحث صور جوجل مصدر زيارات مهم في المتاجر البصرية كالأزياء والعطور والهدايا، حيث يبحث الزبون بالصورة قبل الكلمة. الصورة بلا نص بديل غير موجودة بالنسبة لجوجل. كما أن الصيغ الحديثة تخفض حجم الصورة بنحو الثلث بنفس الجودة، فتتحسن سرعة الجوال تلقائياً.',
         },
         'sitemap': {
             'title': 'مقارنة المعروض بخريطة الموقع',
-            'intro': 'خريطة الموقع هي القائمة التي يعلنها المتجر لمحركات البحث. يقارن '
-                     'هذا القسم ما يراه الزائر فعلاً بما تعلنه الخريطة، في الاتجاهين.',
-            'impact': 'المنتج المعروض وغير المدرج في الخريطة قد لا تعلم به محركات البحث '
-                      'أصلاً. والصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط '
-                      'داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. '
-                      'والروابط المحوّلة داخل الخريطة تستهلك ميزانية الزحف بلا مقابل.',
+            'intro': 'خريطة الموقع هي القائمة التي يعلنها المتجر لمحركات البحث. يقارن هذا القسم ما يراه الزائر فعلاً بما تعلنه الخريطة، في الاتجاهين.',
+            'impact': 'المنتج المعروض وغير المدرج في الخريطة قد لا تعلم به محركات البحث أصلاً. والصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. والروابط المحوّلة داخل الخريطة تستهلك ميزانية الزحف بلا مقابل.',
         },
         'diagnosis': {
             'title': 'التشخيص وخطة العمل',
@@ -152,67 +124,75 @@ SECTION_TXT = {
     'en': {
         'structure': {
             'title': 'Store structure and audit scope',
-            'intro': 'The audit starts at the homepage and browses the store the way a '
-                     'visitor does, following internal links and category pages. No page '
-                     'a visitor cannot reach by clicking enters this report.',
-            'impact': 'These figures reflect what search engines actually encounter when '
-                      'crawling the store. Every broken link a visitor can reach wastes '
-                      'part of the crawl budget allocated to the store and reduces the '
-                      'chance that important pages get indexed.',
+            'intro': 'The audit starts at the homepage and browses the store the way a visitor does, following internal links and category pages. No page a visitor cannot reach by clicking enters this report.',
+            'impact': 'These figures reflect what search engines actually encounter when crawling the store. Every broken link a visitor can reach wastes part of the crawl budget allocated to the store and reduces the chance that important pages get indexed.',
         },
         'meta': {
             'title': 'Meta titles and descriptions',
-            'intro': 'The meta title is the clickable blue line in search results; the '
-                     'description is the two lines beneath it. Standard applied: titles '
-                     'between 50 and 60 characters, descriptions between 120 and 150, '
-                     'counted in characters including spaces and punctuation.',
-            'impact': 'A very short title wastes free space in the result, while an '
-                      'overly long one is truncated and loses its ending. A missing title '
-                      'or one made of symbols leaves Google to pick arbitrary text from '
-                      'the page instead, rarely text that invites a click.',
+            'intro': 'The meta title is the clickable blue line in search results; the description is the two lines beneath it. Standard applied: titles between 50 and 60 characters, descriptions between 120 and 150, counted in characters including spaces and punctuation.',
+            'impact': 'A very short title wastes free space in the result, while an overly long one is truncated and loses its ending. A missing title or one made of symbols leaves Google to pick arbitrary text from the page instead, rarely text that invites a click.',
         },
         'urls': {
             'title': 'Page URLs',
-            'intro': 'The URL is an SEO element in its own right: search engines read it, '
-                     'and customers see it in results and when a product is shared. This '
-                     'section checks URL formatting, its match to the displayed product, '
-                     'and cloned copies of a single product.',
-            'impact': 'Cloned products create near-identical pages competing with each '
-                      'other, splitting page authority before Google picks one and '
-                      'ignores the rest. A URL naming a different product confuses the '
-                      'customer, who clicks one thing and lands on another, raising '
-                      'bounce rate.',
+            'intro': 'The URL is an SEO element in its own right: search engines read it, and customers see it in results and when a product is shared. This section checks URL formatting, its match to the displayed product, and cloned copies of a single product.',
+            'impact': 'Cloned products create near-identical pages competing with each other, splitting page authority before Google picks one and ignores the rest. A URL naming a different product confuses the customer, who clicks one thing and lands on another, raising bounce rate.',
         },
         'images': {
             'title': 'Store images and alt text',
-            'intro': 'Alt text is the description attached to an image in the page code. '
-                     'Search engines do not see the image; they read this text. This '
-                     'section also checks image formats, which affect page weight and '
-                     'loading and page weight directly.',
-            'impact': 'Google Image search is a meaningful traffic source for visual '
-                      'stores such as fashion, fragrance and gifts, where customers search '
-                      'by image before words. An image without alt text does not exist to '
-                      'Google. Modern formats also cut image weight by about a third at '
-                      'the same quality, making pages lighter on mobile.',
+            'intro': 'Alt text is the description attached to an image in the page code. Search engines do not see the image; they read this text. This section also checks image formats, which affect page weight and loading and page weight directly.',
+            'impact': 'Google Image search is a meaningful traffic source for visual stores such as fashion, fragrance and gifts, where customers search by image before words. An image without alt text does not exist to Google. Modern formats also cut image weight by about a third at the same quality, making pages lighter on mobile.',
         },
         'sitemap': {
             'title': 'Visible catalogue vs sitemap',
-            'intro': 'The sitemap is the list the store declares to search engines. This '
-                     'section compares what visitors actually see against what the sitemap '
-                     'declares, in both directions.',
-            'impact': 'A visible product missing from the sitemap may be unknown to search '
-                      'engines. A sitemap page with no internal link path stays worthless: '
-                      'it gains no authority and brings no traffic. Redirecting URLs inside '
-                      'the sitemap consume crawl budget for nothing.',
+            'intro': 'The sitemap is the list the store declares to search engines. This section compares what visitors actually see against what the sitemap declares, in both directions.',
+            'impact': 'A visible product missing from the sitemap may be unknown to search engines. A sitemap page with no internal link path stays worthless: it gains no authority and brings no traffic. Redirecting URLs inside the sitemap consume crawl budget for nothing.',
         },
         'diagnosis': {
             'title': 'Diagnosis and action plan',
-            'intro': 'A summary of the audit findings, ordered by impact on search '
-                     'visibility.',
+            'intro': 'A summary of the audit findings, ordered by impact on search visibility.',
             'impact': '',
         },
     },
 }
+
+DEFAULT_PRICES = {'meta_title': 15.0, 'meta_desc': 10.0, 'image_alt': 3.0}
+PAYMENT = {'iban': 'SA87 1000 0026 5571 0000 0103', 'stc': '+966 55 354 1890'}
+VOLUME_TIERS = [(1000, 0.20), (500, 0.15), (200, 0.10), (0, 0.0)]
+
+
+def volume_discount(units):
+    for threshold, rate in VOLUME_TIERS:
+        if units >= threshold:
+            return rate
+    return 0.0
+
+
+def build_quote(summary, prices=None, discount_rate=0.0):
+    pr = dict(DEFAULT_PRICES)
+    pr.update(prices or {})
+
+    titles = int(summary.get('bad_titles', 0))
+    descs = int(summary.get('bad_descs', 0))
+    alts = int(summary.get('missing_alts', 0)) + int(summary.get('weak_alts', 0))
+
+    items = []
+    if titles:
+        items.append({'key': 'meta_title', 'qty': titles, 'unit': pr['meta_title']})
+    if descs:
+        items.append({'key': 'meta_desc', 'qty': descs, 'unit': pr['meta_desc']})
+    if alts:
+        items.append({'key': 'image_alt', 'qty': alts, 'unit': pr['image_alt']})
+    for it in items:
+        it['total'] = round(it['qty'] * it['unit'], 2)
+
+    subtotal = round(sum(i['total'] for i in items), 2)
+    units = titles + descs + alts
+    rate = max(0.0, min(float(discount_rate or 0.0), 0.9))
+    disc = round(subtotal * rate, 2)
+    return {'items': items, 'subtotal': subtotal, 'units': units,
+            'discount_rate': rate, 'discount': disc,
+            'total': round(subtotal - disc, 2), 'prices': pr}
+
 
 INVOICE_TXT = {
     'ar': {
@@ -222,11 +202,9 @@ INVOICE_TXT = {
         'h_item': 'الخدمة', 'h_qty': 'الكمية', 'h_unit': 'سعر الوحدة',
         'h_total': 'الإجمالي', 'currency': 'ريال',
         'meta_title': 'كتابة عناوين الميتا وروابط الصفحات',
-        'meta_title_d': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، '
-                        'مع ضبط الرابط ليكون وصفياً ومطابقاً للمنتج',
+        'meta_title_d': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، مع ضبط الرابط ليكون وصفياً ومطابقاً للمنتج',
         'meta_desc': 'كتابة أوصاف الميتا',
-        'meta_desc_d': 'وصف تسويقي لكل صفحة ضمن الطول المثالي يرفع نسبة النقر '
-                       'من نتائج البحث',
+        'meta_desc_d': 'وصف تسويقي لكل صفحة ضمن الطول المثالي يرفع نسبة النقر من نتائج البحث',
         'image_alt': 'كتابة النصوص البديلة للصور',
         'image_alt_d': 'وصف دقيق لكل صورة يُظهرها في بحث صور جوجل',
         'unit_page': 'صفحة', 'unit_img': 'صورة',
@@ -243,36 +221,24 @@ INVOICE_TXT = {
         'h_item': 'Service', 'h_qty': 'Qty', 'h_unit': 'Unit price',
         'h_total': 'Amount', 'currency': 'SAR',
         'meta_title': 'Meta titles and page URLs',
-        'meta_title_d': 'A search-optimised title for each page within the ideal '
-                        'length, with the URL corrected to match the product',
+        'meta_title_d': 'A search-optimised title for each page within the ideal length, with the URL corrected to match the product',
         'meta_desc': 'Meta descriptions',
-        'meta_desc_d': 'A marketing description per page within the ideal length '
-                       'to raise click-through from search results',
+        'meta_desc_d': 'A marketing description per page within the ideal length to raise click-through from search results',
         'image_alt': 'Image alt texts',
-        'image_alt_d': 'A precise description per image so it appears in '
-                       'Google Image search',
+        'image_alt_d': 'A precise description per image so it appears in Google Image search',
         'unit_page': 'pages', 'unit_img': 'images',
         'subtotal': 'Subtotal', 'discount': 'Volume discount', 'total': 'Total due',
         'novat': 'Prices exclude VAT',
         'pay': 'Payment details', 'iban': 'IBAN', 'stc': 'STC Bank',
         'note': 'Work begins upon confirmation.',
-        'scope': 'Quantities are based on the technical audit and cover only '
-                 'what needs fixing.',
+        'scope': 'Quantities are based on the technical audit and cover only what needs fixing.',
     },
 }
 
-PAYMENT = {
-    'iban': 'SA87 1000 0026 5571 0000 0103',
-    'stc': '+966 55 354 1890',
-}
 
 def shape_ar(text):
-    if not text:
-        return ""
-    try:
-        return get_display(arabic_reshaper.reshape(str(text)))
-    except Exception:
-        return str(text)
+    return get_display(arabic_reshaper.reshape(str(text)))
+
 
 def build_diagnosis(score, stats, lang):
     imgs = stats.get('total_images', 0)
@@ -286,70 +252,63 @@ def build_diagnosis(score, stats, lang):
 
     if lang == 'ar':
         if missing and imgs:
-            points.append(f"{missing} صورة من أصل {imgs} بلا نص بديل إطلاقاً "
-                          f"({round(missing / imgs * 100, 1)}%)، فلا تظهر في بحث صور جوجل.")
+            points.append(f"{missing} صورة من أصل {imgs} بلا نص بديل إطلاقاً ({round(missing / imgs * 100, 1)}%)، فلا تظهر في بحث صور جوجل.")
         if weak:
-            points.append(f"{weak} صورة نصها البديل موجود لكنه غير وصفي أو مكرر، "
-                          "فلا يضيف قيمة لمحركات البحث.")
+            points.append(f"{weak} صورة نصها البديل موجود لكنه غير وصفي أو مكرر، فلا يضيف قيمة لمحركات البحث.")
         if stats.get('title_symbols'):
-            points.append(f"{stats['title_symbols']} عنوان ميتا مجرد رموز أو قيمة قالب "
-                          "افتراضية بدل النص، أي أن الصفحة بلا عنوان فعلي في نتائج البحث.")
+            points.append(f"{stats['title_symbols']} عنوان ميتا مجرد رموز أو قيمة قالب افتراضية بدل النص، أي أن الصفحة بلا عنوان فعلي في نتائج البحث.")
         if stats.get('title_brand_only'):
-            points.append(f"{stats['title_brand_only']} عنوان لا يحمل سوى اسم المتجر "
-                          "بلا أي وصف للمنتج، فلا يطابق أي بحث للزبون.")
+            points.append(f"{stats['title_brand_only']} عنوان لا يحمل سوى اسم المتجر بلا أي وصف للمنتج، فلا يطابق أي بحث للزبون.")
         if stats.get('title_dup'):
-            points.append(f"{stats['title_dup']} صفحة تتشارك نفس عنوان الميتا، "
-                          "فلا تميّز محركات البحث بينها.")
+            points.append(f"{stats['title_dup']} صفحة تتشارك نفس عنوان الميتا، فلا تميّز محركات البحث بينها.")
         if stats.get('desc_same'):
-            points.append(f"{stats['desc_same']} وصف ميتا نسخة حرفية من العنوان، "
-                          "فيضيع سطر إضافي مجاني في نتيجة البحث.")
+            points.append(f"{stats['desc_same']} وصف ميتا نسخة حرفية من العنوان، فيضيع سطر إضافي مجاني في نتيجة البحث.")
         if crit_t:
-            points.append(f"{crit_t} عنوان ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
-                          f"{TITLE_MIN_OK} حرفاً أو يتجاوز {TITLE_MAX} حرفاً فيُقتطع في نتائج البحث.")
+            points.append(f"{crit_t} عنوان ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من {TITLE_MIN_OK} حرفاً أو يتجاوز {TITLE_MAX} حرفاً فيُقتطع في نتائج البحث.")
         if imp_t:
-            points.append(f"{imp_t} عنوان ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
-                          f"({TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرفاً) لاستغلال كامل المساحة المعروضة.")
+            points.append(f"{imp_t} عنوان ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي ({TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرفاً) لاستغلال كامل المساحة المعروضة.")
         if crit_d:
-            points.append(f"{crit_d} وصف ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
-                          f"{DESC_MIN_OK} حرفاً أو يتجاوز {DESC_MAX} حرفاً.")
+            points.append(f"{crit_d} وصف ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من {DESC_MIN_OK} حرفاً أو يتجاوز {DESC_MAX} حرفاً.")
         if imp_d:
-            points.append(f"{imp_d} وصف ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
-                          f"({DESC_MIN_OPTIMAL}-{DESC_MAX} حرفاً).")
+            points.append(f"{imp_d} وصف ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي ({DESC_MIN_OPTIMAL}-{DESC_MAX} حرفاً).")
         if stats.get('url_clone'):
-            points.append(f"{stats['url_clone']} منتجاً مستنسخاً: رابطه يحمل بادئة النسخ "
-                          "أو لاحقة رقمية، وهي نسخ مكررة من منتج واحد تتنافس مع أصلها في نتائج البحث.")
+            points.append(f"{stats['url_clone']} منتجاً مستنسخاً: رابطه يحمل بادئة النسخ أو لاحقة رقمية، وهي نسخ مكررة من منتج واحد تتنافس مع أصلها في نتائج البحث.")
         if stats.get('dup_content'):
-            points.append(f"{stats['dup_content']} صفحة تتشارك نفس العنوان والوصف حرفياً، "
-                          "فتُعدّ محتوى مكرراً ويختار جوجل واحدة ويتجاهل الباقي.")
+            points.append(f"{stats['dup_content']} صفحة تتشارك نفس العنوان والوصف حرفياً، فتُعدّ محتوى مكرراً ويختار جوجل واحدة ويتجاهل الباقي.")
         if stats.get('url_wrongname'):
-            points.append(f"{stats['url_wrongname']} رابط يحمل اسم منتج مختلف عن المنتج المعروض "
-                          "في الصفحة، غالباً لأن المنتج نُسخ ثم غُيّر اسمه دون تحديث الرابط.")
+            points.append(f"{stats['url_wrongname']} رابط يحمل اسم منتج مختلف عن المنتج المعروض في الصفحة، غالباً لأن المنتج نُسخ ثم غُيّر اسمه دون تحديث الرابط. الزبون يصل لصفحة لا تطابق ما نقر عليه.")
         if stats.get('url_style'):
-            points.append(f"{stats['url_style']} رابط بصياغة غير مثالية: شرطة سفلية "
-                          "أو حروف كبيرة أو طول مفرط أو تكرار كلمة داخل الرابط.")
+            points.append(f"{stats['url_style']} رابط بصياغة غير مثالية: شرطة سفلية أو حروف كبيرة أو طول مفرط أو تكرار كلمة داخل الرابط.")
         if stats.get('url_malformed'):
-            points.append(f"{stats['url_malformed']} رابط معطوب يحتوي عنوان موقع داخل مساره، "
-                          "فيظهر للزبون في نتائج البحث بشكل مشوّه ويضعف الثقة.")
+            points.append(f"{stats['url_malformed']} رابط معطوب يحتوي عنوان موقع داخل مساره (لصق خاطئ في حقل الرابط)، فيظهر للزبون في نتائج البحث بشكل مشوّه ويضعف الثقة.")
         if stats.get('url_generic'):
             points.append(f"{stats['url_generic']} رابط مكوّن من أرقام أو رموز بلا كلمات وصفية.")
         if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
-            points.append(f"{stats['img_legacy']} صورة بصيغة قديمة ثقيلة بدل الصيغ الحديثة الخفيفة.")
+            points.append(f"{stats['img_legacy']} صورة بصيغة قديمة ثقيلة بدل الصيغ الحديثة الخفيفة، ما يزيد حجم الصفحة ويبطئ تحميلها على الجوال.")
+        if stats.get('noindex_pages'):
+            points.append(f"{stats['noindex_pages']} صفحة تحمل وسم noindex الذي يطلب من محركات البحث تجاهلها، فلا تظهر في النتائج مهما كان محتواها جيداً.")
+        if stats.get('deleted_pages'):
+            points.append(f"{stats['deleted_pages']} رابط لمنتجات محذوفة أو مخفية يُحوَّل إلى الصفحة الرئيسية بدل إظهار صفحة «غير موجود»، وهو ما يربك محركات البحث ويهدر ميزانية الزحف.")
+        if stats.get('h1_mismatch'):
+            points.append(f"{stats['h1_mismatch']} صفحة عنوانها في نتائج البحث يختلف عن العنوان المعروض فيها، فيصل الزبون لصفحة لا تطابق ما نقر عليه.")
         if stats.get('canon_broken'):
-            points.append(f"{stats['canon_broken']} صفحة تشير بوسم الكانونيكال إلى صفحة واحدة بدل نفسها.")
+            points.append(f"{stats['canon_broken']} صفحة تشير بوسم الكانونيكال إلى صفحة واحدة بدل نفسها، فتطلب من محركات البحث تجاهلها جميعاً. هذا أخطر خلل في التقرير ويعالج من القالب.")
         if stats.get('canon_missing'):
             points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، ما يعرّض المتجر لتكرار المحتوى.")
         if stats.get('dead_count'):
-            points.append(f"{stats['dead_count']} رابط محذوف ما زال معلناً في خريطة الموقع.")
+            points.append(f"{stats['dead_count']} رابط محذوف ما زال معلناً في خريطة الموقع، فترسل محركات البحث زحفها إلى صفحات غير موجودة.")
         if stats.get('hidden_count'):
-            points.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع لا يصل إليها الزائر بأي رابط داخلي.")
+            points.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع لا يصل إليها الزائر بأي رابط داخلي، فتفقد قيمتها.")
         if stats.get('unlisted_count'):
-            points.append(f"{stats['unlisted_count']} صفحة معروضة في المتجر وغير مدرجة في خريطة الموقع.")
+            points.append(f"{stats['unlisted_count']} صفحة معروضة في المتجر وغير مدرجة في خريطة الموقع، فقد لا تعلم بها محركات البحث.")
         if stats.get('scroll_only_count'):
-            points.append(f"{stats['scroll_only_count']} منتجاً لا يظهر رابطه إلا بالتمرير فقط.")
+            points.append(f"{stats['scroll_only_count']} منتجاً لا يظهر رابطه في صفحات الأقسام ويصل إليه الزائر بالتمرير فقط، فيضعف ترابطه الداخلي وتقل قوته في نتائج البحث.")
         if stats.get('not_indexed_count'):
             points.append(f"{stats['not_indexed_count']} منتجاً معروضاً في المتجر لا يظهر في خريطة الموقع.")
         if stats.get('broken_pages'):
             points.append(f"{stats['broken_pages']} رابط معطل داخل المتجر يصل إليه الزائر.")
+        if stats.get('archive_pages', 0) > 20:
+            points.append(f"{stats['archive_pages']} صفحة أرشيف (وسوم وقوائم) تعرض محتوى مكرراً بعنوان واحد، وتستهلك ميزانية الزحف دون أن تجلب زيارات. يوصى بحصر الوسوم في المفيد منها.")
         if stats.get('thin_pages'):
             points.append(f"{stats['thin_pages']} صفحة بمحتوى نصي أقل من 50 كلمة.")
 
@@ -362,70 +321,90 @@ def build_diagnosis(score, stats, lang):
 
         intro = "رصد الفحص الفني النقاط التالية، مرتبة حسب أثرها على الظهور في البحث:"
         if score < 60:
-            close = ("تشير النتيجة الإجمالية إلى فجوة واسعة في تهيئة المتجر لمحركات البحث. "
-                     "يوصى بإعادة كتابة البيانات الوصفية وإسناد نصوص بديلة وصفية لجميع صور المحتوى.")
+            close = ("تشير النتيجة الإجمالية إلى فجوة واسعة في تهيئة المتجر لمحركات البحث. يوصى بإعادة كتابة البيانات الوصفية وإسناد نصوص بديلة وصفية لجميع صور المحتوى ضمن خطة عمل مرحلية.")
         elif score < 80:
-            close = ("المتجر مهيأ جزئياً، ومعالجة البنود أعلاه من شأنها رفع درجة التوافق وتحسين فرص الظهور.")
+            close = ("المتجر مهيأ جزئياً، ومعالجة البنود أعلاه من شأنها رفع درجة التوافق وتحسين فرص الظهور في نتائج البحث.")
         else:
             close = ("المستوى العام جيد، والبنود أعلاه تحسينات تكميلية يمكن تنفيذها ضمن جولة مراجعة واحدة.")
         return intro, points, close
 
+    # English version
     if missing and imgs:
-        points.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) carry no alt text at all.")
+        points.append(f"{missing} of {imgs} images ({round(missing / imgs * 100, 1)}%) carry no alt text at all and cannot appear in Google Image search.")
     if weak:
-        points.append(f"{weak} images have non-descriptive or duplicated alt text.")
+        points.append(f"{weak} images have alt text that is present but non-descriptive or duplicated, adding no value for search engines.")
+    if stats.get('title_symbols'):
+        points.append(f"{stats['title_symbols']} meta titles are only symbols or template placeholders, leaving those pages with no real title.")
+    if stats.get('title_brand_only'):
+        points.append(f"{stats['title_brand_only']} titles contain nothing but the store name, matching no customer search.")
+    if stats.get('title_dup'):
+        points.append(f"{stats['title_dup']} pages share an identical meta title.")
+    if stats.get('desc_same'):
+        points.append(f"{stats['desc_same']} descriptions are a verbatim copy of the title, wasting a free line in the search result.")
     if crit_t:
-        points.append(f"{crit_t} meta titles need urgent work (missing, too short, or too long).")
+        points.append(f"{crit_t} meta titles need urgent work: missing, under {TITLE_MIN_OK} characters, or over {TITLE_MAX} and truncated in search results.")
+    if imp_t:
+        points.append(f"{imp_t} titles are acceptable and could be raised to the optimal {TITLE_MIN_OPTIMAL}-{TITLE_MAX} character range.")
     if crit_d:
-        points.append(f"{crit_d} meta descriptions need urgent work.")
+        points.append(f"{crit_d} meta descriptions need urgent work: missing, under {DESC_MIN_OK} characters, or over {DESC_MAX}.")
+    if imp_d:
+        points.append(f"{imp_d} descriptions are acceptable and could be raised to the optimal {DESC_MIN_OPTIMAL}-{DESC_MAX} character range.")
+    if stats.get('url_clone'):
+        points.append(f"{stats['url_clone']} cloned products carry a copy-of prefix in their URL and compete with the original in search results.")
+    if stats.get('dup_content'):
+        points.append(f"{stats['dup_content']} pages share an identical title and description, counting as duplicate content.")
+    if stats.get('url_wrongname'):
+        points.append(f"{stats['url_wrongname']} URLs carry a different product name than the page displays, usually because a product was cloned and renamed without updating its URL.")
+    if stats.get('url_style'):
+        points.append(f"{stats['url_style']} URLs have imperfect formatting: underscores, uppercase letters, excessive length, or a repeated word.")
+    if stats.get('url_malformed'):
+        points.append(f"{stats['url_malformed']} URLs are malformed and contain a full web address inside the slug, showing distorted in search results.")
+    if stats.get('url_generic'):
+        points.append(f"{stats['url_generic']} URLs consist of numbers or codes with no descriptive words.")
+    if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
+        points.append(f"{stats['img_legacy']} images use legacy formats (JPEG/PNG) instead of WebP, increasing page weight on mobile.")
+    if stats.get('noindex_pages'):
+        points.append(f"{stats['noindex_pages']} pages carry a noindex tag asking search engines to ignore them.")
+    if stats.get('deleted_pages'):
+        points.append(f"{stats['deleted_pages']} deleted or hidden product URLs redirect to the homepage instead of returning a not-found page, confusing search engines.")
+    if stats.get('h1_mismatch'):
+        points.append(f"{stats['h1_mismatch']} pages show a search title that differs from the heading on the page itself.")
+    if stats.get('canon_broken'):
+        points.append(f"{stats['canon_broken']} pages point their canonical tag at a single other page, asking search engines to ignore them all. This is the most severe issue in this report.")
+    if stats.get('canon_missing'):
+        points.append(f"{stats['canon_missing']} pages have no canonical tag, exposing the store to duplicate content.")
+    if stats.get('hidden_count'):
+        points.append(f"{stats['hidden_count']} pages published in the sitemap have no internal link path for visitors and lose their value.")
+    if stats.get('not_indexed_count'):
+        points.append(f"{stats['not_indexed_count']} visible products are absent from the sitemap.")
+    if stats.get('broken_pages'):
+        points.append(f"{stats['broken_pages']} broken links are reachable by visitors.")
+    if stats.get('archive_pages', 0) > 20:
+        points.append(f"{stats['archive_pages']} archive pages (tags and lists) show duplicated content under a single title and consume crawl budget without bringing traffic.")
+    if stats.get('thin_pages'):
+        points.append(f"{stats['thin_pages']} pages carry fewer than 50 words of text.")
+
     if not points:
         return ("The audit found no material gaps across the visible pages:", [
             "Titles and descriptions fall within recommended lengths.",
             "Image alt text is complete and descriptive.",
             "Link structure and sitemap match what visitors can reach."],
             "Periodic review is advised as new products are added.")
+
     intro = "The technical audit identified the following, ordered by search impact:"
-    close = "Addressing the items above would raise the compliance score and improve search visibility."
+    if score < 60:
+        close = ("The overall score indicates a substantial gap in search engine readiness. Rewriting metadata and assigning descriptive alt text to all content images is recommended as a phased programme of work.")
+    elif score < 80:
+        close = ("The store is partially optimised. Addressing the items above would raise the compliance score and improve search visibility.")
+    else:
+        close = ("The overall standard is good; the items above are incremental improvements that fit into a single review cycle.")
     return intro, points, close
 
 
-def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
-    """تقرير عميل بتصميم فاخر أصلي يدعم استدعاءه بوجود coverage أو بدونه."""
-    # دمج بيانات coverage تلقائياً لتفادي أي خطأ بالمدخلات
-    if isinstance(coverage, str) and coverage in ('ar', 'en'):
-        lang = coverage
-        coverage = None
-
-    stats_copy = dict(stats)
-    if coverage:
-        stats_copy['coverage_enabled'] = True
-        stats_copy['sitemap_products'] = coverage.get('sitemap_count', stats_copy.get('sitemap_products', 0))
-        stats_copy['sitemap_live'] = coverage.get('sitemap_count', 0) - len(coverage.get('dead_pages', []))
-        stats_copy['dead_count'] = len(coverage.get('dead_pages', []))
-        stats_copy['hidden_count'] = len(coverage.get('orphan_pages', []))
-        stats_copy['unlisted_count'] = len(coverage.get('unlisted_pages', []))
-        stats_copy['scroll_only_count'] = len(coverage.get('scroll_only_products', []))
-        prod_count = stats_copy.get('products', 0)
-        unlisted_p = len([u for u in coverage.get('unlisted_pages', []) if '/product' in u or '/p/' in u])
-        if prod_count:
-            stats_copy['indexed_pct'] = round((prod_count - unlisted_p) / prod_count * 100, 1)
-        else:
-            stats_copy['indexed_pct'] = 100.0
-
-    # مواءمة مفاتيح المؤشرات مع تقرير الـ PDF الأصلي
-    if 'critical_titles' not in stats_copy:
-        stats_copy['critical_titles'] = stats_copy.get('missing_titles', 0)
-    if 'bad_titles' not in stats_copy:
-        stats_copy['bad_titles'] = stats_copy.get('missing_titles', 0) + stats_copy.get('duplicate_titles', 0) + stats_copy.get('title_mismatch', 0)
-    if 'critical_descs' not in stats_copy:
-        stats_copy['critical_descs'] = stats_copy.get('missing_descs', 0) + stats_copy.get('short_descs', 0)
-    if 'bad_descs' not in stats_copy:
-        stats_copy['bad_descs'] = stats_copy.get('missing_descs', 0) + stats_copy.get('short_descs', 0) + stats_copy.get('duplicate_descs', 0)
-
-    stats = stats_copy
+def generate_client_pdf(domain, score, stats, lang='ar'):
     rtl = (lang == 'ar')
-    if rtl and (not FONT_PATH or not FONT_PATH.exists()):
-        raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
+    if rtl and not FONT_PATH.exists():
+        raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH.name}. ارفع أحد الخطوط المدعومة إلى جذر المستودع.")
 
     T = PDF_TXT[lang]
     S = SECTION_TXT[lang]
@@ -441,7 +420,6 @@ def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
     fmt = (lambda t: str(t)) if use_shaping else (shape_ar if rtl else _latin)
     if not rtl:
         fmt = _latin
-
     ALIGN = "R" if rtl else "L"
     FONT = AR_FONT_NAME if rtl else "Helvetica"
     has_bold = bool(FONT_BOLD_PATH) if rtl else True
@@ -476,8 +454,7 @@ def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
             self.set_font(FONT, "", 8)
             self.set_text_color(*C_MUTED)
             self.cell(W / 2, 8, "anasrashed.com", align="L" if rtl else "R")
-            self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no())),
-                      align="R" if rtl else "L")
+            self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no())), align="R" if rtl else "L")
 
         def wrap(self, txt, width, size=9):
             self.set_font(FONT, "", size)
@@ -599,14 +576,12 @@ def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
     pdf = Report()
     if rtl:
         pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
-        bold_target = str(FONT_BOLD_PATH) if (FONT_BOLD_PATH and Path(FONT_BOLD_PATH).exists()) else str(FONT_PATH)
-        pdf.add_font(AR_FONT_NAME, "B", bold_target)
+        if FONT_BOLD_PATH:
+            pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
         if use_shaping:
             pdf.set_text_shaping(True, direction="rtl")
-
     pdf.set_auto_page_break(True, margin=22)
 
-    # ======================= الغلاف =======================
     pdf.add_page()
     if logo_exists:
         try:
@@ -683,103 +658,62 @@ def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
 
     n = 0
 
-    # ======================= البنية =======================
+    # 1. Structure
     n += 1
     pdf.add_page()
     pdf.section(n, 'structure')
     pdf.table([
-        ('إجمالي الصفحات المعروضة والمفحوصة' if rtl else 'Total visible pages audited',
-         f"{stats['total_pages']} {T['u_page']}", 'neutral'),
-        ('صفحات المنتجات' if rtl else 'Product pages',
-         f"{stats['products']} {T['u_product']}", 'neutral'),
-        ('صفحات الأقسام والكولكشنات' if rtl else 'Category and collection pages',
-         f"{stats['categories']} {T['u_cat']}", 'neutral'),
-        ('مقالات وصفحات المدونة' if rtl else 'Blog posts and articles',
-         f"{stats.get('blog_pages', 0)} {T['u_article']}",
-         'warn' if not stats.get('blog_pages') else 'neutral'),
-        ('صفحات أرشيف (وسوم وقوائم)' if rtl else 'Archive pages (tags and lists)',
-         f"{stats.get('archive_pages', 0)} {T['u_page']}",
-         'warn' if stats.get('archive_pages', 0) > 20 else 'neutral'),
-        ('الصفحات التعريفية والسياسات' if rtl else 'Info and policy pages',
-         f"{stats.get('info_pages', 0)} {T['u_page']}", 'neutral'),
-        ('روابط معطلة يصل إليها الزائر' if rtl else 'Broken links reachable by visitors',
-         f"{stats.get('broken_pages', 0)} {T['u_link']}",
-         'bad' if stats.get('broken_pages') else 'ok'),
-        ('صفحات تعذّر الاتصال بها أثناء الفحص' if rtl else 'Pages unreachable during the scan',
-         f"{stats.get('unreachable_pages', 0)} {T['u_page']}",
-         'warn' if stats.get('unreachable_pages') else 'ok'),
-        ('صفحات بمحتوى نصي ضعيف' if rtl else 'Pages with thin text content',
-         f"{stats.get('thin_pages', 0)} {T['u_page']}",
-         'warn' if stats.get('thin_pages') else 'ok'),
+        ('إجمالي الصفحات المعروضة والمفحوصة' if rtl else 'Total visible pages audited', f"{stats['total_pages']} {T['u_page']}", 'neutral'),
+        ('صفحات المنتجات' if rtl else 'Product pages', f"{stats['products']} {T['u_product']}", 'neutral'),
+        ('صفحات الأقسام والكولكشنات' if rtl else 'Category and collection pages', f"{stats['categories']} {T['u_cat']}", 'neutral'),
+        ('مقالات وصفحات المدونة' if rtl else 'Blog posts and articles', f"{stats.get('blog_pages', 0)} {T['u_article']}", 'warn' if not stats.get('blog_pages') else 'neutral'),
+        ('صفحات أرشيف (وسوم وقوائم)' if rtl else 'Archive pages (tags and lists)', f"{stats.get('archive_pages', 0)} {T['u_page']}", 'warn' if stats.get('archive_pages', 0) > 20 else 'neutral'),
+        ('الصفحات التعريفية والسياسات' if rtl else 'Info and policy pages', f"{stats['info_pages']} {T['u_page']}", 'neutral'),
+        ('روابط منتجات محذوفة تُحوَّل للرئيسية' if rtl else 'Deleted product URLs redirecting home', f"{stats.get('deleted_pages', 0)} {T['u_link']}", 'bad' if stats.get('deleted_pages') else 'ok'),
+        ('روابط معطلة يصل إليها الزائر' if rtl else 'Broken links reachable by visitors', f"{stats.get('broken_pages', 0)} {T['u_link']}", 'bad' if stats.get('broken_pages') else 'ok'),
+        ('صفحات تعذّر الاتصال بها أثناء الفحص' if rtl else 'Pages unreachable during the scan', f"{stats.get('unreachable_pages', 0)} {T['u_page']}", 'warn' if stats.get('unreachable_pages') else 'ok'),
+        ('صفحات ممنوعة من الأرشفة' if rtl else 'Pages blocked from indexing', f"{stats.get('noindex_pages', 0)} {T['u_page']}", 'bad' if stats.get('noindex_pages') else 'ok'),
+        ('عناوين تختلف عن عنوان الصفحة' if rtl else 'Titles differing from page heading', f"{stats.get('h1_mismatch', 0)} {T['u_page']}", 'warn' if stats.get('h1_mismatch') else 'ok'),
+        ('صفحات بمحتوى نصي ضعيف' if rtl else 'Pages with thin text content', f"{stats.get('thin_pages', 0)} {T['u_page']}", 'warn' if stats.get('thin_pages') else 'ok'),
     ])
     pdf.impact('structure')
 
-    # ======================= الميتا =======================
+    # 2. Meta
     n += 1
     pdf.add_page()
     pdf.section(n, 'meta')
     tot = max(stats['total_pages'] - stats.get('broken_pages', 0), 1)
-    ok_t = tot - stats.get('bad_titles', 0)
-    ok_d = tot - stats.get('bad_descs', 0)
+    ok_t = tot - stats['bad_titles']
+    ok_d = tot - stats['bad_descs']
     pdf.table([
-        ('عناوين ضمن الطول المثالي (50-60)' if rtl else 'Titles within optimal length (50-60)',
-         (f"{ok_t} من {tot}" if rtl else f"{ok_t} of {tot}"),
-         'ok' if ok_t / tot > 0.7 else 'warn'),
-        ('عناوين تحتاج إصلاحاً عاجلاً' if rtl else 'Titles needing urgent work',
-         f"{stats.get('critical_titles', 0)} {T['u_title']}",
-         'bad' if stats.get('critical_titles') else 'ok'),
-        ('عناوين مجرد رموز أو قيمة قالب' if rtl else 'Titles that are symbols or placeholders',
-         f"{stats.get('title_symbols', 0)} {T['u_title']}",
-         'bad' if stats.get('title_symbols') else 'ok'),
-        ('عناوين لا تحمل سوى اسم المتجر' if rtl else 'Titles with only the store name',
-         f"{stats.get('title_brand_only', 0)} {T['u_title']}",
-         'bad' if stats.get('title_brand_only') else 'ok'),
-        ('صفحات تتشارك نفس العنوان' if rtl else 'Pages sharing the same title',
-         f"{stats.get('title_dup', 0)} {T['u_page']}",
-         'warn' if stats.get('title_dup') else 'ok'),
-        ('أوصاف ضمن الطول المثالي (120-150)' if rtl else 'Descriptions within optimal length (120-150)',
-         (f"{ok_d} من {tot}" if rtl else f"{ok_d} of {tot}"),
-         'ok' if ok_d / tot > 0.7 else 'warn'),
-        ('أوصاف تحتاج إصلاحاً عاجلاً' if rtl else 'Descriptions needing urgent work',
-         f"{stats.get('critical_descs', 0)} {T['u_desc']}",
-         'bad' if stats.get('critical_descs') else 'ok'),
-        ('صفحات بلا وسم كانونيكال' if rtl else 'Pages without a canonical tag',
-         f"{stats.get('canon_missing', 0)} {T['u_page']}",
-         'warn' if stats.get('canon_missing') else 'ok'),
+        ('عناوين ضمن الطول المثالي (50-60)' if rtl else 'Titles within optimal length (50-60)', (f"{ok_t} من {tot}" if rtl else f"{ok_t} of {tot}"), 'ok' if ok_t / tot > 0.7 else 'warn'),
+        ('عناوين تحتاج إصلاحاً عاجلاً' if rtl else 'Titles needing urgent work', f"{stats.get('critical_titles', 0)} {T['u_title']}", 'bad' if stats.get('critical_titles') else 'ok'),
+        ('عناوين مجرد رموز أو قيمة قالب' if rtl else 'Titles that are symbols or placeholders', f"{stats.get('title_symbols', 0)} {T['u_title']}", 'bad' if stats.get('title_symbols') else 'ok'),
+        ('عناوين لا تحمل سوى اسم المتجر' if rtl else 'Titles with only the store name', f"{stats.get('title_brand_only', 0)} {T['u_title']}", 'bad' if stats.get('title_brand_only') else 'ok'),
+        ('صفحات تتشارك نفس العنوان' if rtl else 'Pages sharing the same title', f"{stats.get('title_dup', 0)} {T['u_page']}", 'warn' if stats.get('title_dup') else 'ok'),
+        ('أوصاف ضمن الطول المثالي (120-150)' if rtl else 'Descriptions within optimal length (120-150)', (f"{ok_d} من {tot}" if rtl else f"{ok_d} of {tot}"), 'ok' if ok_d / tot > 0.7 else 'warn'),
+        ('أوصاف تحتاج إصلاحاً عاجلاً' if rtl else 'Descriptions needing urgent work', f"{stats.get('critical_descs', 0)} {T['u_desc']}", 'bad' if stats.get('critical_descs') else 'ok'),
+        ('صفحات بلا وسم كانونيكال' if rtl else 'Pages without a canonical tag', f"{stats.get('canon_missing', 0)} {T['u_page']}", 'warn' if stats.get('canon_missing') else 'ok'),
     ])
     pdf.impact('meta')
 
-    # ======================= الروابط =======================
+    # 3. URLs
     n += 1
     pdf.add_page()
     pdf.section(n, 'urls')
     good_u = max(tot - stats.get('url_bad', 0), 0)
     pdf.table([
-        ('روابط سليمة الصياغة' if rtl else 'Well-formed URLs',
-         (f"{good_u} من {tot}" if rtl else f"{good_u} of {tot}"),
-         'ok' if good_u / tot > 0.8 else 'warn'),
-        ('منتجات مستنسخة من منتج واحد' if rtl else 'Cloned products',
-         f"{stats.get('url_clone', 0)} {T['u_product']}",
-         'bad' if stats.get('url_clone') else 'ok'),
-        ('صفحات بنفس العنوان والوصف حرفياً' if rtl else 'Pages with identical title and description',
-         f"{stats.get('dup_content', 0)} {T['u_page']}",
-         'bad' if stats.get('dup_content') else 'ok'),
-        ('روابط تحمل اسم منتج مختلف' if rtl else 'URLs naming a different product',
-         f"{stats.get('url_wrongname', 0)} {T['u_link']}",
-         'bad' if stats.get('url_wrongname') else 'ok'),
-        ('روابط معطوبة فيها عنوان موقع' if rtl else 'Malformed URLs containing an address',
-         f"{stats.get('url_malformed', 0)} {T['u_link']}",
-         'bad' if stats.get('url_malformed') else 'ok'),
-        ('روابط بأرقام أو رموز بلا كلمات' if rtl else 'URLs with no descriptive words',
-         f"{stats.get('url_generic', 0)} {T['u_link']}",
-         'warn' if stats.get('url_generic') else 'ok'),
-        ('روابط بصياغة غير مثالية' if rtl else 'URLs with imperfect formatting',
-         f"{stats.get('url_style', 0)} {T['u_link']}",
-         'warn' if stats.get('url_style') else 'ok'),
+        ('روابط سليمة الصياغة' if rtl else 'Well-formed URLs', (f"{good_u} من {tot}" if rtl else f"{good_u} of {tot}"), 'ok' if good_u / tot > 0.8 else 'warn'),
+        ('منتجات مستنسخة من منتج واحد' if rtl else 'Cloned products', f"{stats.get('url_clone', 0)} {T['u_product']}", 'bad' if stats.get('url_clone') else 'ok'),
+        ('صفحات بنفس العنوان والوصف حرفياً' if rtl else 'Pages with identical title and description', f"{stats.get('dup_content', 0)} {T['u_page']}", 'bad' if stats.get('dup_content') else 'ok'),
+        ('روابط تحمل اسم منتج مختلف' if rtl else 'URLs naming a different product', f"{stats.get('url_wrongname', 0)} {T['u_link']}", 'bad' if stats.get('url_wrongname') else 'ok'),
+        ('روابط معطوبة فيها عنوان موقع' if rtl else 'Malformed URLs containing an address', f"{stats.get('url_malformed', 0)} {T['u_link']}", 'bad' if stats.get('url_malformed') else 'ok'),
+        ('روابط بأرقام أو رموز بلا كلمات' if rtl else 'URLs with no descriptive words', f"{stats.get('url_generic', 0)} {T['u_link']}", 'warn' if stats.get('url_generic') else 'ok'),
+        ('روابط بصياغة غير مثالية' if rtl else 'URLs with imperfect formatting', f"{stats.get('url_style', 0)} {T['u_link']}", 'warn' if stats.get('url_style') else 'ok'),
     ])
     pdf.impact('urls')
 
-    # ======================= الصور =======================
+    # 4. Images
     n += 1
     pdf.add_page()
     pdf.section(n, 'images')
@@ -790,52 +724,33 @@ def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
     ratio = round((noalt + weak) / imgs * 100, 1) if imgs else 0
     fmts = ' · '.join(f"{k.upper()} {v}" for k, v in list((stats.get('img_formats') or {}).items())[:4]) or '—'
     pdf.table([
-        ('إجمالي صور المحتوى والمنتجات الفريدة' if rtl else 'Total content and product images',
-         f"{imgs} {T['u_img']}", 'neutral'),
-        ('صور بلا نص بديل إطلاقاً' if rtl else 'Images with no alt text at all',
-         f"{noalt} {T['u_img']}", 'bad' if noalt else 'ok'),
-        ('صور بنص بديل غير وصفي أو مكرر' if rtl else 'Images with non-descriptive or duplicated alt text',
-         f"{weak} {T['u_img']}", 'warn' if weak else 'ok'),
-        ('صور بنص بديل سليم' if rtl else 'Images with sound alt text',
-         f"{good} {T['u_img']}", 'ok' if good else 'neutral'),
-        ('نسبة الصور غير المهيأة' if rtl else 'Share of images not optimised',
-         f"{ratio}%", 'bad' if ratio > 50 else 'warn' if ratio else 'ok'),
+        ('إجمالي صور المحتوى والمنتجات' if rtl else 'Total content and product images', f"{imgs} {T['u_img']}", 'neutral'),
+        ('صور بلا نص بديل إطلاقاً' if rtl else 'Images with no alt text at all', f"{noalt} {T['u_img']}", 'bad' if noalt else 'ok'),
+        ('صور بنص بديل غير وصفي أو مكرر' if rtl else 'Images with non-descriptive or duplicated alt text', f"{weak} {T['u_img']}", 'warn' if weak else 'ok'),
+        ('صور بنص بديل سليم' if rtl else 'Images with sound alt text', f"{good} {T['u_img']}", 'ok' if good else 'neutral'),
+        ('نسبة الصور غير المهيأة' if rtl else 'Share of images not optimised', f"{ratio}%", 'bad' if ratio > 50 else 'warn' if ratio else 'ok'),
         ('صيغ الصور المستخدمة' if rtl else 'Image formats in use', fmts, 'neutral'),
-        ('نسبة الصور بالصيغ الحديثة الخفيفة' if rtl else 'Share of modern lightweight formats',
-         f"{stats.get('img_modern_pct', 0)}%",
-         'ok' if stats.get('img_modern_pct', 0) > 50 else 'warn'),
+        ('نسبة الصور بالصيغ الحديثة الخفيفة' if rtl else 'Share of modern lightweight formats', f"{stats.get('img_modern_pct', 0)}%", 'ok' if stats.get('img_modern_pct', 0) > 50 else 'warn'),
     ])
     pdf.impact('images')
 
-    # ======================= خريطة الموقع =======================
+    # 5. Sitemap
     if stats.get('coverage_enabled'):
         n += 1
         pdf.add_page()
         pdf.section(n, 'sitemap')
         pdf.table([
-            ('روابط معلنة في خريطة الموقع' if rtl else 'URLs declared in sitemap',
-             f"{stats.get('sitemap_products', 0)} {T['u_link']}", 'neutral'),
-            ('منها تعمل ويصل إليها الزائر' if rtl else 'Of those, live and reachable',
-             f"{stats.get('sitemap_live', 0)} {T['u_link']}", 'neutral'),
-            ('روابط محذوفة ما زالت في الخريطة' if rtl else 'Deleted URLs still listed in the sitemap',
-             f"{stats.get('dead_count', 0)} {T['u_link']}",
-             'bad' if stats.get('dead_count') else 'ok'),
-            ('صفحات في الخريطة لا يصل إليها الزائر' if rtl else 'Sitemap pages with no internal link',
-             f"{stats.get('hidden_count', 0)} {T['u_page']}",
-             'warn' if stats.get('hidden_count') else 'ok'),
-            ('منتجات لا تظهر روابطها إلا بالتمرير' if rtl else 'Products linked only via scrolling',
-             f"{stats.get('scroll_only_count', 0)} {T['u_product']}",
-             'warn' if stats.get('scroll_only_count') else 'ok'),
-            ('صفحات معروضة وغير مدرجة في الخريطة' if rtl else 'Live pages missing from the sitemap',
-             f"{stats.get('unlisted_count', 0)} {T['u_page']}",
-             'bad' if stats.get('unlisted_count') else 'ok'),
-            ('نسبة المنتجات المعروضة المدرجة' if rtl else 'Visible products included in sitemap',
-             f"{stats.get('indexed_pct', 0)}%",
-             'ok' if stats.get('indexed_pct', 0) >= 95 else 'warn'),
+            ('روابط معلنة في خريطة الموقع' if rtl else 'URLs declared in sitemap', f"{stats.get('sitemap_products', 0)} {T['u_link']}", 'neutral'),
+            ('منها تعمل ويصل إليها الزائر' if rtl else 'Of those, live and reachable', f"{stats.get('sitemap_live', 0)} {T['u_link']}", 'neutral'),
+            ('روابط محذوفة ما زالت في الخريطة' if rtl else 'Deleted URLs still listed in the sitemap', f"{stats.get('dead_count', 0)} {T['u_link']}", 'bad' if stats.get('dead_count') else 'ok'),
+            ('صفحات في الخريطة لا يصل إليها الزائر' if rtl else 'Sitemap pages with no internal link', f"{stats.get('hidden_count', 0)} {T['u_page']}", 'warn' if stats.get('hidden_count') else 'ok'),
+            ('منتجات لا تظهر روابطها إلا بالتمرير' if rtl else 'Products linked only via scrolling', f"{stats.get('scroll_only_count', 0)} {T['u_product']}", 'warn' if stats.get('scroll_only_count') else 'ok'),
+            ('صفحات معروضة وغير مدرجة في الخريطة' if rtl else 'Live pages missing from the sitemap', f"{stats.get('unlisted_count', 0)} {T['u_page']}", 'bad' if stats.get('unlisted_count') else 'ok'),
+            ('نسبة المنتجات المعروضة المدرجة' if rtl else 'Visible products included in sitemap', f"{stats.get('indexed_pct', 0)}%", 'ok' if stats.get('indexed_pct', 0) >= 95 else 'warn'),
         ])
         pdf.impact('sitemap')
 
-    # ======================= التشخيص وخطة العمل =======================
+    # 6. Diagnosis
     n += 1
     pdf.add_page()
     pdf.section(n, 'diagnosis')
@@ -883,11 +798,9 @@ def generate_client_pdf(domain, score, stats, coverage=None, lang='ar'):
 
 
 def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
-    """عرض سعر أصلي: الهوية وبيانات التواصل، مع رمز الريال على يسار السعر."""
     rtl = (lang == 'ar')
-    if rtl and (not FONT_PATH or not FONT_PATH.exists()):
+    if rtl and not FONT_PATH.exists():
         raise FileNotFoundError(f"ملف الخط غير موجود: {FONT_PATH}")
-
     T = INVOICE_TXT[lang]
 
     def _latin(t):
@@ -896,14 +809,11 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
             t = t.replace(a_, b_)
         return t.encode('latin-1', 'replace').decode('latin-1')
 
-    use_shaping = rtl and HAS_SHAPING
-    fmt = (lambda t: str(t)) if use_shaping else (shape_ar if rtl else _latin)
+    fmt = (lambda t: str(t)) if (rtl and HAS_SHAPING) else (shape_ar if rtl else _latin)
     if not rtl:
         fmt = _latin
-
     FONT = AR_FONT_NAME if rtl else "Helvetica"
-    has_bold = bool(FONT_BOLD_PATH) if rtl else True
-    B = "B" if has_bold else ""
+    B = "B" if (FONT_BOLD_PATH if rtl else True) else ""
     ALIGN = "R" if rtl else "L"
     M, W = 18, 174
     dom = urlparse(domain).netloc or domain
@@ -912,16 +822,14 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     pdf = FPDF()
     if rtl:
         pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
-        bold_target = str(FONT_BOLD_PATH) if (FONT_BOLD_PATH and Path(FONT_BOLD_PATH).exists()) else str(FONT_PATH)
-        pdf.add_font(AR_FONT_NAME, "B", bold_target)
-        if use_shaping:
+        if FONT_BOLD_PATH:
+            pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
+        if HAS_SHAPING:
             pdf.set_text_shaping(True, direction="rtl")
-
     pdf.set_auto_page_break(True, margin=18)
     pdf.add_page()
 
     def money(value, x, w, y, size=10, bold=False, color=C_MUTED, center=True):
-        """يكتب المبلغ مع وضع رمز الريال على يسار السعر مباشرة."""
         txt = f"{value:,.0f}"
         pdf.set_font(FONT, B if bold else "", size)
         pdf.set_text_color(*color)
@@ -931,37 +839,17 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
         tw = pdf.get_string_width(txt)
         total = tw + (sym_w + gap if riyal else pdf.get_string_width(" " + T['currency']))
         start = x + (w - total) / 2 if center else x
-
-        if rtl:
-            # وضع رمز الريال على يسار السعر
-            if riyal:
-                try:
-                    pdf.image(str(RIYAL_PATH), x=start,
-                              y=y + (size * 0.5 - sym_h) / 2 + 0.2, h=sym_h)
-                except Exception:
-                    pass
-                pdf.set_xy(start + sym_w + gap, y)
-                pdf.cell(tw, size * 0.5, txt, 0, 0, 'L')
-            else:
-                curr_w = pdf.get_string_width(T['currency'] + " ")
-                pdf.set_xy(start, y)
-                pdf.cell(curr_w, size * 0.5, fmt(T['currency']), 0, 0, 'L')
-                pdf.set_xy(start + curr_w, y)
-                pdf.cell(tw, size * 0.5, txt, 0, 0, 'L')
+        pdf.set_xy(start, y)
+        pdf.cell(tw, size * 0.5, txt, 0, 0, 'L')
+        if riyal:
+            try:
+                pdf.image(str(RIYAL_PATH), x=start + tw + gap, y=y + (size * 0.5 - sym_h) / 2 + 0.2, h=sym_h)
+            except Exception:
+                pass
         else:
-            pdf.set_xy(start, y)
-            pdf.cell(tw, size * 0.5, txt, 0, 0, 'L')
-            if riyal:
-                try:
-                    pdf.image(str(RIYAL_PATH), x=start + tw + gap,
-                              y=y + (size * 0.5 - sym_h) / 2 + 0.2, h=sym_h)
-                except Exception:
-                    pass
-            else:
-                pdf.set_xy(start + tw, y)
-                pdf.cell(total - tw, size * 0.5, fmt(T['currency']), 0, 0, 'L')
+            pdf.set_xy(start + tw, y)
+            pdf.cell(total - tw, size * 0.5, fmt(T['currency']), 0, 0, 'L')
 
-    # ---------- الترويسة الأصلية ----------
     head_y = 14
     if LOGO_PATH.exists():
         try:
@@ -992,36 +880,28 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     ref = datetime.now().strftime('%Y%m%d-') + f"{abs(hash(dom)) % 9000 + 1000}"
     pdf.set_font(FONT, "", 10)
     pdf.set_text_color(*C_INK)
-    for lbl, val in [(T['to'], store_name or dom), (T['no'], ref),
-                     (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
+    for lbl, val in [(T['to'], store_name or dom), (T['no'], ref), (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
         pdf.set_x(M)
         pdf.cell(W, 6.2, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
     pdf.ln(4)
 
-    # ---------- جدول البنود الأصلي بتفاصيله ----------
     wq, wu, wt = 24, 32, 32
     wn = W - wq - wu - wt
     pdf.set_fill_color(*C_INK)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font(FONT, B, 9.5)
     pdf.set_x(M)
-    heads = ([(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq),
-              (T['h_item'], wn)] if rtl else
-             [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu),
-              (T['h_total'], wt)])
+    heads = ([(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq), (T['h_item'], wn)] if rtl else
+             [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu), (T['h_total'], wt)])
     for i, (h, w) in enumerate(heads):
-        pdf.cell(w, 8, fmt(h), 0, 1 if i == len(heads) - 1 else 0,
-                 'C' if w != wn else ALIGN, fill=True)
+        pdf.cell(w, 8, fmt(h), 0, 1 if i == len(heads) - 1 else 0, 'C' if w != wn else ALIGN, fill=True)
 
-    for idx, it in enumerate(quote.get('items', [])):
-        k = it.get('key')
-        name = it.get('name') or (T.get(k) if k else 'خدمة')
-        desc_text = it.get('desc') or (T.get(k + '_d', '') if k else '')
-
-        unit_lbl = T['unit_img'] if k == 'image_alt' else T['unit_page']
+    for idx, it in enumerate(quote['items']):
+        name = T[it['key']]
+        unit_lbl = T['unit_img'] if it['key'] == 'image_alt' else T['unit_page']
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
-        for word in desc_text.split():
+        for word in T[it['key'] + '_d'].split():
             trial = (cur + " " + word).strip()
             if pdf.get_string_width(fmt(trial)) <= wn - 4:
                 cur = trial
@@ -1066,16 +946,11 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
         pdf.set_draw_color(*C_LINE)
         pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
 
-    # ---------- المجاميع ----------
     pdf.ln(4)
-    subtotal_val = quote.get('subtotal', quote.get('total', 0.0))
-    total_val = quote.get('total', subtotal_val)
-    rows = [(T['subtotal'], subtotal_val, False)]
-    if quote.get('discount'):
-        disc_rate = quote.get('discount_rate', 0.0)
-        rows.append((f"{T['discount']} {int(disc_rate * 100)}%",
-                     -quote['discount'], False))
-    rows.append((T['total'], total_val, True))
+    rows = [(T['subtotal'], quote['subtotal'], False)]
+    if quote['discount']:
+        rows.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%", -quote['discount'], False))
+    rows.append((T['total'], quote['total'], True))
     for lbl, val, strong in rows:
         y = pdf.get_y()
         pdf.set_font(FONT, B if strong else "", 12 if strong else 10)
@@ -1083,15 +958,13 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
         if rtl:
             pdf.set_xy(M + 60, y)
             pdf.cell(W - 60, 8, "", 0, 0)
-            money(val, M, 70, y + 1.5, 12 if strong else 10, strong,
-                  C_INK if strong else C_MUTED, center=False)
+            money(val, M, 70, y + 1.5, 12 if strong else 10, strong, C_INK if strong else C_MUTED, center=False)
             pdf.set_xy(M + 90, y)
             pdf.cell(W - 90, 8, fmt(lbl), 0, 1, 'R')
         else:
             pdf.set_xy(M, y)
             pdf.cell(70, 8, fmt(lbl), 0, 0, 'L')
-            money(val, M + 80, 70, y + 1.5, 12 if strong else 10, strong,
-                  C_INK if strong else C_MUTED, center=False)
+            money(val, M + 80, 70, y + 1.5, 12 if strong else 10, strong, C_INK if strong else C_MUTED, center=False)
             pdf.ln(8)
     pdf.set_font(FONT, "", 8.5)
     pdf.set_text_color(*C_MUTED)
@@ -1099,7 +972,6 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     pdf.cell(W, 5, fmt(T['novat']), ln=True, align=ALIGN)
     pdf.ln(4)
 
-    # ---------- صندوق بيانات الدفع ----------
     y = pdf.get_y()
     pdf.set_fill_color(*C_BG)
     pdf.rect(M, y, W, 25, 'F')
@@ -1119,5 +991,693 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     for line in (T['scope'], T['note'], T['valid']):
         pdf.set_x(M)
         pdf.cell(W, 5, fmt(line), ln=True, align=ALIGN)
-
     return bytes(pdf.output())
+
+4) ملف app.py
+
+ضع هذا الكود داخل app.py (الملف الرئيسي لتشغيل تطبيق Streamlit):
+
+import base64
+import io
+import json
+from pathlib import Path
+import sqlite3
+import time
+from datetime import datetime
+from urllib.parse import urlparse
+
+import pandas as pd
+import streamlit as st
+
+from audit_engine import (
+    MAX_PAGES_DEFAULT, PAGE_TYPE_ORDER,
+    PLATFORM_LABEL, SUPPORTED_PLATFORMS,
+    TITLE_MIN_OK, TITLE_MAX, TITLE_MIN_OPTIMAL,
+    DESC_MIN_OK, DESC_MAX, DESC_MIN_OPTIMAL,
+    ALT_MAX, ALT_DUP_THRESHOLD, ALT_WEAK_STATES,
+    T_PRODUCT,
+    CHECK_FAIL, CHECK_WARN, CHECK_PASS,
+    normalize_url, unique_images, compute_summary, run_full_scan
+)
+from export_utils import (
+    PAGE_TYPE_LABEL, STATUS_LABEL, QUALITY_LABEL, URL_LABEL,
+    localize_df, build_zip
+)
+from pdf_generator import (
+    DEFAULT_PRICES, LOGO_PATH,
+    build_quote, generate_client_pdf, generate_invoice_pdf
+)
+
+BASE_DIR = Path(__file__).parent
+DB_FILE = str(BASE_DIR / "store_history.db")
+
+COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
+         'accent': '#0f172a', 'muted': '#94a3b8'}
+
+st.set_page_config(page_title="مركز عمليات السيو | أنس راشد",
+                   layout="wide", page_icon="🚀", initial_sidebar_state="expanded")
+
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS audits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain TEXT, scan_date TEXT, score REAL, total_pages INTEGER,
+        products_count INTEGER, categories_count INTEGER, info_pages_count INTEGER,
+        blog_pages_count INTEGER, data_json TEXT, images_json TEXT,
+        coverage_json TEXT, platform TEXT
+    )''')
+    c.execute("PRAGMA table_info(audits)")
+    existing = {row[1] for row in c.fetchall()}
+    for col, coltype in [("blog_pages_count", "INTEGER DEFAULT 0"),
+                         ("images_json", "TEXT"), ("coverage_json", "TEXT"),
+                         ("platform", "TEXT")]:
+        if col not in existing:
+            c.execute(f"ALTER TABLE audits ADD COLUMN {col} {coltype}")
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+for key, default in [('audit_df', None), ('images_df', None), ('summary', None),
+                     ('current_url', ""), ('coverage', None), ('platform', 'unknown'),
+                     ('selfcheck', None), ('brand', ''), ('dup_groups', None),
+                     ('structured', None)]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap');
+html, body, [class*="css"] { font-family:'Tajawal','Segoe UI',Tahoma,sans-serif; }
+.main .block-container { direction:rtl; text-align:right; padding-top:1.2rem; max-width:1500px; }
+h1,h2,h3,h4,h5,p,span,div,label { text-align:right; }
+section[data-testid="stSidebar"] { direction:rtl; text-align:right; background:#0f172a; }
+section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
+.brandbar { display:flex; align-items:center; justify-content:space-between; border-bottom:2px solid #0f172a; padding:0 0 14px 0; margin-bottom:22px; }
+.brandbar .name { font-size:24px; font-weight:700; color:#0f172a; line-height:1.2; }
+.brandbar .role { font-size:13px; color:#64748b; }
+.brandbar .tool { font-size:13px; color:#64748b; text-align:left; }
+.hero { border:1px solid #e2e8f0; border-radius:14px; padding:22px 26px; background:#f8fafc; display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+.hero .score { font-size:46px; font-weight:700; line-height:1; }
+.hero .scorelbl { font-size:13px; color:#64748b; margin-top:6px; }
+.hero .store { font-size:17px; font-weight:500; color:#0f172a; text-align:left; }
+.hero .plat { font-size:12px; color:#64748b; text-align:left; margin-top:4px; }
+.mcard { border:1px solid #e2e8f0; border-radius:12px; padding:14px 10px; text-align:center; background:#fff; height:100%; }
+.mcard .v { font-size:26px; font-weight:700; line-height:1.1; }
+.mcard .l { font-size:12px; color:#64748b; margin-top:4px; }
+.chart-card { border:1px solid #e2e8f0; border-radius:12px; padding:16px 18px; background:#fff; margin-bottom:14px; }
+.chart-title { font-size:14px; font-weight:700; color:#0f172a; margin-bottom:12px; }
+.bar-row { display:flex; align-items:center; gap:10px; margin-bottom:7px; }
+.bar-label { flex:0 0 150px; font-size:12.5px; color:#334155; }
+.bar-track { flex:1; height:9px; background:#f1f5f9; border-radius:5px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:5px; }
+.bar-value { flex:0 0 46px; font-size:12px; color:#475569; text-align:left; }
+.finding { border-right:4px solid; border-radius:8px; padding:11px 14px; margin-bottom:9px; background:#fff; border-top:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0; border-left:1px solid #e2e8f0; font-size:13.5px; color:#334155; }
+.finding b { color:#0f172a; }
+.chk { display:flex; gap:12px; align-items:flex-start; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; margin-bottom:8px; background:#fff; }
+.chk .dot { flex:0 0 10px; height:10px; border-radius:50%; margin-top:6px; }
+.chk .t { font-size:13.5px; font-weight:700; color:#0f172a; }
+.chk .m { font-size:13px; color:#475569; margin-top:2px; }
+.chk .a { font-size:12.5px; color:#b45309; margin-top:5px; }
+.verdict { border-radius:12px; padding:16px 20px; margin-bottom:16px; font-size:15px; font-weight:500; }
+.v-ready { background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; }
+.v-review { background:#fffbeb; border:1px solid #fde68a; color:#92400e; }
+.v-blocked { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
+.stTabs [data-baseweb="tab-list"] { gap:4px; direction:rtl; }
+.stTabs [data-baseweb="tab"] { font-size:14px; font-weight:500; padding:8px 16px; }
+div[data-testid="stDataFrame"] { direction:ltr; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def logo_data_uri():
+    try:
+        return "data:image/png;base64," + base64.b64encode(LOGO_PATH.read_bytes()).decode()
+    except Exception:
+        return ""
+
+
+def render_brandbar():
+    logo = logo_data_uri()
+    img = f'<img src="{logo}" style="height:40px">' if logo else ''
+    st.markdown(
+        f'<div class="brandbar">'
+        f'<div><div class="name">أنس راشد</div>'
+        f'<div class="role">خبير تحسين محركات البحث</div></div>'
+        f'<div style="display:flex;align-items:center;gap:18px">'
+        f'<div class="tool">مركز عمليات السيو<br>anasrashed.com</div>{img}</div></div>',
+        unsafe_allow_html=True)
+
+
+def metric_card(value, label, color=COLOR['accent']):
+    return (f'<div class="mcard"><div class="v" style="color:{color}">{value}</div>'
+            f'<div class="l">{label}</div></div>')
+
+
+def bar_chart(title, items, colors=None):
+    total = sum(v for _, v in items) or 1
+    rows = ""
+    for label, val in items:
+        pct = val / total * 100
+        c = (colors or {}).get(label, COLOR['neutral'])
+        rows += (f'<div class="bar-row"><div class="bar-label">{label}</div>'
+                 f'<div class="bar-track"><div class="bar-fill" '
+                 f'style="width:{pct:.1f}%;background:{c}"></div></div>'
+                 f'<div class="bar-value">{val}</div></div>')
+    return f'<div class="chart-card"><div class="chart-title">{title}</div>{rows}</div>'
+
+
+def finding(text, level='warn'):
+    return f'<div class="finding" style="border-right-color:{COLOR[level]}">{text}</div>'
+
+
+render_brandbar()
+
+with st.sidebar:
+    st.markdown("### 🧭 القائمة")
+    nav = st.radio("", ["🔍 فحص متجر جديد", "📁 سجل المتاجر"], label_visibility="collapsed")
+    st.markdown("---")
+    st.markdown("#### ⚙️ إعدادات الفحص")
+    max_pages = st.number_input("الحد الأقصى للصفحات", 50, 5000, MAX_PAGES_DEFAULT, 50)
+    workers = st.slider("المسارات المتوازية", 1, 8, 4)
+    do_pagination = st.checkbox("متابعة ترقيم الأقسام", value=True, help="يلتقط المنتجات في الصفحات التالية من كل قسم.")
+    do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True, help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
+    st.markdown("---")
+    st.caption("الأداة معايرة على منصات سلة وزد وشوبيفاي.")
+
+if nav == "🔍 فحص متجر جديد":
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        input_url = st.text_input("رابط المتجر الإلكتروني", value=st.session_state.current_url, placeholder="https://example.store")
+    with c2:
+        st.write("")
+        st.write("")
+        start_btn = st.button("بدء الفحص", type="primary", use_container_width=True)
+
+    if st.session_state.audit_df is not None:
+        if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
+            for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck', 'dup_groups', 'structured']:
+                st.session_state[k] = None
+            st.session_state.current_url = ""
+            st.rerun()
+
+    if start_btn and input_url:
+        target = normalize_url(input_url)
+        st.session_state.current_url = target
+
+        with st.status("جارٍ الفحص...", expanded=True) as status:
+            head = st.empty()
+            bar = st.progress(0)
+            note = st.empty()
+
+            def progress(stage, **kw):
+                if stage == 'discover_start':
+                    head.write("**المرحلة 1** — قراءة خريطة الموقع وفحص الصفحات")
+                elif stage == 'sitemap_read':
+                    note.caption("جارٍ قراءة خريطة الموقع...")
+                elif stage == 'audit':
+                    done, pend = kw.get('done', 0), kw.get('pending', 0)
+                    bar.progress(min(done / max(done + pend, 1), 1.0))
+                    note.caption(f"الجولة {kw.get('round')} · فُحصت {done} صفحة · {pend} رابط في الانتظار")
+                elif stage == 'pagination_start':
+                    head.write("**المرحلة 2** — متابعة ترقيم القوائم")
+                    bar.progress(0)
+                elif stage == 'pagination':
+                    bar.progress(min(kw.get('i', 0) / max(kw.get('total', 1), 1), 1.0))
+                    note.caption(f"{kw.get('i')}/{kw.get('total')} قسم · {kw.get('found')} منتج إضافي · {kw.get('fetched')} صفحة مجلوبة")
+                elif stage == 'extra_start':
+                    head.write(f"**المرحلة 3** — فحص {kw.get('count')} منتج من الصفحات التالية")
+                    bar.progress(0)
+                elif stage == 'retry_start':
+                    head.write(f"**إعادة محاولة** — {kw.get('count')} صفحة تعذّر الاتصال بها")
+                    bar.progress(0)
+                elif stage == 'done':
+                    bar.progress(1.0)
+
+            result = run_full_scan(target, max_pages, workers, do_pagination, do_sitemap_check, progress)
+            status.update(label="اكتمل الفحص", state="complete", expanded=False)
+
+        df = result['df']
+        images_df = result['images_df']
+        summary = result['summary']
+        coverage = result['coverage']
+        structured = result['structured']
+        selfcheck = result['selfcheck']
+        platform = result['platform']
+        st.session_state.platform = platform
+        st.session_state.brand = result['brand']
+        st.session_state.dup_groups = result['dup_groups']
+
+        st.session_state.audit_df = df
+        st.session_state.images_df = images_df
+        st.session_state.summary = summary
+        st.session_state.coverage = coverage
+        st.session_state.selfcheck = selfcheck
+        st.session_state.structured = structured
+
+        conn = sqlite3.connect(DB_FILE)
+        conn.cursor().execute(
+            '''INSERT INTO audits (domain, scan_date, score, total_pages, products_count,
+               categories_count, info_pages_count, blog_pages_count, data_json,
+               images_json, coverage_json, platform) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (target, datetime.now().strftime("%Y-%m-%d %H:%M"), summary['score'],
+             summary['total_pages'], summary['products'], summary['categories'],
+             summary['info_pages'], summary['blog_pages'], df.to_json(orient='records'),
+             images_df.to_json(orient='records') if not images_df.empty else '',
+             json.dumps(coverage, ensure_ascii=False) if coverage else '', platform))
+        conn.commit()
+        conn.close()
+
+    if st.session_state.audit_df is not None:
+        df = st.session_state.audit_df
+        images_df = st.session_state.images_df
+        summary = st.session_state.summary
+        coverage = st.session_state.coverage
+        platform = st.session_state.platform
+
+        sc = summary['score']
+        sc_color = COLOR['bad'] if sc < 60 else COLOR['warn'] if sc < 80 else COLOR['ok']
+        plat_txt = PLATFORM_LABEL.get(platform, '—')
+        st.markdown(
+            f'<div class="hero">'
+            f'<div><div class="score" style="color:{sc_color}">{sc}%</div>'
+            f'<div class="scorelbl">درجة التوافق مع محركات البحث</div></div>'
+            f'<div><div class="store">{urlparse(st.session_state.current_url).netloc}</div>'
+            f'<div class="plat">المنصة: {plat_txt} · {datetime.now().strftime("%Y-%m-%d")}</div></div></div>',
+            unsafe_allow_html=True)
+
+        if platform not in SUPPORTED_PLATFORMS:
+            st.warning("لم يتم التعرف على المنصة كسلة أو زد أو شوبيفاي. الأداة معايرة على هذه المنصات الثلاث — راجع تبويب التحقق اليدوي قبل إرسال التقرير لأي عميل.")
+
+        cards = [
+            (summary["total_pages"], "الصفحات المعروضة", COLOR['accent']),
+            (summary["products"], "المنتجات", COLOR['accent']),
+            (summary["categories"], "الأقسام", COLOR['accent']),
+            (summary["blog_pages"], "المدونة", COLOR['warn'] if summary["blog_pages"] == 0 else COLOR['accent']),
+            (summary["info_pages"], "التعريفية", COLOR['accent']),
+            (summary["missing_alts"], "صور بلا Alt", COLOR['bad'] if summary["missing_alts"] else COLOR['ok']),
+            (summary.get("broken_pages", 0), "روابط معطلة", COLOR['bad'] if summary.get("broken_pages") else COLOR['ok']),
+        ]
+        for col, (v, l, c) in zip(st.columns(7), cards):
+            with col:
+                st.markdown(metric_card(v, l, c), unsafe_allow_html=True)
+
+        st.write("")
+        view_df = localize_df(df, 'ar')
+        uimgs = unique_images(images_df)
+        view_imgs = localize_df(uimgs, 'ar')
+        selfcheck = st.session_state.get('selfcheck')
+        vmap = {'ready': ('v-ready', '✅ جاهز للإرسال', 'اجتازت النتائج كل فحوص الموثوقية. يمكنك إرسال التقرير.'),
+                'review': ('v-review', '⚠️ يحتاج مراجعة قبل الإرسال', 'بعض المؤشرات تحتاج نظرة سريعة منك قبل إرسال التقرير لعميل.'),
+                'blocked': ('v-blocked', '⛔ لا ترسل هذا التقرير', 'رصدت الأداة خللاً يجعل أرقامها غير موثوقة لهذا المتجر.')}
+        if selfcheck:
+            cls, head, sub = vmap[selfcheck['verdict']]
+            extra = (f" · {selfcheck['fails']} فحص فاشل" if selfcheck['fails'] else "")
+            extra += (f" · {selfcheck['warns']} تنبيه" if selfcheck['warns'] else "")
+            st.markdown(f'<div class="verdict {cls}"><b>{head}</b>{extra}<br>'
+                        f'<span style="font-size:13.5px;font-weight:400">{sub} التفاصيل في تبويب «فحص الثقة».</span></div>',
+                        unsafe_allow_html=True)
+
+        tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "🧾 البيانات المعلنة",
+                        "📄 الصفحات", "🖼️ الصور", "🗺️ خريطة الموقع",
+                        "🔬 التحقق اليدوي", "📥 التصدير"])
+
+        with tabs[0]:
+            L = STATUS_LABEL['ar']
+            ok = df[df['متاحة'] == True]  # noqa: E712
+            g1, g2 = st.columns(2)
+
+            with g1:
+                items = [(PAGE_TYPE_LABEL['ar'][t], int((df['نوع الصفحة'] == t).sum()))
+                         for t in PAGE_TYPE_ORDER if (df['نوع الصفحة'] == t).any()]
+                st.markdown(bar_chart("توزيع أنواع الصفحات", items), unsafe_allow_html=True)
+
+                tcounts = ok['حالة العنوان'].value_counts()
+                items = [(L[k], int(tcounts.get(k, 0)))
+                         for k in ['optimal', 'acceptable', 'very_short', 'long', 'missing']
+                         if tcounts.get(k, 0)]
+                st.markdown(bar_chart("حالة عناوين الميتا", items, {
+                    L['optimal']: COLOR['ok'], L['acceptable']: COLOR['warn'],
+                    L['very_short']: COLOR['bad'], L['long']: COLOR['bad'],
+                    L['missing']: COLOR['bad']}), unsafe_allow_html=True)
+
+            with g2:
+                if images_df is not None and not images_df.empty:
+                    acounts = uimgs['حالة النص البديل'].value_counts()
+                    items = [(L[k], int(acounts.get(k, 0)))
+                             for k in ['alt_ok', 'alt_duplicate', 'alt_long',
+                                       'alt_stuffed', 'alt_generic', 'alt_missing']
+                             if acounts.get(k, 0)]
+                    st.markdown(bar_chart("جودة النصوص البديلة للصور", items, {
+                        L['alt_ok']: COLOR['ok'], L['alt_duplicate']: COLOR['warn'],
+                        L['alt_long']: COLOR['warn'], L['alt_stuffed']: COLOR['bad'],
+                        L['alt_generic']: COLOR['bad'], L['alt_missing']: COLOR['bad']}),
+                        unsafe_allow_html=True)
+
+                dcounts = ok['حالة الوصف'].value_counts()
+                items = [(L[k], int(dcounts.get(k, 0)))
+                         for k in ['optimal', 'acceptable', 'very_short', 'long', 'missing']
+                         if dcounts.get(k, 0)]
+                st.markdown(bar_chart("حالة أوصاف الميتا", items, {
+                    L['optimal']: COLOR['ok'], L['acceptable']: COLOR['warn'],
+                    L['very_short']: COLOR['bad'], L['long']: COLOR['bad'],
+                    L['missing']: COLOR['bad']}), unsafe_allow_html=True)
+
+            QL = QUALITY_LABEL['ar']
+            qc = ok['جودة العنوان'].value_counts()
+            items = [(QL[k], int(qc.get(k, 0))) for k in
+                     ['q_ok', 'q_duplicate', 'q_brand_only', 'q_one_word',
+                      'q_placeholder', 'q_symbols'] if qc.get(k, 0)]
+            if items and len(items) > 1:
+                st.markdown(bar_chart("الجودة البنيوية لعناوين الميتا", items, {
+                    QL['q_ok']: COLOR['ok'], QL['q_duplicate']: COLOR['warn'],
+                    QL['q_brand_only']: COLOR['bad'], QL['q_one_word']: COLOR['warn'],
+                    QL['q_placeholder']: COLOR['bad'], QL['q_symbols']: COLOR['bad']}),
+                    unsafe_allow_html=True)
+
+            UL = URL_LABEL['ar']
+            if 'جودة الرابط' in ok.columns:
+                uc = ok['جودة الرابط'].value_counts()
+                items = [(UL[k], int(uc.get(k, 0))) for k in
+                         ['u_ok', 'u_underscore', 'u_uppercase', 'u_repeat', 'u_wordy',
+                          'u_long', 'u_generic', 'u_malformed', 'u_wrongname', 'u_clone'] if uc.get(k, 0)]
+                if len(items) > 1:
+                    st.markdown(bar_chart("جودة روابط الصفحات", items, {
+                        UL['u_ok']: COLOR['ok'], UL['u_underscore']: COLOR['warn'],
+                        UL['u_uppercase']: COLOR['warn'], UL['u_repeat']: COLOR['warn'],
+                        UL['u_wordy']: COLOR['warn'], UL['u_long']: COLOR['warn'],
+                        UL['u_generic']: COLOR['bad'], UL['u_malformed']: COLOR['bad'],
+                        UL['u_wrongname']: COLOR['bad'], UL['u_clone']: COLOR['bad']}),
+                        unsafe_allow_html=True)
+            if summary.get('img_formats'):
+                items = [(k.upper(), v) for k, v in sorted(summary['img_formats'].items(), key=lambda x: -x[1])[:5]]
+                st.markdown(bar_chart("صيغ صور المتجر", items, {
+                    'WEBP': COLOR['ok'], 'AVIF': COLOR['ok'],
+                    'JPG': COLOR['warn'], 'PNG': COLOR['warn']}), unsafe_allow_html=True)
+
+            st.markdown("#### أبرز النتائج")
+            out = []
+            if summary['missing_alts']:
+                out.append((f"<b>{summary['missing_alts']}</b> صورة بلا نص بديل إطلاقاً من أصل {summary['total_images']} — أكبر فجوة قابلة للإصلاح في المتجر.", 'bad'))
+            if summary['weak_alts']:
+                out.append((f"<b>{summary['weak_alts']}</b> صورة نصها البديل موجود لكنه غير وصفي أو مكرر — يمر كسليم في الأدوات السطحية.", 'warn'))
+            if summary.get('url_clone'):
+                out.append((f"<b>{summary['url_clone']}</b> منتج مستنسخ — نسخ مكررة من منتج واحد تتنافس مع أصلها.", 'bad'))
+            if summary.get('dup_content'):
+                out.append((f"<b>{summary['dup_content']}</b> صفحة بنفس العنوان والوصف حرفياً — محتوى مكرر يختار جوجل منه واحدة فقط.", 'bad'))
+            if summary.get('url_wrongname'):
+                out.append((f"<b>{summary['url_wrongname']}</b> رابط يحمل اسم منتج مختلف عن المعروض في الصفحة — الزبون ينقر على منتج ويصل لآخر.", 'bad'))
+            if summary.get('url_style'):
+                out.append((f"<b>{summary['url_style']}</b> رابط بصياغة غير مثالية — شرطة سفلية أو حروف كبيرة أو طول مفرط.", 'warn'))
+            if summary.get('img_legacy') and summary.get('img_modern_pct', 100) < 50:
+                out.append((f"<b>{summary['img_legacy']}</b> صورة بصيغة قديمة ثقيلة — {summary.get('img_modern_pct', 0)}% فقط بصيغ حديثة. التحويل يخفض حجم الصفحة بنحو الثلث.", 'warn'))
+            if summary.get('title_symbols'):
+                out.append((f"<b>{summary['title_symbols']}</b> عنوان ميتا مجرد رموز أو قيمة قالب افتراضية — الصفحة بلا عنوان فعلي في نتائج البحث.", 'bad'))
+            if summary.get('title_brand_only'):
+                out.append((f"<b>{summary['title_brand_only']}</b> عنوان لا يحمل سوى اسم المتجر بلا وصف للمنتج.", 'bad'))
+            if summary.get('title_dup'):
+                out.append((f"<b>{summary['title_dup']}</b> صفحة تتشارك نفس عنوان الميتا.", 'warn'))
+            if summary.get('desc_same'):
+                out.append((f"<b>{summary['desc_same']}</b> وصف ميتا نسخة حرفية من العنوان.", 'warn'))
+            if summary['critical_titles']:
+                out.append((f"<b>{summary['critical_titles']}</b> عنوان مفقود أو قصير جداً أو يُقتطع في نتائج البحث.", 'bad'))
+            if summary['critical_descs']:
+                out.append((f"<b>{summary['critical_descs']}</b> وصف ميتا خارج الحدود المفيدة.", 'warn'))
+            if summary['canon_missing']:
+                out.append((f"<b>{summary['canon_missing']}</b> صفحة بلا وسم كانونيكال — خطر تكرار المحتوى.", 'warn'))
+            if summary.get('hidden_count'):
+                bt = summary.get('orphan_by_type', {})
+                brk = "، ".join(f"{PAGE_TYPE_LABEL['ar'].get(k, k)}: {v}" for k, v in bt.items())
+                out.append((f"<b>{summary['hidden_count']}</b> صفحة يتيمة في خريطة الموقع ({brk}) — منشورة ولا يصل إليها أحد.", 'warn'))
+            if summary.get('redirect_count'):
+                out.append((f"<b>{summary['redirect_count']}</b> رابط في الخريطة يعيد التوجيه لصفحة أخرى — هدر لميزانية الزحف.", 'warn'))
+            if summary['broken_pages']:
+                out.append((f"<b>{summary['broken_pages']}</b> رابط معطل يصل إليه الزائر.", 'bad'))
+            if summary['thin_pages']:
+                out.append((f"<b>{summary['thin_pages']}</b> صفحة بمحتوى نصي ضعيف (أقل من 50 كلمة).", 'warn'))
+            if not out:
+                out.append(("لم يرصد الفحص فجوات جوهرية في الصفحات المعروضة.", 'ok'))
+            for text, lvl in out:
+                st.markdown(finding(text, lvl), unsafe_allow_html=True)
+
+        with tabs[1]:
+            st.markdown("#### فحوص موثوقية النتائج")
+            st.caption("هذه الفحوص لا تقيس جودة سيو المتجر، بل تقيس مدى ثقة الأداة في أرقامها هي.")
+            if not selfcheck:
+                st.info("لا توجد نتائج فحص ذاتي لهذه الجلسة.")
+            else:
+                dots = {CHECK_PASS: COLOR['ok'], CHECK_WARN: COLOR['warn'], CHECK_FAIL: COLOR['bad']}
+                order = {CHECK_FAIL: 0, CHECK_WARN: 1, CHECK_PASS: 2}
+                for c in sorted(selfcheck['checks'], key=lambda x: order[x['level']]):
+                    act = f'<div class="a">الإجراء المقترح: {c["action"]}</div>' if c['action'] else ''
+                    st.markdown(
+                        f'<div class="chk"><div class="dot" style="background:{dots[c["level"]]}"></div>'
+                        f'<div><div class="t">{c["title"]}</div>'
+                        f'<div class="m">{c["msg"]}</div>{act}</div></div>',
+                        unsafe_allow_html=True)
+
+        with tabs[2]:
+            stx = st.session_state.get('structured')
+            st.markdown("#### ما يعلنه المتجر مقابل ما رصده الفحص")
+            st.caption("تُقارَن كل صفحة قسم بعدّاد المنتجات الظاهر فيها.")
+            if not stx:
+                st.info("لا توجد بيانات معلنة في هذا الفحص.")
+            else:
+                checked = stx.get('categories_checked', 0)
+                short = stx.get('categories_short') or []
+                miss = stx.get('missing_products', 0)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("أقسام قورنت بعدّادها", checked if checked else "—")
+                c2.metric("أقسام ينقصها منتجات", len(short))
+                c3.metric("منتجات معروضة لم تُرصد", miss)
+                st.write("")
+
+                if not checked:
+                    st.markdown(finding("لم يعرض المتجر عدّاد منتجات في أقسامه، فتعذّرت مقارنة التغطية.", 'warn'), unsafe_allow_html=True)
+                elif short:
+                    st.markdown(finding(f"<b>{len(short)}</b> قسماً يعلن منتجات أكثر مما رصده الفحص (ناقص <b>{miss}</b> منتجاً).", 'bad'), unsafe_allow_html=True)
+                else:
+                    st.markdown(finding(f"جميع الأقسام الـ{checked} مطابقة تماماً لعدّاداتها.", 'ok'), unsafe_allow_html=True)
+
+                rows = stx.get('category_rows') or []
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                                 column_config={"القسم": st.column_config.LinkColumn("القسم", width="large")})
+
+                gaps = stx.get('image_gap') or []
+                if gaps:
+                    st.markdown(finding(f"<b>{len(gaps)}</b> صفحة منتج تعلن صوراً أكثر مما رصده الفحص.", 'bad'), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(gaps), use_container_width=True)
+
+                nm = stx.get('name_mismatch') or []
+                if nm:
+                    st.markdown(finding(f"<b>{len(nm)}</b> منتجاً اسمه المعلن يختلف عن المعروض.", 'warn'), unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(nm), use_container_width=True)
+
+        with tabs[3]:
+            present = [PAGE_TYPE_LABEL['ar'][t] for t in PAGE_TYPE_ORDER if (df['نوع الصفحة'] == t).any()]
+            f1, f2 = st.columns([2, 3])
+            with f1:
+                sel = st.selectbox("نوع الصفحة", ["الكل"] + present)
+            with f2:
+                only_issues = st.checkbox("عرض الصفحات التي بها مشاكل فقط", value=False)
+
+            d = view_df if sel == "الكل" else view_df[view_df['نوع الصفحة'] == sel]
+            if only_issues:
+                QL = QUALITY_LABEL['ar']
+                d = d[(d['حالة العنوان'] != STATUS_LABEL['ar']['optimal']) |
+                      (d['حالة الوصف'] != STATUS_LABEL['ar']['optimal']) |
+                      (~d['جودة العنوان'].isin([QL['q_ok'], QL['q_na']])) |
+                      (~d['جودة الوصف'].isin([QL['q_ok'], QL['q_na']])) |
+                      (~d['جودة الرابط'].isin([URL_LABEL['ar']['u_ok'], URL_LABEL['ar']['u_na']])) |
+                      (d['صور بدون Alt'] > 0) | (d['متاحة'] == False)]  # noqa: E712
+            d = d.copy().reset_index(drop=True)
+            d.index = d.index + 1
+            st.dataframe(d, use_container_width=True, height=460,
+                         column_config={"الرابط": st.column_config.LinkColumn("الرابط", width="large"),
+                                        "درجة السيو": st.column_config.ProgressColumn("درجة السيو", min_value=0, max_value=100, format="%d")})
+
+        with tabs[4]:
+            if view_imgs is not None and not view_imgs.empty:
+                L = STATUS_LABEL['ar']
+                fc1, fc2 = st.columns(2)
+                with fc1:
+                    f = st.selectbox("تصفية", ["الكل", "بلا نص بديل", "نص بديل ضعيف", "نص بديل سليم"])
+                with fc2:
+                    fmts = ["الكل"] + sorted(view_imgs['صيغة الصورة'].dropna().unique().tolist()) if 'صيغة الصورة' in view_imgs.columns else ["الكل"]
+                    fsel = st.selectbox("صيغة الصورة", fmts)
+                v = view_imgs
+                if f == "بلا نص بديل":
+                    v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_missing']]
+                elif f == "نص بديل ضعيف":
+                    v = view_imgs[view_imgs['حالة النص البديل'].isin([L[k] for k in ALT_WEAK_STATES])]
+                elif f == "نص بديل سليم":
+                    v = view_imgs[view_imgs['حالة النص البديل'] == L['alt_ok']]
+                if fsel != "الكل" and 'صيغة الصورة' in v.columns:
+                    v = v[v['صيغة الصورة'] == fsel]
+                v = v.copy().reset_index(drop=True)
+                v.index = v.index + 1
+                st.dataframe(v, use_container_width=True, height=460,
+                             column_config={"رابط الصورة": st.column_config.ImageColumn("معاينة", width="small"),
+                                            "رابط الصفحة": st.column_config.LinkColumn("رابط الصفحة", width="medium")})
+            else:
+                st.info("لا توجد صور محتوى مرصودة.")
+
+        with tabs[5]:
+            if not coverage:
+                st.info("لم تُفعّل مقارنة خريطة الموقع في هذا الفحص.")
+            else:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("روابط في الخريطة", coverage['sitemap_total'])
+                m2.metric("تعمل ويصل إليها الزائر", coverage['sitemap_live'])
+                m3.metric("محذوفة ما زالت مدرجة", coverage['sitemap_dead'])
+                m4.metric("نسبة إدراج المنتجات", f"{coverage['indexed_pct']}%")
+                st.write("")
+
+                if coverage['dead_pages']:
+                    st.markdown(finding(f"<b>{len(coverage['dead_pages'])}</b> رابط محذوف ما زال معلناً في خريطة الموقع.", 'bad'), unsafe_allow_html=True)
+                    st.dataframe(localize_df(pd.DataFrame(coverage['dead_pages']), 'ar'), use_container_width=True)
+
+                if coverage['unlisted_pages']:
+                    st.markdown(finding(f"<b>{len(coverage['unlisted_pages'])}</b> صفحة معروضة وغير مدرجة في خريطة الموقع.", 'bad'), unsafe_allow_html=True)
+                    st.dataframe(localize_df(pd.DataFrame(coverage['unlisted_pages']), 'ar'), use_container_width=True)
+
+                if coverage.get('scroll_only_products'):
+                    with st.expander(f"عرض الـ{len(coverage['scroll_only_products'])} منتجاً يظهر بالتمرير فقط"):
+                        st.dataframe(localize_df(pd.DataFrame(coverage['scroll_only_products']), 'ar'), use_container_width=True)
+
+                if coverage['orphan_pages']:
+                    st.markdown(finding(f"<b>{len(coverage['orphan_pages'])}</b> صفحة يتيمة مدرجة ولا يصلها الزائر برابط داخلي.", 'warn'), unsafe_allow_html=True)
+                    st.dataframe(localize_df(pd.DataFrame(coverage['orphan_pages']), 'ar'), use_container_width=True)
+
+        with tabs[6]:
+            st.markdown("#### عيّنة للمطابقة اليدوية")
+            pool = df[(df['متاحة'] == True) & (df['نوع الصفحة'] == T_PRODUCT)]  # noqa: E712
+            if pool.empty:
+                pool = df[df['متاحة'] == True]  # noqa: E712
+            if pool.empty:
+                st.info("لا توجد صفحات متاحة للتحقق.")
+            else:
+                if st.button("🎲 عيّنة جديدة"):
+                    st.session_state['sample_seed'] = int(time.time())
+                seed = st.session_state.get('sample_seed', 42)
+                sample = pool.sample(n=min(5, len(pool)), random_state=seed)
+                L = STATUS_LABEL['ar']
+                for _, r in sample.iterrows():
+                    with st.container(border=True):
+                        st.markdown(f"**[{r['الرابط']}]({r['الرابط']})**")
+                        a, b, c = st.columns(3)
+                        a.metric("طول العنوان", r['طول العنوان'], L[r['حالة العنوان']])
+                        b.metric("طول الوصف", r['طول الوصف'], L[r['حالة الوصف']])
+                        c.metric("درجة الصفحة", f"{r['درجة السيو']}%")
+
+        with tabs[7]:
+            st.markdown("#### تصدير التقرير والبيانات")
+            lang_choice = st.radio("لغة الملفات", ["العربية", "English"], horizontal=True)
+            lang = 'ar' if lang_choice == "العربية" else 'en'
+            exp_summary = dict(summary)
+            exp_summary['platform_label'] = (PLATFORM_LABEL if lang == 'ar' else PLATFORM_LABEL_EN).get(platform, '—')
+            netloc = urlparse(st.session_state.current_url).netloc or "store"
+
+            try:
+                pdf_bytes = generate_client_pdf(st.session_state.current_url, summary['score'], exp_summary, lang)
+            except Exception as e:
+                pdf_bytes = None
+                st.error(f"تعذر توليد الـ PDF: {e}")
+
+            zip_bytes = build_zip(df, images_df, coverage, lang, st.session_state.get('structured'))
+
+            gate_ok = True
+            if selfcheck and selfcheck['verdict'] == 'blocked':
+                st.markdown('<div class="verdict v-blocked"><b>⛔ تقرير العميل محجوب</b><br>'
+                            '<span style="font-size:13.5px;font-weight:400">رصدت الأداة خللاً يجعل أرقامها غير موثوقة لهذا المتجر. راجع تبويب «فحص الثقة» أولاً.</span></div>', unsafe_allow_html=True)
+                gate_ok = st.checkbox("راجعت الفحوص الفاشلة وأتحمل مسؤولية إرسال هذا التقرير", value=False)
+            elif selfcheck and selfcheck['verdict'] == 'review':
+                st.warning("توجد تنبيهات على موثوقية النتائج. راجع تبويب «فحص الثقة» قبل إرسال التقرير لعميل.")
+
+            st.markdown("---")
+            st.markdown("##### 💰 عرض السعر")
+            pc1, pc2, pc3 = st.columns(3)
+            with pc1:
+                p_title = st.number_input("سعر عنوان الميتا + الرابط (ريال)", 1.0, 200.0, DEFAULT_PRICES['meta_title'], 1.0)
+            with pc2:
+                p_desc = st.number_input("سعر وصف الميتا (ريال)", 1.0, 200.0, DEFAULT_PRICES['meta_desc'], 1.0)
+            with pc3:
+                p_alt = st.number_input("سعر وصف الصورة (ريال)", 0.5, 100.0, DEFAULT_PRICES['image_alt'], 0.5)
+
+            dc1, dc2 = st.columns([1, 3])
+            with dc1:
+                use_disc = st.checkbox("إضافة خصم", value=False)
+            with dc2:
+                disc_pct = st.slider("نسبة الخصم %", 0, 50, 10, disabled=not use_disc)
+
+            quote = build_quote(summary, {'meta_title': p_title, 'meta_desc': p_desc, 'image_alt': p_alt}, discount_rate=(disc_pct / 100 if use_disc else 0.0))
+            qc = st.columns(4)
+            qc[0].metric("عناوين وروابط", f"{summary.get('bad_titles', 0)}")
+            qc[1].metric("أوصاف ميتا", f"{summary.get('bad_descs', 0)}")
+            qc[2].metric("صور تحتاج وصفاً", f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
+            qc[3].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
+
+            try:
+                inv_bytes = generate_invoice_pdf(st.session_state.current_url, quote, lang)
+            except Exception as e:
+                inv_bytes = None
+                st.error(f"تعذّر توليد الفاتورة: {e}")
+
+            if inv_bytes:
+                st.download_button("🧾 تحميل عرض السعر (PDF)" if lang == 'ar' else "🧾 Download quotation (PDF)",
+                                   inv_bytes, f"Quote_{netloc}_{lang}.pdf", "application/pdf", use_container_width=True)
+            st.markdown("---")
+
+            d1, d2 = st.columns(2)
+            with d1:
+                if pdf_bytes and gate_ok:
+                    st.download_button("📄 تقرير العميل (PDF)" if lang == 'ar' else "📄 Client report (PDF)",
+                                       pdf_bytes, f"SEO_Audit_{netloc}_{lang}.pdf", "application/pdf", use_container_width=True)
+                elif pdf_bytes:
+                    st.button("📄 تقرير العميل (PDF)", disabled=True, use_container_width=True, help="مُعطّل حتى تقرّ بمراجعة الفحوص الفاشلة.")
+            with d2:
+                st.download_button("📦 حزمة البيانات (ZIP)" if lang == 'ar' else "📦 Data package (ZIP)",
+                                   zip_bytes, f"Data_Package_{netloc}_{lang}.zip", "application/zip", use_container_width=True)
+
+else:
+    st.markdown("### 📁 سجل المتاجر المفحوصة")
+    st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على Streamlit Cloud.")
+    conn = sqlite3.connect(DB_FILE)
+    hist = pd.read_sql_query(
+        "SELECT id, domain as 'المتجر', scan_date as 'تاريخ الفحص', score as 'النسبة', "
+        "platform as 'المنصة', total_pages as 'الصفحات', products_count as 'المنتجات', "
+        "categories_count as 'الأقسام', blog_pages_count as 'المدونة', "
+        "info_pages_count as 'التعريفية' FROM audits ORDER BY id DESC", conn)
+    conn.close()
+
+    if hist.empty:
+        st.info("لا توجد متاجر مفحوصة بعد.")
+    else:
+        st.dataframe(hist.drop(columns=['id']), use_container_width=True)
+        sel_id = st.selectbox(
+            "اختر المتجر", hist['id'].tolist(),
+            format_func=lambda x: f"{hist[hist['id']==x]['المتجر'].values[0]} ({hist[hist['id']==x]['تاريخ الفحص'].values[0]})")
+        if st.button("📥 استرجاع البيانات", type="primary"):
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT domain, data_json, images_json, coverage_json, platform FROM audits WHERE id = ?", (sel_id,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                rdf = pd.read_json(io.StringIO(row[1]))
+                rimg = pd.read_json(io.StringIO(row[2])) if row[2] else pd.DataFrame()
+                rcov = json.loads(row[3]) if row[3] else None
+                if 'متاحة' not in rdf.columns:
+                    rdf['متاحة'] = True
+                st.session_state.current_url = row[0]
+                st.session_state.audit_df = rdf
+                st.session_state.images_df = rimg
+                st.session_state.coverage = rcov
+                st.session_state.platform = row[4] or 'unknown'
+                st.session_state.summary = compute_summary(rdf, rcov, rimg)
+                st.session_state.summary['platform_label'] = PLATFORM_LABEL.get(row[4] or 'unknown', '—')
+                st.success("تم الاسترجاع. انتقل إلى (فحص متجر جديد) لعرض النتائج.")
