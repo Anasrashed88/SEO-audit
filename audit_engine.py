@@ -671,46 +671,55 @@ def audit_single_page(task, timeout=10):
 # ==============================================================
 #  قارئ الخرائط وحلقة الاستكشاف للملفات المقسمة
 # ==============================================================
-def fetch_sitemap_urls(base_url):
+LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
+
+def _read_robots_sitemaps(base_clean):
+    """أسماء الخرائط كما يعلنها المتجر في robots.txt — المصدر الرسمي وأدقها."""
+    out = []
+    res = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
+    if res is not None and res.status_code == 200:
+        for line in res.text.splitlines():
+            if line.lower().strip().startswith('sitemap:'):
+                sm = line.split(':', 1)[1].strip()
+                if sm and sm not in out:
+                    out.append(sm)
+    return out
+
+def _urls_via_advertools(sm_url, target_netloc):
+    """advertools يتتبع خرائط الفهرس المتشعبة وملفات gz تلقائياً."""
+    if not HAS_ADVERTOOLS:
+        return None
+    try:
+        sm_df = adv.sitemap_to_df(sm_url)
+    except Exception:
+        return None
+    if sm_df is None or 'loc' not in sm_df.columns:
+        return None
+    urls = set()
+    for loc in sm_df['loc'].dropna().tolist():
+        if normalize_domain(urlparse(loc).netloc) == target_netloc:
+            urls.add(clean_url(loc))
+    return urls
+
+def fetch_sitemap_urls(base_url, files_out=None):
+    """يقرأ خرائط الموقع كاملة: robots.txt أولاً، ثم المسارات المعروفة،
+    ولا يلجأ للتخمين إلا إذا لم يجد شيئاً (تخمين أقل = طلبات أقل = حظر أقل)."""
     base_clean = normalize_url(base_url)
     target_netloc = normalize_domain(urlparse(base_clean).netloc)
     found_urls = set()
+    visited_maps = []   # الخرائط التي قُرئت فعلاً
+    tried_maps = set()  # كل ما جُرّب (لمنع الدوران)
 
-    if HAS_ADVERTOOLS:
-        try:
-            sm_df = adv.sitemap_to_df(f"{base_clean}/sitemap.xml")
-            if sm_df is not None and 'loc' in sm_df.columns:
-                for loc in sm_df['loc'].dropna().tolist():
-                    if normalize_domain(urlparse(loc).netloc) == target_netloc:
-                        found_urls.add(clean_url(loc))
-                if len(found_urls) > 5:
-                    return found_urls
-        except Exception:
-            pass
-
-    visited_maps = set()
-    candidates = [
-        f"{base_clean}/sitemap.xml", f"{base_clean}/sitemap_index.xml",
-        f"{base_clean}/sitemap-1.xml", f"{base_clean}/sitemap_1.xml",
-        f"{base_clean}/sitemap_products_1.xml", f"{base_clean}/sitemap-products-1.xml",
-        f"{base_clean}/sitemap_categories_1.xml", f"{base_clean}/sitemap_pages_1.xml",
-        f"{base_clean}/sitemap_brands_1.xml"
-    ]
-
-    res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
-    if res_r is not None and res_r.status_code == 200:
-        for line in res_r.text.splitlines():
-            if line.lower().strip().startswith('sitemap:'):
-                sm = line.split(':', 1)[1].strip()
-                if sm and sm not in candidates: candidates.append(sm)
-
-    LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
-
-    def parse_map(sm_url):
-        if sm_url in visited_maps or len(visited_maps) > 60: return
-        visited_maps.add(sm_url)
-        res = safe_get(sm_url, timeout=8, retries=1)
-        if res is None or res.status_code != 200: return
+    def parse_map(sm_url, depth=0):
+        """قارئ احتياطي يدوي حين لا يتوفر advertools أو حين يفشل."""
+        if sm_url in tried_maps or len(tried_maps) > 80 or depth > 4:
+            return
+        tried_maps.add(sm_url)
+        res = safe_get(sm_url, timeout=10, retries=1)
+        if res is None or res.status_code != 200:
+            return
+        if sm_url not in visited_maps:
+            visited_maps.append(sm_url)
         content = res.content
         if sm_url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
             try: content = gzip.decompress(content)
@@ -718,42 +727,68 @@ def fetch_sitemap_urls(base_url):
         text = content.decode('utf-8', 'ignore')
         for loc in LOC_RE.findall(text):
             loc = loc.strip()
-            clean_loc = loc.split('?')[0].lower()
-            if clean_loc.endswith(('.xml', '.xml.gz')) or 'sitemap' in clean_loc:
-                parse_map(loc)
-            else:
-                if normalize_domain(urlparse(loc).netloc) == target_netloc:
-                    found_urls.add(clean_url(loc))
+            low = loc.split('?')[0].lower()
+            if low.endswith(('.xml', '.xml.gz')) or 'sitemap' in low:
+                parse_map(loc, depth + 1)
+            elif normalize_domain(urlparse(loc).netloc) == target_netloc:
+                found_urls.add(clean_url(loc))
 
-    for c in candidates:
-        parse_map(c)
-
-    # حلقة استكشاف خرائط سلة وزد المقسمة (sitemap-2.xml, sitemap_products_2.xml...)
-    patterns = [
-        ('sitemap-', ''),
-        ('sitemap_', ''),
-        ('sitemap_products_', ''),
-        ('sitemap-products-', ''),
-        ('sitemap_categories_', ''),
-        ('sitemap_pages_', ''),
-    ]
-    for prefix, suffix in patterns:
-        idx = 2
-        fails = 0
-        while idx <= 40:
-            sm_url = f"{base_clean}/{prefix}{idx}{suffix}.xml"
-            res = safe_get(sm_url, timeout=5, retries=0)
-            if res is None or res.status_code != 200 or '<loc' not in res.text.lower():
-                fails += 1
-                if fails >= 2:
-                    break
-                idx += 1
-                continue
-            fails = 0
+    def read_sitemap(sm_url):
+        before = len(found_urls)
+        urls = _urls_via_advertools(sm_url, target_netloc)
+        if urls:
+            found_urls.update(urls)
+            if sm_url not in visited_maps:
+                visited_maps.append(sm_url)
+            tried_maps.add(sm_url)
+        else:
             parse_map(sm_url)
-            idx += 1
+        return len(found_urls) > before
 
-    return found_urls
+    # 1) ما يعلنه المتجر بنفسه في robots.txt
+    declared = _read_robots_sitemaps(base_clean)
+    for c in declared:
+        read_sitemap(c)
+
+    # 2) المسارات القياسية — تُجرّب فقط إذا لم تنجح خرائط robots.txt
+    if not found_urls:
+        for path in ('/sitemap.xml', '/sitemap_index.xml', '/sitemap-1.xml',
+                     '/sitemap_products_1.xml', '/sitemap_categories_1.xml', '/sitemap_pages_1.xml'):
+            read_sitemap(f"{base_clean}{path}")
+
+    # 3) التخمين: فقط إذا لم نجد خريطة واحدة تعمل
+    if not found_urls:
+        for prefix in ('sitemap-', 'sitemap_', 'sitemap_products_',
+                       'sitemap-products-', 'sitemap_categories_', 'sitemap_pages_'):
+            idx, fails = 2, 0
+            while idx <= 40:
+                sm_url = f"{base_clean}/{prefix}{idx}.xml"
+                res = safe_get(sm_url, timeout=6, retries=0)
+                if res is None or res.status_code != 200 or '<loc' not in res.text.lower():
+                    fails += 1
+                    if fails >= 2:
+                        break
+                    idx += 1
+                    continue
+                fails = 0
+                parse_map(sm_url)
+                idx += 1
+
+    # توحيد الروابط: نسخة واحدة لكل صفحة حتى لو تكررت بلغتين أو بأسماء قديمة،
+    # ونفضّل النسخة الأساسية (بلا /ar أو /en) لأنها هي التي يراها الزائر عادةً
+    def _pref(u):
+        segs = [x for x in unquote(urlparse(u).path.lower()).split('/') if x]
+        return (1 if segs and segs[0] in LANG_SEGMENTS else 0, len(u))
+
+    unique = {}
+    for u in found_urls:
+        k = url_key(u)
+        if k not in unique or _pref(u) < _pref(unique[k]):
+            unique[k] = u
+
+    if files_out is not None:
+        files_out.extend(visited_maps)
+    return set(unique.values())
 
 def get_unique_images(images_df):
     if images_df is None or images_df.empty:
@@ -832,7 +867,8 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
     target = normalize_url(target_url)
     if progress_cb: progress_cb(0.05, "جلب وقراءة خرائط الموقع... (5%)")
 
-    sitemap_urls = fetch_sitemap_urls(target)
+    sitemap_files = []
+    sitemap_urls = fetch_sitemap_urls(target, files_out=sitemap_files)
 
     discovered_seeds = set()
     for seed in [f"{target}/products", f"{target}/latest-products", f"{target}/categories"]:
@@ -971,6 +1007,7 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
 
     coverage = {
         'sitemap_count': len(sitemap_urls),
+        'sitemap_files': sitemap_files,
         'excluded_rows': excluded_df.to_dict(orient='records'),
         'unlisted_pages': unlisted_pages,
         'orphan_pages': orphan_pages,
@@ -982,6 +1019,20 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
         'unreachable_pages': unreachable['الرابط'].tolist(),
         'unreachable_codes': {str(k): int(v) for k, v in unreachable['كود الاستجابة'].value_counts().items()},
     }
+
+    # مؤشر جودة الفحص: كم صفحة نجح فحصها فعلاً، وكم من الخريطة غطّينا
+    fetched_ok = int((full_df['متاحة'] == True).sum())
+    failed_n = int(((full_df['متاحة'] == False) &
+                    (~full_df['كود الاستجابة'].isin(GONE_CODES))).sum())
+    coverage_pct = round(100 * fetched_ok / max(fetched_ok + failed_n, 1), 1)
+    sitemap_seen = len(sitemap_keys & set(full_df['_key'])) if sitemap_keys else 0
+    sitemap_pct = round(100 * sitemap_seen / len(sitemap_keys), 1) if sitemap_keys else 0.0
+    if coverage_pct >= 97 and (not sitemap_keys or sitemap_pct >= 95):
+        confidence = 'عالية'
+    elif coverage_pct >= 85 and (not sitemap_keys or sitemap_pct >= 80):
+        confidence = 'متوسطة'
+    else:
+        confidence = 'منخفضة'
 
     def type_count(t):
         return int((df['نوع الصفحة'] == t).sum())
@@ -997,6 +1048,10 @@ def run_full_audit(target_url, max_pages=1500, workers=8, progress_cb=None):
         'unknown_pages': type_count(T_UNKNOWN),
         'broken_pages': len(unreachable),
         'excluded_pages': int(gone_mask.sum()) + len(noindex_pages),
+        'coverage_pct': coverage_pct,
+        'sitemap_coverage_pct': sitemap_pct,
+        'confidence': confidence,
+        'sitemap_files_count': len(sitemap_files),
         'redirect_home_count': int(redirect_mask.sum()),
         'missing_titles': int((df['حالة العنوان'] == 'missing').sum()),
         'duplicate_titles': len(dup_titles),
