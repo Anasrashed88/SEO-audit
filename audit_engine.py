@@ -1,22 +1,69 @@
+"""محرك الفحص: الاكتشاف والقراءة والتقييم والفحص الذاتي.
+
+لا يستورد streamlit إطلاقاً، فيمكن تشغيله واختباره بلا واجهة.
+"""
 import requests
 from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 import pandas as pd
 import time
+import io
 import gzip
 import json
 import re
-import html
+import zipfile
 from functools import lru_cache
+import sqlite3
 import threading
+from pathlib import Path
+from datetime import datetime
 from urllib.parse import urlparse, urljoin, unquote
 from concurrent.futures import ThreadPoolExecutor
 
+# ==============================================================
+#  مركز عمليات السيو الشامل للمتاجر الإلكترونية
+#  أنس راشد — anasrashed.com
+#
+#  مبدأ الفحص: يبدأ من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه
+#  الزائر. لا تدخل التقرير أي صفحة لا يمكن للزائر الوصول إليها.
+# ==============================================================
+
+
+BASE_DIR = Path(__file__).resolve().parent
+# خطوط التقرير: تُختار أول عائلة يوجد ملفها في المستودع.
+# لتغيير خط التقرير يكفي رفع ملفي الخط بالاسمين أدناه — لا تعديل في الكود.
+FONT_CANDIDATES = [
+    ("Tajawal", "Tajawal-Regular.ttf", "Tajawal-Bold.ttf"),
+    ("Almarai", "Almarai-Regular.ttf", "Almarai-Bold.ttf"),
+    ("Cairo", "Cairo-Regular.ttf", "Cairo-Bold.ttf"),
+    ("IBMPlexArabic", "IBMPlexSansArabic-Regular.ttf", "IBMPlexSansArabic-Bold.ttf"),
+    ("NotoKufi", "NotoKufiArabic-Regular.ttf", "NotoKufiArabic-Bold.ttf"),
+    ("Amiri", "Amiri-Regular.ttf", "Amiri-Bold.ttf"),
+]
+
+
+def pick_font():
+    """يعيد (الاسم، مسار العادي، مسار العريض أو None)."""
+    for name, reg, bold in FONT_CANDIDATES:
+        rp = BASE_DIR / reg
+        if rp.exists() and rp.stat().st_size > 20000:
+            bp = BASE_DIR / bold
+            return name, rp, (bp if bp.exists() and bp.stat().st_size > 20000 else None)
+    return "Amiri", BASE_DIR / "Amiri-Regular.ttf", None
+
+
+AR_FONT_NAME, FONT_PATH, FONT_BOLD_PATH = pick_font()
+
+# التشكيل الحديث (HarfBuzz) يتيح استخدام أي خط عربي عصري بلا الحاجة
+# لأشكال الحروف القديمة. عند غيابه نعود لطريقة arabic-reshaper.
 try:
-    import advertools as adv
-    HAS_ADVERTOOLS = True
+    import uharfbuzz  # noqa: F401
+    HAS_SHAPING = True
 except Exception:
-    HAS_ADVERTOOLS = False
+    HAS_SHAPING = False
+LOGO_PATH = BASE_DIR / "brand_logo.png"
+RIYAL_PATH = BASE_DIR / "Saudi_Riyal_Symbol-1.png"
+DB_FILE = str(BASE_DIR / "store_history.db")
 
 try:
     import lxml  # noqa: F401
@@ -24,28 +71,31 @@ try:
 except Exception:
     PARSER = "html.parser"
 
+MAX_PAGES_DEFAULT = 1500
+MAX_PAGINATION_DEPTH = 40
+MAX_CRAWL_LEVELS = 8
+MAX_REDIRECT_CHECKS = 300
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                  '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept-Language': 'ar,en;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 }
 
-# ==============================================================
-#  أنواع الصفحات والتصنيفات
-# ==============================================================
 T_HOME, T_PRODUCT, T_CATEGORY = 'home', 'product', 'category'
 T_BLOG, T_INFO, T_UNKNOWN, T_BROKEN = 'blog', 'info', 'unknown', 'broken'
 T_ARCHIVE = 'archive'
-PAGE_TYPE_ORDER = [T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_ARCHIVE, T_UNKNOWN, T_BROKEN]
+PAGE_TYPE_ORDER = [T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_ARCHIVE,
+                   T_UNKNOWN, T_BROKEN]
 
 PAGE_TYPE_LABEL = {
     'ar': {T_HOME: 'صفحة رئيسية', T_PRODUCT: 'صفحة منتج', T_CATEGORY: 'صفحة تصنيف',
            T_BLOG: 'صفحة مدونة', T_INFO: 'صفحة تعريفية', T_ARCHIVE: 'صفحة أرشيف',
-           T_UNKNOWN: 'غير مصنفة', T_BROKEN: 'صفحة معطلة'},
+           T_UNKNOWN: 'غير مصنفة', T_BROKEN: 'صفحة غير متاحة'},
     'en': {T_HOME: 'Homepage', T_PRODUCT: 'Product', T_CATEGORY: 'Category',
            T_BLOG: 'Blog', T_INFO: 'Info / Policy', T_ARCHIVE: 'Archive',
-           T_UNKNOWN: 'Unclassified', T_BROKEN: 'Broken'},
+           T_UNKNOWN: 'Unclassified', T_BROKEN: 'Unreachable'},
 }
 
 STATUS_LABEL = {
@@ -57,163 +107,263 @@ STATUS_LABEL = {
         'alt_long': 'يتجاوز 125 حرفاً', 'alt_duplicate': 'مكرر على عدة صور',
         'alt_ok': 'سليم', 'alt_empty': 'لا يوجد (فارغ)',
         'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
-        'match_ok': 'متطابق مع H1', 'match_diff': 'مختلف عن H1', 'match_empty': 'غير متوفر',
-    }
+        'match_ok': 'مطابق', 'match_diff': 'مختلف عن عنوان الصفحة', 'match_na': '—',
+    },
+    'en': {
+        'missing': 'Missing', 'very_short': 'Too short', 'acceptable': 'Acceptable',
+        'optimal': 'Optimal', 'long': 'Too long', 'failed': 'Scan failed',
+        'good': 'Good', 'thin': 'Thin content', 'na': 'N/A',
+        'alt_missing': 'Missing', 'alt_generic': 'Not descriptive',
+        'alt_stuffed': 'Keyword stuffed', 'alt_long': 'Over 125 characters',
+        'alt_duplicate': 'Duplicated across images', 'alt_ok': 'Good',
+        'alt_empty': '(empty)',
+        'canon_same': 'Self-referencing', 'canon_diff': 'Differs from page URL',
+        'canon_missing': 'Missing',
+        'match_ok': 'Matches', 'match_diff': 'Differs from page heading',
+        'match_na': '—',
+    },
 }
 
+# حدود الطول وفق أفضل ممارسات محركات البحث
+# (تُحسب بالحروف شاملة المسافات وعلامات الترقيم كافة)
 TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
 DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
-ALT_MAX = 125
-ALT_DUP_THRESHOLD = 3
+ALT_MAX = 125                 # حد قارئات الشاشة العملي
+ALT_DUP_THRESHOLD = 3         # نفس النص على 3 صور أو أكثر يُعدّ تكراراً
 
-COLOR = {
-    'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
-    'accent': '#0f172a', 'muted': '#94a3b8'
+COL_EN = {
+    'نوع الصفحة': 'Page Type', 'الرابط': 'URL', 'الرابط الكانوني': 'Canonical URL',
+    'مصدر الاكتشاف': 'Discovered Via', 'متاحة': 'Reachable', 'كود الاستجابة': 'Status Code',
+    'درجة السيو': 'SEO Score', 'عنوان الميتا': 'Meta Title', 'طول العنوان': 'Title Length',
+    'حالة العنوان': 'Title Status', 'وصف الميتا': 'Meta Description',
+    'طول الوصف': 'Description Length', 'حالة الوصف': 'Description Status',
+    'إجمالي الصور': 'Total Images', 'صور بدون Alt': 'Images Missing Alt',
+    'صور Alt ضعيف': 'Images With Weak Alt', 'عدد الكلمات': 'Word Count',
+    'حالة المحتوى': 'Content Status', 'لغة الصفحة': 'Page Language',
+    'حالة الكانونيكال': 'Canonical Status', 'قابلة للأرشفة': 'Indexable',
+    'مطابقة العنوان مع H1': 'Title vs H1', 'عنوان الصفحة (H1)': 'Page H1', 'رابط الصفحة': 'Page URL',
+    'رابط الصورة': 'Image URL', 'النص البديل الحالي (Alt)': 'Current Alt Text',
+    'طول النص البديل': 'Alt Length', 'حالة النص البديل': 'Alt Status',
+    'عدد الصفحات': 'Appears On Pages',
+    'الوجهة النهائية': 'Final Destination',
+    'جودة العنوان': 'Title Quality', 'جودة الوصف': 'Description Quality',
+    'جودة الرابط': 'URL Quality', 'المسار': 'Slug', 'محتوى مكرر': 'Duplicate Content',
+    'اسم المنتج المعروض': 'Displayed Product Name', 'صيغة الصورة': 'Image Format',
+    'اسم منظم': 'Declared Name', 'صور معلنة': 'Declared Images',
+    'رقم المنتج': 'SKU', 'عدد معلن': 'Declared Count',
+    'الاسم المعلن': 'Declared Name', 'الاسم المعروض': 'Displayed Name',
+    'صور مرصودة': 'Images Detected', 'القسم': 'Category',
+    'في الخريطة': 'In Sitemap', 'مرتبط برابط': 'Internally Linked',
+    'الأولوية': 'Priority', 'ما يحتاج إصلاحاً': 'What Needs Fixing',
+    'عنوان الميتا الحالي': 'Current Meta Title',
+    'وصف الميتا الحالي': 'Current Meta Description', 'م': '#',
+    'مرصود': 'Detected', 'ناقص': 'Missing', 'عدد معلن': 'Declared Count',
 }
 
-PLATFORM_LABEL = {
-    'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
-    'shopify': 'شوبيفاي (Shopify)', 'woocommerce': 'ووكومرس', 'unknown': 'غير محددة'
-}
+COLOR = {'ok': '#059669', 'warn': '#d97706', 'bad': '#dc2626', 'neutral': '#475569',
+         'accent': '#0f172a', 'muted': '#94a3b8'}
 
-REDIRECT_HOME = 'تحويل للرئيسية'
-GONE_CODES = {'404', '410', REDIRECT_HOME}
-RETRYABLE_CODES = {'فشل اتصال', '403', '429', '500', '502', '503', '504',
-                   '520', '521', '522', '523', '524'}
 
 # ==============================================================
-#  محرك الاتصال (Connection Pooling & Keep-Alive)
+#  قاعدة البيانات
 # ==============================================================
-_SHARED_SESSION = None
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS audits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain TEXT, scan_date TEXT, score REAL, total_pages INTEGER,
+        products_count INTEGER, categories_count INTEGER, info_pages_count INTEGER,
+        blog_pages_count INTEGER, data_json TEXT, images_json TEXT,
+        coverage_json TEXT, platform TEXT
+    )''')
+    c.execute("PRAGMA table_info(audits)")
+    existing = {row[1] for row in c.fetchall()}
+    for col, coltype in [("blog_pages_count", "INTEGER DEFAULT 0"),
+                         ("images_json", "TEXT"), ("coverage_json", "TEXT"),
+                         ("platform", "TEXT")]:
+        if col not in existing:
+            c.execute(f"ALTER TABLE audits ADD COLUMN {col} {coltype}")
+    conn.commit()
+    conn.close()
+
+
+
+
+
+# ==============================================================
+#  جلسة اتصال مجمّعة
+#  إعادة استخدام الاتصال توفّر مصافحة TLS لكل طلب — أكبر مكسب سرعة
+#  على متجر حقيقي بمئات الصفحات.
+# ==============================================================
+_SESSION = None
 _SESSION_LOCK = threading.Lock()
 
-def get_shared_session(pool_size=32):
-    global _SHARED_SESSION
-    if _SHARED_SESSION is None:
+
+def get_session(pool_size=32):
+    global _SESSION
+    if _SESSION is None:
         with _SESSION_LOCK:
-            if _SHARED_SESSION is None:
+            if _SESSION is None:
                 sess = requests.Session()
                 sess.headers.update(HEADERS)
                 adapter = requests.adapters.HTTPAdapter(
-                    pool_connections=pool_size, pool_maxsize=pool_size, max_retries=1
-                )
+                    pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0)
                 sess.mount('https://', adapter)
                 sess.mount('http://', adapter)
-                _SHARED_SESSION = sess
-    return _SHARED_SESSION
+                _SESSION = sess
+    return _SESSION
 
-def safe_get(url, timeout=12, retries=2):
-    """يعيد الاستجابة مع دعم التهدئة التدريجية (Exponential Backoff) عند ضغط سلة وكلودفلير."""
-    sess = get_shared_session()
-    last = None
-    for attempt in range(retries + 1):
-        try:
-            res = sess.get(url, timeout=timeout, allow_redirects=True)
-        except Exception:
-            if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
-            continue
-        if res.status_code in (429, 503) and attempt < retries:
-            last = res
-            wait = (res.headers.get('Retry-After') or '').strip()
-            delay = float(wait) if wait.isdigit() else 3.0 * (attempt + 1)
-            time.sleep(min(delay, 15))
-            continue
-        return res
-    return last
 
-def normalize_domain(netloc):
-    netloc = netloc.lower().split(':')[0]
-    if netloc.startswith('www.'):
-        return netloc[4:]
-    return netloc
+# مقياس ضغط المتجر: يرتفع مع كل فشل ويُبطئ الفحص تلقائياً
+_THROTTLE = {'fails': 0, 'delay': 0.0}
 
+
+def note_failure():
+    _THROTTLE['fails'] += 1
+    if _THROTTLE['fails'] in (5, 15, 40):
+        _THROTTLE['delay'] = min(_THROTTLE['delay'] + 0.25, 1.0)
+
+
+def reset_throttle():
+    _THROTTLE['fails'] = 0
+    _THROTTLE['delay'] = 0.0
+
+
+# ==============================================================
+#  أدوات الروابط
+# ==============================================================
 def normalize_url(url):
-    if not url: return ""
+    if not url:
+        return ""
     url = url.strip()
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
     return url.rstrip('/')
 
+
 def clean_url(url):
-    if not url: return ""
-    return unquote(url.split('#')[0].split('?')[0]).rstrip('/')
+    if not url:
+        return ""
+    return url.split('#')[0].split('?')[0].rstrip('/')
 
-# يدعم المعرفات الرقمية مهما كان عدد خاناتها (c1, p12, page-99...)
-PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product)-?(\d+)$', re.I)
-LANG_SEGMENTS = {'ar', 'en'}
 
-@lru_cache(maxsize=60000)
+# معرّفات المنصات الثابتة: سلة تضع رقم المنتج في آخر مقطع، والاسم قد
+# يختلف بين خريطة الموقع والصفحة نفسها، فالمعرّف هو المرجع لا الاسم.
+PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product)-?(\d{4,})$', re.I)
+
+
+@lru_cache(maxsize=100000)
 def url_key(url):
-    if not url: return ""
+    """مفتاح موحّد للمقارنة.
+
+    يفك ترميز المسارات العربية، ويعتمد المعرّف الرقمي حين يوجد: رابطا
+    /عبايات-مفتوحه/p163285128 و/عباية-مفتوحة/p163285128 صفحة واحدة.
+    """
+    if not url:
+        return ""
     p = urlparse(clean_url(url))
     path = unquote(p.path).rstrip('/')
-    host = normalize_domain(p.netloc)
+    host = p.netloc.lower()
     segs = [x for x in path.split('/') if x]
-    
-    if segs and segs[0].lower() in LANG_SEGMENTS:
-        segs = segs[1:]
-    if not segs:
-        return host
+    if segs:
+        mo = PLATFORM_ID_RE.match(segs[-1])
+        if mo:
+            return f"{host}/#{mo.group(1).lower()}{mo.group(2)}"
+    return f"{host}{path}"
 
-    # 1. فحص المعرف في الجزء الأخير مثل: /عبايات/c18274 أو /page-123
-    mo = PLATFORM_ID_RE.match(segs[-1])
-    if mo:
-        return f"{host}/#{mo.group(1).lower()}{mo.group(2)}"
-
-    # 2. فحص المعرف المنفصل مثل: /c/18274 أو /p/18274 أو /pages/123
-    if len(segs) >= 2 and segs[-1].isdigit():
-        parent = segs[-2].lower()
-        if parent in ('p', 'product', 'products'):
-            return f"{host}/#p{segs[-1]}"
-        elif parent in ('c', 'category', 'categories'):
-            return f"{host}/#c{segs[-1]}"
-        elif parent in ('page', 'pages'):
-            return f"{host}/#page{segs[-1]}"
-        elif parent in ('tag', 'tags'):
-            return f"{host}/#tag{segs[-1]}"
-
-    return f"{host}/{'/'.join(segs)}".rstrip('/')
 
 def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
-EXCLUDE_SEGMENTS = {
-    'cart', 'checkout', 'login', 'signin', 'register', 'signup', 'account',
-    'my-account', 'wishlist', 'favorites', 'compare', 'search', 'orders',
-    'customer', 'password', 'thank-you', 'logout', 'email-protection', 'cdn-cgi',
-    'سلة', 'حسابي', 'تسجيل', 'الدفع', 'بحث', 'المفضلة'
-}
+
+_TL = threading.local()
+
+
+def _session():
+    """جلسة لكل خيط: إعادة استخدام الاتصال توفّر مصافحة TLS في كل طلب."""
+    sess = getattr(_TL, 'sess', None)
+    if sess is None:
+        sess = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=8, pool_maxsize=16, max_retries=0)
+        sess.mount('https://', adapter)
+        sess.mount('http://', adapter)
+        sess.headers.update(HEADERS)
+        _TL.sess = sess
+    return sess
+
+
+def safe_get(url, timeout=12, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            res = _session().get(url, timeout=timeout, allow_redirects=True)
+            if res.status_code == 429:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return res
+        except Exception:
+            time.sleep(1)
+    return None
+
+
+EXCLUDE_PATH_PARTS = [
+    '/cart', '/checkout', '/login', '/signin', '/register', '/signup', '/account',
+    '/my-account', '/wishlist', '/favorites', '/compare', '/search', '/orders',
+    '/customer', '/password', '/thank-you', '/logout', '/tag/', '/tags/',
+    '/سلة', '/حسابي', '/تسجيل', '/الدفع', '/بحث', '/المفضلة',
+    '/cdn-cgi/', '/email-protection', '/__', '/wp-admin', '/wp-json',
+]
 BAD_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.avif', '.pdf',
-                  '.zip', '.rar', '.xml', '.css', '.js', '.ico', '.mp4', '.mp3')
+                  '.zip', '.rar', '.xml', '.css', '.js', '.ico', '.mp4', '.webm',
+                  '.mp3', '.doc', '.docx', '.xls', '.xlsx')
+
 
 def is_crawlable(url, base_netloc):
-    if not url: return False
+    if not url:
+        return False
     p = urlparse(url)
-    if p.scheme not in ('http', 'https'): return False
-    if normalize_domain(p.netloc) != normalize_domain(base_netloc): return False
+    if p.scheme not in ('http', 'https') or p.netloc.lower() != base_netloc.lower():
+        return False
     path = unquote(p.path.lower())
-    if path.endswith(BAD_EXTENSIONS): return False
-    segs = [s for s in path.split('/') if s]
-    if any(s in EXCLUDE_SEGMENTS for s in segs): return False
+    if path.endswith(BAD_EXTENSIONS):
+        return False
+    if any(part in path for part in EXCLUDE_PATH_PARTS):
+        return False
     return True
 
-def detect_platform(html, headers=None, url=""):
-    blob = (html or "")[:100000].lower() + " " + (url or "").lower()
-    if any(s in blob for s in ['salla.sa', 'cdn.salla.network', 'window.salla', 'salla-']): return 'salla'
-    if any(s in blob for s in ['zid.store', 'media.zid.sa', 'zidapi', 'x-zid', 'cdn.zid']): return 'zid'
-    if any(s in blob for s in ['cdn.shopify.com', 'myshopify.com', 'shopify.theme']): return 'shopify'
-    if 'woocommerce' in blob or 'wp-content' in blob: return 'woocommerce'
-    return 'unknown'
 
 # ==============================================================
-#  تحديد نوع الصفحة
+#  القياس والتقييم
 # ==============================================================
+def text_length(text):
+    """عدد الحروف بعد توحيد المسافات — يشمل المسافات والفواصل والنقاط
+    وكل علامات الترقيم، لأن محركات البحث تحسبها ضمن المساحة المعروضة."""
+    if not text:
+        return 0
+    return len(re.sub(r'\s+', ' ', str(text)).strip())
+
+
+def grade_length(length, min_ok, min_optimal, max_len):
+    if length == 0:
+        return 'missing'
+    if length < min_ok:
+        return 'very_short'
+    if length < min_optimal:
+        return 'acceptable'
+    if length <= max_len:
+        return 'optimal'
+    return 'long'
+
+
 AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
 
+
 def normalize_ar_token(tok):
+    """تجريد أداة التعريف وحروف العطف وتوحيد الهمزات، حتى تطابق
+    «والأحكام» الكلمة المفتاحية «احكام»."""
     t = tok.strip('.,،؛:!?()[]')
-    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)
+    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)      # التشكيل
     t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
     t = t.replace('ى', 'ي').replace('ة', 'ه')
     for pre in AR_PREFIXES:
@@ -222,30 +372,149 @@ def normalize_ar_token(tok):
             break
     return t
 
+
+GENERIC_ALT = {
+    'image', 'images', 'img', 'photo', 'photos', 'picture', 'pic', 'icon', 'logo',
+    'product', 'item', 'untitled', 'default', 'thumbnail', 'thumb', 'banner',
+    'slide', 'slider', 'cover', 'hero', 'main', 'mobile', 'desktop', 'tablet',
+    'new', 'sale', 'view', 'gallery', 'preview',
+    'صورة', 'صوره', 'صور', 'منتج', 'شعار', 'غلاف', 'رئيسية', 'جديد',
+}
+
+
+GENERIC_ALT_NORM = None
+
+
+def _generic_alt_norm():
+    global GENERIC_ALT_NORM
+    if GENERIC_ALT_NORM is None:
+        GENERIC_ALT_NORM = {normalize_ar_token(w) if re.search(r'[\u0600-\u06FF]', w)
+                            else w for w in GENERIC_ALT}
+    return GENERIC_ALT_NORM
+
+
+def grade_alt(alt_text):
+    """تقييم النص البديل بمعايير الجودة لا بالطول وحده.
+
+    الطول القصير ليس عيباً في ذاته: «عود مروكي محسن» نص بديل ممتاز.
+    ما يضر فعلاً هو الغياب، أو النص غير الوصفي (اسم ملف/كلمة عامة)،
+    أو حشو الكلمات المفتاحية، أو تجاوز حد قارئات الشاشة (125 حرفاً).
+    """
+    txt = re.sub(r'\s+', ' ', str(alt_text or '')).strip()
+    if not txt:
+        return 'alt_missing', 0
+    length = len(txt)
+    low = txt.lower()
+
+    if re.search(r'\.(jpg|jpeg|png|webp|gif|svg)$', low):
+        return 'alt_generic', length
+    if re.fullmatch(r'[\d\W_]+', txt):
+        return 'alt_generic', length
+    words = [w.strip('.,،؛:!?|-()[]') for w in low.split()]
+    words = [normalize_ar_token(w) if re.search(r'[\u0600-\u06FF]', w) else w
+             for w in words if w]
+    if not words or all(w in _generic_alt_norm() for w in words):
+        return 'alt_generic', length
+    if length > ALT_MAX:
+        return 'alt_long', length
+
+    commas = txt.count(',') + txt.count('،')
+    if commas >= 4 and len(words) / max(commas, 1) < 3:
+        return 'alt_stuffed', length
+    if len(words) >= 6 and len(set(words)) / len(words) < 0.5:
+        return 'alt_stuffed', length
+
+    return 'alt_ok', length
+
+
+ALT_CREDIT = {'alt_ok': 1.0, 'alt_duplicate': 0.4, 'alt_long': 0.6,
+              'alt_stuffed': 0.3, 'alt_generic': 0.0, 'alt_missing': 0.0}
+ALT_WEAK_STATES = ('alt_generic', 'alt_stuffed', 'alt_long', 'alt_duplicate')
+
+
+def apply_duplicate_alt(images_df):
+    """نفس النص البديل على صور مختلفة لا يميّز أياً منها لمحركات البحث.
+
+    يُحسب التكرار على مستوى الصورة الفريدة لا على مستوى الصفوف: ظهور صورة
+    المنتج نفسها في الرئيسية وصفحة القسم وصفحة المنتج ليس تكراراً، بل هو
+    السلوك الطبيعي لأي متجر.
+    """
+    if images_df is None or images_df.empty:
+        return images_df
+    df = images_df.copy()
+    uniq = df.drop_duplicates(subset=['رابط الصورة'])
+    ok = uniq[uniq['حالة النص البديل'] == 'alt_ok']
+    counts = ok['النص البديل الحالي (Alt)'].value_counts()
+    dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
+    if dupes:
+        mask = (df['حالة النص البديل'] == 'alt_ok') & \
+               df['النص البديل الحالي (Alt)'].isin(dupes)
+        df.loc[mask, 'حالة النص البديل'] = 'alt_duplicate'
+    return df
+
+
+def unique_images(images_df):
+    """جدول الصور الفريدة مع عدد الصفحات التي تظهر فيها كل صورة."""
+    if images_df is None or images_df.empty:
+        return images_df
+    counts = images_df.groupby('رابط الصورة')['رابط الصفحة'].nunique()
+    out = images_df.drop_duplicates(subset=['رابط الصورة']).copy()
+    out['عدد الصفحات'] = out['رابط الصورة'].map(counts)
+    return out.reset_index(drop=True)
+
+
+# ==============================================================
+#  كشف منصة المتجر
+# ==============================================================
+PLATFORM_LABEL = {'salla': 'سلة (Salla)', 'zid': 'زد (Zid)',
+                  'shopify': 'شوبيفاي (Shopify)', 'rmz': 'رمز (rmz.gg)',
+                  'woocommerce': 'ووكومرس', 'unknown': 'غير معروفة'}
+PLATFORM_LABEL_EN = {'salla': 'Salla', 'zid': 'Zid', 'shopify': 'Shopify',
+                     'rmz': 'rmz.gg', 'woocommerce': 'WooCommerce',
+                     'unknown': 'Unidentified'}
+SUPPORTED_PLATFORMS = ('salla', 'zid', 'shopify')
+
+
+def detect_platform(html, headers=None, url=""):
+    h = (html or "")[:200000].lower()
+    hdr = " ".join(f"{k}:{v}" for k, v in (headers or {}).items()).lower()
+    blob = h + " " + hdr + " " + (url or "").lower()
+    if any(s in blob for s in ['salla.sa', 'cdn.salla.network', 'window.salla', 'salla-']):
+        return 'salla'
+    if any(s in blob for s in ['zid.store', 'media.zid.sa', 'zidapi', 'x-zid', 'cdn.zid']):
+        return 'zid'
+    if any(s in blob for s in ['cdn.shopify.com', 'myshopify.com', 'shopify.theme',
+                               'x-shopify', 'shopify-features']):
+        return 'shopify'
+    if any(s in blob for s in ['cdn.rmz.gg', 'rmz.gg/store', 'matjrah']):
+        return 'rmz'
+    if any(s in blob for s in ['woocommerce', 'wp-content/plugins/woo']):
+        return 'woocommerce'
+    return 'unknown'
+
+
+# ==============================================================
+#  تصنيف الصفحات
+# ==============================================================
 POLICY_KEYWORDS = [
     'سياسة', 'شروط', 'خصوصية', 'استبدال', 'استرجاع', 'شحن', 'توصيل', 'شكاوى',
     'اسئلة', 'أسئلة', 'من-نحن', 'اتصل', 'ضمان', 'دفع', 'مقترحات', 'أحكام',
-    'الاستخدام', 'ارجاع', 'إرجاع', 'مرتجعات', 'تبديل', 'ضمانات', 'فروع',
+    'الاستخدام', 'ارجاع', 'إرجاع', 'مرتجعات', 'تبديل', 'ضمانات',
     'pages', 'page', 'policies', 'policy', 'privacy', 'terms', 'conditions',
     'about', 'about-us', 'contact', 'contact-us', 'faq', 'faqs', 'help',
     'shipping', 'delivery', 'complaint', 'complaints', 'returns', 'return',
     'refund', 'refunds', 'payment', 'warranty', 'support', 'legal',
 ]
-CATALOG_ROOTS = {'products', 'product', 'all-products', 'latest-products', 'catalog',
-                 'catalogue', 'collections/all', 'shop', 'store', 'categories'}
+CATALOG_ROOTS = ['products', 'product', 'all-products', 'catalog', 'catalogue',
+                 'collections/all', 'shop', 'store']
 BLOG_SEGMENTS = ('blog', 'blogs', 'articles', 'article', 'post', 'posts', 'news',
                  'مدونة', 'مقالات', 'اخبار', 'أخبار')
 CATEGORY_SEGMENTS = ('category', 'categories', 'collection', 'collections',
                      'department', 'departments', 'قسم', 'اقسام', 'أقسام', 'تصنيف')
-ARCHIVE_PARENT_SEGMENTS = ('tag', 'tags', 'author', 'authors', 'archive',
-                           'وسم', 'وسوم', 'ماركة', 'ماركات')
 
-PRODUCT_ID_RE = re.compile(r'^p-?\d+$', re.I)
-CATEGORY_ID_RE = re.compile(r'^c-?\d+$', re.I)
-INFO_ID_RE = re.compile(r'^page-?\d+$', re.I)
-ARCHIVE_LAST_RE = re.compile(r'^(tag|author|category|archive)-?\d*$', re.I)
 
 POLICY_KEYWORDS_NORM = None
+
 
 def _policy_keywords_norm():
     global POLICY_KEYWORDS_NORM
@@ -256,21 +525,14 @@ def _policy_keywords_norm():
                 POLICY_KEYWORDS_NORM.add(normalize_ar_token(part.lower()))
     return POLICY_KEYWORDS_NORM
 
-def _slug_tokens(seg):
-    return [normalize_ar_token(p.lower()) for p in seg.split('-') if p]
 
 def segment_is_policy(seg):
     norm = _policy_keywords_norm()
-    return any(p in norm for p in _slug_tokens(seg) if len(p) > 2)
+    parts = [normalize_ar_token(p.lower()) for p in seg.split('-') if p]
+    return any(p in norm for p in parts if len(p) > 2)
 
-def segment_is_mostly_policy(seg):
-    norm = _policy_keywords_norm()
-    toks = [p for p in _slug_tokens(seg) if len(p) > 2]
-    if not toks: return False
-    return sum(1 for p in toks if p in norm) / len(toks) >= 0.5
 
 def _has_jsonld_type(soup, wanted):
-    if not soup: return False
     for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
         try:
             data = json.loads(tag.string or '{}')
@@ -278,302 +540,305 @@ def _has_jsonld_type(soup, wanted):
             continue
         blocks = data if isinstance(data, list) else [data]
         for b in blocks:
-            if not isinstance(b, dict): continue
-            if '@graph' in b and isinstance(b['@graph'], list):
-                for item in b['@graph']:
-                    if not isinstance(item, dict): continue
-                    t = item.get('@type')
-                    types = t if isinstance(t, list) else [t]
-                    if any(str(x) in wanted for x in types if x): return True
+            if not isinstance(b, dict):
+                continue
             t = b.get('@type')
             types = t if isinstance(t, list) else [t]
-            if any(str(x) in wanted for x in types if x): return True
+            if any(str(x) in wanted for x in types if x):
+                return True
     return False
 
-def _html_signals(soup):
-    if not soup: return None
-    og_type = ""
-    tag = soup.find('meta', attrs={'property': 'og:type'})
-    if tag and tag.get('content'):
-        og_type = tag['content'].lower()
-
-    if 'product' in og_type \
-            or soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}) \
-            or _has_jsonld_type(soup, ('Product', 'IndividualProduct')):
-        return 'product'
-    if 'article' in og_type or 'blog' in og_type \
-            or soup.find(attrs={'itemtype': re.compile(r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}) \
-            or _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
-        return 'article'
-    if soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}) \
-            or _has_jsonld_type(soup, ('CollectionPage',)):
-        return 'collection'
-    return None
-
-def _url_segments(url):
-    path = unquote(urlparse(clean_url(url)).path.lower()).strip('/')
-    segs = [s for s in path.split('/') if s]
-    if segs and segs[0] in LANG_SEGMENTS:
-        segs = segs[1:]
-    return segs
 
 @lru_cache(maxsize=60000)
 def _detect_type_by_url(url, base_url):
     return detect_page_type(url, base_url, None)
 
-def detect_page_type(url, base_url, soup=None):
-    url_clean = clean_url(url)
-    segments = _url_segments(url_clean)
 
-    if not segments or url_key(url_clean) == url_key(normalize_url(base_url)):
+def detect_page_type(url, base_url, soup=None):
+    base_clean = normalize_url(base_url)
+    url_clean = clean_url(url)
+
+    if url_key(url_clean) == url_key(base_clean) or urlparse(url_clean).path in ('', '/'):
         return T_HOME
 
-    last = segments[-1]
-    path_clean = '/'.join(segments)
-    in_blog = any(s in BLOG_SEGMENTS for s in segments)
+    path = unquote(urlparse(url_clean).path.lower())
+    path_clean = path.strip('/')
+    segments = [s for s in path_clean.split('/') if s]
 
-    # 1. روابط المنتجات القاطعة
-    if PRODUCT_ID_RE.match(last):
+    og_type = ""
+    if soup:
+        tag = soup.find('meta', attrs={'property': 'og:type'})
+        if tag and tag.get('content'):
+            og_type = tag['content'].lower()
+
+    if 'product' in og_type:
         return T_PRODUCT
-    if len(segments) >= 2 and segments[-2] in ('p', 'product', 'products') and (last.isdigit() or len(last) > 2):
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/Product', re.I)}):
         return T_PRODUCT
-    if not in_blog and ('products' in segments[:-1] or 'product' in segments[:-1]):
+    if soup and _has_jsonld_type(soup, ('Product',)):
+        return T_PRODUCT
+    if ('products' in segments or 'product' in segments) and len(segments) >= 2:
+        return T_PRODUCT
+    if re.search(r'/p\d+', path) or '-p-' in path:
+        return T_PRODUCT
+    if any(re.match(r'^p\d+$', s) for s in segments):
         return T_PRODUCT
 
-    # 2. الصفحات التعريفية والسياسات القاطعة
-    if INFO_ID_RE.match(last):
+    # السياسات قبل المدونة: بعض المتاجر تنشر السياسات تحت مسار /blogs/
+    if any(segment_is_policy(seg) for seg in segments if seg not in BLOG_SEGMENTS):
         return T_INFO
-    if len(segments) >= 2 and segments[-2] in ('page', 'pages') and (last.isdigit() or segment_is_policy(last)):
-        return T_INFO
 
-    # 3. المدونة
-    if in_blog:
-        if last in BLOG_SEGMENTS:
+    # صفحات الأرشيف (وسم/كاتب/تاريخ): تعرض قوائم لا محتوى أصلياً
+    if segments:
+        last = segments[-1]
+        if re.match(r'^(tag|author|category|archive)-?\d*$', last) or \
+                re.match(r'^\d{4}$', last):
             return T_ARCHIVE
-        if CATEGORY_ID_RE.match(last) or ARCHIVE_LAST_RE.match(last) \
-                or any(s in ARCHIVE_PARENT_SEGMENTS for s in segments[:-1]):
+        # تصنيف داخل المدونة: /blog/عام/c-368175017
+        if re.match(r'^c-?\d{4,}$', last) and \
+                any(x in BLOG_SEGMENTS for x in segments[:-1]):
             return T_ARCHIVE
-        sig = _html_signals(soup)
-        if sig == 'article': return T_BLOG
-        if sig == 'product': return T_PRODUCT
-        slug = segments[-2] if re.fullmatch(r'[a-z]?-?\d+', last) and len(segments) >= 2 else last
-        if segment_is_mostly_policy(slug): return T_INFO
+        if len(segments) >= 2 and any(
+                x in ('tag', 'tags', 'author', 'authors', 'archive', 'وسم', 'وسوم')
+                for x in segments[:-1]):
+            return T_ARCHIVE
+
+    if 'article' in og_type or 'blog' in og_type:
+        return T_BLOG
+    if soup and soup.find(attrs={'itemtype': re.compile(
+            r'schema\.org/(Article|BlogPosting|NewsArticle)', re.I)}):
+        return T_BLOG
+    if soup and _has_jsonld_type(soup, ('Article', 'BlogPosting', 'NewsArticle')):
+        return T_BLOG
+    if any(s in BLOG_SEGMENTS for s in segments):
         return T_BLOG
 
-    # 4. التصنيفات بالرابط
-    if CATEGORY_ID_RE.match(last) or path_clean in CATALOG_ROOTS \
-            or any(s in CATEGORY_SEGMENTS for s in segments):
+    if path_clean in CATALOG_ROOTS:
         return T_CATEGORY
-    if len(segments) >= 2 and segments[-2] in ('c', 'category', 'categories') and (last.isdigit() or len(last) > 2):
+    if soup and soup.find(attrs={'itemtype': re.compile(r'schema\.org/CollectionPage', re.I)}):
         return T_CATEGORY
-
-    # 5. إشارات الميتا داخل الصفحة
-    sig = _html_signals(soup)
-    if sig == 'product': return T_PRODUCT
-    if sig == 'article': return T_BLOG
-    if sig == 'collection': return T_CATEGORY
-
-    # 6. الأرشيف
-    if ARCHIVE_LAST_RE.match(last) or re.match(r'^\d{4}$', last) \
-            or (len(segments) >= 2 and any(s in ARCHIVE_PARENT_SEGMENTS for s in segments[:-1])):
-        return T_ARCHIVE
-
-    # 7. السياسات العامة
-    if any(segment_is_policy(seg) for seg in segments):
-        return T_INFO
-
-    # 8. فحص الأنماط المتبقية
-    if '-p-' in path_clean or re.search(r'[-/]p-?\d+', url_clean):
-        return T_PRODUCT
-    if re.search(r'[-/]c-?\d+', url_clean):
+    if any(s in CATEGORY_SEGMENTS for s in segments):
+        return T_CATEGORY
+    if re.search(r'/c\d+', path) or any(re.match(r'^c\d+$', s) for s in segments):
         return T_CATEGORY
 
     return T_UNKNOWN
 
+
+def detect_page_language(soup, text_sample=""):
+    if soup:
+        html_tag = soup.find('html')
+        if html_tag and html_tag.get('lang'):
+            code = str(html_tag['lang']).strip().lower()[:2]
+            if code:
+                return code
+    arabic = len(re.findall(r'[\u0600-\u06FF]', text_sample))
+    latin = len(re.findall(r'[A-Za-z]', text_sample))
+    if arabic == 0 and latin == 0:
+        return '—'
+    return 'ar' if arabic >= latin else 'en'
+
+
 # ==============================================================
-#  فحص معايير السيو والرموز والميتا
+#  فلترة صور المحتوى
 # ==============================================================
-PLACEHOLDER_PATTERNS = [
-    r'^\s*\[\s*[\.\-_]*\s*\]\s*$',
-    r'\{\{.*?\}\}', r'\{%.*?%\}',
-    r'^\s*[-_–—|•·\.\s]+\s*$',
-    r'\b(undefined|null|nan|none|untitled|default)\b'
+JUNK_KEYWORDS = [
+    'spinner', 'loader', 'loading', 'ajax', 'icon', 'badge', 'payment', 'gateway',
+    'tamara', 'tabby', 'mada', 'visa', 'mastercard', 'apple-pay', 'applepay',
+    'stc-pay', 'stcpay', 'vat', 'tax', 'maroof', 'social', 'whatsapp', 'snapchat',
+    'instagram', 'tiktok', 'twitter', 'pixel', 'spacer', 'avatar', 'arrow',
+    'placeholder', 'blank',
+    # شعارات شركات الشحن ومزودي الخدمة
+    'zidship', 'aramex', 'smsa', 'redbox', 'naqel', 'servicelevel', 'courier',
+    'shipment', 'shipping-company', 'carrier', 'fastlo', 'imile',
+    # صور وهمية تضعها القوالب قبل التحميل الكسول
+    's-empty', 'empty.png', 'lazy.png', 'transparent', 'dummy', '1x1',
 ]
 
-def is_title_symbol_or_placeholder(title):
-    if not title: return True
-    t = title.strip()
-    if not re.search(r'[0-9a-zA-Z\u0600-\u06FF]', t): return True
-    return any(re.search(pat, t, re.I) for pat in PLACEHOLDER_PATTERNS)
 
-def grade_length(length, min_ok, min_optimal, max_len):
-    if length == 0: return 'missing'
-    if length < min_ok: return 'very_short'
-    if length < min_optimal: return 'acceptable'
-    if length <= max_len: return 'optimal'
-    return 'long'
-
-GENERIC_ALTS = {
-    'image', 'images', 'img', 'photo', 'photos', 'picture', 'pic', 'icon', 'logo', 'product',
-    'mobile image', 'desktop image', 'banner', 'slider', 'slide', 'hero', 'thumbnail',
-    'thumb', 'mobile', 'desktop', 'cover', 'default', 'untitled',
-    'صورة', 'صوره', 'صور', 'منتج', 'شعار', 'غلاف', 'رئيسية', 'جديد', 'خلفية'
-}
-
-def grade_alt(alt_text):
-    txt = re.sub(r'\s+', ' ', str(alt_text or '')).strip()
-    if not txt: return 'alt_missing', 0
-    length = len(txt)
-    low = txt.lower()
-
-    if re.search(r'\.(jpg|jpeg|png|webp|gif|svg)$', low) or re.fullmatch(r'[\d\W_]+', txt):
-        return 'alt_generic', length
-    if low in GENERIC_ALTS:
-        return 'alt_generic', length
-
-    words = [w.strip('.,،؛:!?|-()[]') for w in low.split()]
-    if not words or all(w in GENERIC_ALTS for w in words):
-        return 'alt_generic', length
-    if length > ALT_MAX:
-        return 'alt_long', length
-
-    commas = txt.count(',') + txt.count('،')
-    if commas >= 4 and len(words) / max(commas, 1) < 3:
-        return 'alt_stuffed', length
-
-    return 'alt_ok', length
-
-def check_title_h1_match(meta_title, h1_text):
-    if not meta_title or not h1_text: return 'match_empty'
-    t_clean = re.sub(r'[^\w\s\u0600-\u06FF]', '', meta_title.lower())
-    h_clean = re.sub(r'[^\w\s\u0600-\u06FF]', '', h1_text.lower())
-    h_words = set(h_clean.split())
-    if not h_words: return 'match_empty'
-    match_count = sum(1 for w in h_words if w in t_clean)
-    return 'match_ok' if (match_count / len(h_words)) >= 0.5 else 'match_diff'
-
-def extract_image_src(img):
-    for attr in ['data-src', 'data-original', 'data-lazy', 'data-lazy-src', 'data-image']:
+def get_image_src(img):
+    for attr in ['data-src', 'data-original', 'data-lazy', 'data-lazy-src',
+                 'data-image', 'data-large_image']:
         val = img.get(attr)
-        if val and val.strip(): return val.strip()
-    return img.get('src', '').strip()
+        if val and val.strip():
+            return val.strip()
+    for attr in ['data-srcset', 'srcset']:
+        val = img.get(attr)
+        if val and val.strip():
+            first = val.split(',')[0].strip().split(' ')[0]
+            if first:
+                return first
+    src = img.get('src')
+    return src.strip() if src else ''
 
-def clean_image_url(url):
-    if not url: return ""
-    u = url.strip()
-    mo = re.search(r'/cdn-cgi/image/[^/]+/(https?://.+)$', u, re.I)
-    if mo: u = mo.group(1)
-    elif '/cdn-cgi/image/' in u.lower():
-        u = re.sub(r'/cdn-cgi/image/[^/]+/', '/', u, flags=re.I)
-    return u.split('?')[0].split('#')[0]
 
-def is_relevant_seo_image(src, img):
-    if not src or src.startswith('data:image'): return False
-    s = src.lower()
-
-    if any(k in s for k in [
-        'static.zid.store', 'cdn.zid.store', 'assets.salla.sa',
-        'cdn.salla.network/assets', 'shopifycloud', '/static/', 'static.'
-    ]):
+def is_relevant_seo_image(img, src):
+    if not src:
         return False
-
-    junk_words = {
-        'favicon', 'avatar', 'payment', 'payments', 'tamara', 'tabby', 'mada', 'visa',
-        'mastercard', 'applepay', 'stcpay', 'pixel', 'spinner', 'loader', 'maroof',
-        'vat', 'badge', 'badges', 'icon', 'icons', 'logo', 'logos', 'whatsapp',
-        'snapchat', 'instagram', 'tiktok', 'twitter', 'smsa', 'aramex', 'redbox',
-        'zidship', 'placeholder', 'transparent', 'dummy'
-    }
-    junk_phrases = ('apple-pay', 'stc-pay', 'business_center', 'empty.png')
-    tokens = set(re.split(r'[^a-z0-9]+', urlparse(s).path))
-    if tokens & junk_words or any(p in s for p in junk_phrases): return False
-
+    s = src.lower()
+    if s.startswith('data:image') or 'static.' in s or '/static/' in s:
+        return False
+    if any(k in s for k in ['logo', 'brand', 'favicon', 'watermark']):
+        return False
     classes = ' '.join(img.get('class', [])).lower()
     img_id = (img.get('id') or '').lower()
-    if any(k in classes or k in img_id for k in ['logo', 'brand', 'badge', 'icon', 'footer', 'header']):
+    if any(k in classes or k in img_id for k in ['logo', 'brand']):
         return False
-    if s.split('?')[0].endswith(('.svg', '.ico', '.gif')): return False
-
+    if s.split('?')[0].endswith(('.gif', '.svg', '.ico')):
+        return False
+    if any(j in s for j in JUNK_KEYWORDS):
+        return False
     return True
 
-def extract_page_links(soup, page_url, base_netloc):
-    links = set()
-    for a in soup.find_all('a', href=True):
-        href = a['href'].strip()
-        if href.startswith(('mailto:', 'tel:', 'javascript:', '#')): continue
-        full = clean_url(urljoin(page_url, href))
-        if is_crawlable(full, base_netloc): links.add(full)
 
-    for card in soup.find_all(['salla-product-card', 'div', 'article'], attrs={'data-url': True}):
-        full = clean_url(urljoin(page_url, card['data-url']))
-        if is_crawlable(full, base_netloc): links.add(full)
+def strip_boilerplate(soup, markup=None):
+    """يحذف الترويسة والفوتر والقوائم فقط، لا الصفحة كلها.
 
-    for el in soup.find_all(['salla-infinite-scroll', 'div'], attrs={'next-page': True}):
-        next_p = el.get('next-page')
-        if next_p:
-            full = clean_url(urljoin(page_url, next_p))
-            if is_crawlable(full, base_netloc): links.add(full)
+    بعض القوالب (سلة مثلاً) تضع صنفاً فيه كلمة header على وسم body نفسه،
+    فالمطابقة بالصنف وحدها تمسح المحتوى بالكامل. لذلك نستثني الأوسمة
+    الجذرية وأي عنصر يحوي المحتوى الرئيسي أو معظم نص الصفحة، ونعود
+    للصفحة كاملة إذا لم يتبقَّ منها شيء يُذكر.
+    """
+    body = soup.body or soup
+    total = len(body.get_text(' ', strip=True))
 
-    return links
+    targets = soup.select(
+        'header, nav, footer, aside, [class*="header"], [class*="footer"], '
+        '[class*="navbar"], [class*="nav-menu"]')
+    for tag in targets:
+        try:
+            if tag.name in ('html', 'body', 'main'):
+                continue
+            if tag.find('main') is not None:
+                continue
+            if total and len(tag.get_text(' ', strip=True)) > total * 0.6:
+                continue
+            tag.decompose()
+        except Exception:
+            pass
 
-def is_noindex(soup, res):
-    header = (res.headers.get('X-Robots-Tag') or '').lower()
-    if 'noindex' in header: return True
-    for m in soup.find_all('meta', attrs={'name': re.compile(r'^(robots|googlebot)$', re.I)}):
-        if 'noindex' in (m.get('content') or '').lower(): return True
+    # شبكة أمان: لو ابتلع التنظيف الصفحة، نعيد الأصل كما هو
+    if markup and total > 200:
+        left = len((soup.body or soup).get_text(' ', strip=True))
+        if left < total * 0.15:
+            return make_soup(markup)
+    return soup
+
+
+
+# ==============================================================
+#  إشارات إضافية تُقرأ من الصفحة
+# ==============================================================
+def is_noindex(soup, res=None):
+    """الصفحة تطلب من محركات البحث تجاهلها — من الوسم أو من ترويسة X-Robots."""
+    for tag in soup.find_all('meta', attrs={'name': re.compile(r'robots', re.I)}):
+        if 'noindex' in str(tag.get('content') or '').lower():
+            return True
+    if res is not None:
+        if 'noindex' in str(res.headers.get('X-Robots-Tag', '')).lower():
+            return True
     return False
 
-def _unreachable_record(url, base_url, source, code):
+
+def title_h1_match(meta_title, h1_text):
+    """هل يعبّر عنوان الميتا عن عنوان الصفحة المرئي؟"""
+    if not meta_title or not h1_text:
+        return 'match_na'
+    t = set(slug_tokens(meta_title))
+    h = set(slug_tokens(h1_text))
+    if not h:
+        return 'match_na'
+    return 'match_ok' if len(t & h) / len(h) >= 0.5 else 'match_diff'
+
+
+def clean_image_url(url):
+    """يزيل طبقة تحويل الصور من الرابط ليُعدّ نفس الملف مرة واحدة."""
+    if not url:
+        return ""
+    u = str(url).strip()
+    mo = re.search(r'/cdn-cgi/image/[^/]+/(https?://.+)$', u, re.I)
+    if mo:
+        u = mo.group(1)
+    elif '/cdn-cgi/image/' in u.lower():
+        u = re.sub(r'/cdn-cgi/image/[^/]+/', '/', u, flags=re.I)
+    return u.split('#')[0]
+
+
+# ==============================================================
+#  فحص صفحة واحدة
+# ==============================================================
+def broken_page_row(url, reason, source):
     return {
         'page_data': {
-            'نوع الصفحة': _detect_type_by_url(clean_url(url), base_url),
-            'الرابط': url, 'مصدر الاكتشاف': source,
-            'متاحة': False, 'كود الاستجابة': code, 'قابلة للأرشفة': False,
-            'عنوان الميتا': '', 'طول العنوان': 0, 'حالة العنوان': 'failed',
-            'عنوان الصفحة (H1)': '', 'مطابقة العنوان مع H1': 'match_empty',
-            'وصف الميتا': '', 'طول الوصف': 0, 'حالة الوصف': 'failed',
-            'إجمالي الصور': 0, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
-            'عدد الكلمات': 0, 'حالة المحتوى': 'na',
-            'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '',
-            'درجة السيو': 0
+            'نوع الصفحة': T_BROKEN, 'الرابط': unquote(url), 'مصدر الاكتشاف': source,
+            'متاحة': False, 'كود الاستجابة': str(reason), 'لغة الصفحة': '—',
+            'اسم المنتج المعروض': '', 'اسم منظم': '', 'صور معلنة': 0,
+            'قابلة للأرشفة': True, 'مطابقة العنوان مع H1': 'match_na',
+            'رقم المنتج': '', 'عدد معلن': None,
+            'درجة السيو': None, 'عنوان الميتا': '', 'طول العنوان': 0,
+            'حالة العنوان': 'failed', 'وصف الميتا': '', 'طول الوصف': 0,
+            'حالة الوصف': 'failed', 'إجمالي الصور': 0, 'صور بدون Alt': 0,
+            'صور Alt ضعيف': 0, 'عدد الكلمات': 0, 'حالة المحتوى': 'na',
+            'حالة الكانونيكال': 'canon_missing', 'الرابط الكانوني': '', '_raw_url': url,
         },
-        'images_data': [], 'links': set()
+        'images_data': [], 'links': set(), 'product_links': set(),
     }
 
-def _canonical_of(soup, page_url):
-    for link in soup.find_all('link', href=True):
-        rel = link.get('rel') or []
-        if isinstance(rel, str): rel = [rel]
-        if 'canonical' in [r.lower() for r in rel]:
-            c_href = link['href'].strip()
-            # تجاهل الكانونيكال إذا كان يشير للجذر بالخطأ بينما نحن في صفحة داخلية
-            if c_href in ('/', '') and urlparse(page_url).path.strip('/'):
-                continue
-            return clean_url(urljoin(page_url, c_href))
-    return ''
 
-def audit_single_page(task, timeout=12):
+def fetch_and_audit(task):
     url, base_url, source = task
-    base_netloc = urlparse(normalize_url(base_url)).netloc
-    res = safe_get(url, timeout=timeout)
+    try:
+        return _fetch_and_audit(url, base_url, source)
+    except Exception as e:
+        return broken_page_row(clean_url(url), f'خطأ فني: {type(e).__name__}', source)
 
-    if res is None or res.status_code != 200:
-        code = str(res.status_code) if res is not None else 'فشل اتصال'
-        return _unreachable_record(url, base_url, source, code)
+
+def _fetch_and_audit(url, base_url, source):
+    res = safe_get(url)
+    if res is None:
+        return broken_page_row(clean_url(url), 'فشل اتصال', source)
+    ctype = (res.headers.get('Content-Type') or '').lower()
+    if res.status_code != 200:
+        return broken_page_row(clean_url(res.url), f'خطأ {res.status_code}', source)
+    if ctype and 'html' not in ctype:
+        return broken_page_row(clean_url(res.url), 'ليست صفحة HTML', source)
 
     final_url = clean_url(res.url)
     soup = make_soup(res.text)
 
-    # التحقق الحقيقي من التحويل للرئيسية (للمنتجات والصفحات المحذوفة في سلة)
+    # رابط غير الرئيسية انتهى بالرئيسية = صفحة محذوفة أو مخفية في سلة
     home_key = url_key(normalize_url(base_url))
-    if url_key(clean_url(url)) != home_key and url_key(final_url) == home_key:
-        return _unreachable_record(url, base_url, source, REDIRECT_HOME)
+    if url_key(clean_url(url)) != home_key:
+        canon_now = ''
+        for lk in soup.find_all('link', href=True):
+            rel = lk.get('rel') or []
+            rel = [r.lower() for r in (rel if isinstance(rel, list) else [rel])]
+            if 'canonical' in rel:
+                canon_now = clean_url(urljoin(final_url, lk['href']))
+                break
+        if url_key(final_url) == home_key or \
+                (canon_now and url_key(canon_now) == home_key):
+            return broken_page_row(clean_url(url), 'محذوف — تحويل للرئيسية', source)
 
     page_type = detect_page_type(final_url, base_url, soup)
-    links = extract_page_links(soup, final_url, base_netloc)
-    indexable = not is_noindex(soup, res)
 
-    canonical = _canonical_of(soup, final_url)
+    base_netloc = urlparse(normalize_url(base_url)).netloc
+    links = set()
+    for a in soup.find_all('a', href=True):
+        href = a['href'].strip()
+        if href.startswith(('mailto:', 'tel:', 'javascript:', '#')):
+            continue
+        full = clean_url(urljoin(final_url, href))
+        if is_crawlable(full, base_netloc):
+            links.add(full)
+
+    canonical = ''
+    for link in soup.find_all('link', href=True):
+        rel = link.get('rel') or []
+        rel = [r.lower() for r in (rel if isinstance(rel, list) else [rel])]
+        if 'canonical' in rel:
+            canonical = clean_url(urljoin(final_url, link['href']))
+            break
     if not canonical:
         canon_status, canonical = 'canon_missing', final_url
     elif url_key(canonical) == url_key(final_url):
@@ -582,415 +847,1577 @@ def audit_single_page(task, timeout=12):
         canon_status = 'canon_diff'
 
     h1 = soup.find('h1')
-    h1_text = re.sub(r'\s+', ' ', h1.get_text(strip=True)).strip() if h1 else ''
+    display_name = re.sub(r'\s+', ' ', h1.get_text(strip=True)).strip() if h1 else ''
+    noindex = is_noindex(soup, res)
+    if not display_name:
+        ogt = soup.find('meta', attrs={'property': 'og:title'})
+        if ogt and ogt.get('content'):
+            display_name = re.sub(r'\s+', ' ', ogt['content']).strip()
 
     title_tag = soup.find('title')
-    meta_title = re.sub(r'\s+', ' ', title_tag.get_text(strip=True)).strip() if title_tag else ''
-    title_len = len(meta_title)
-    if is_title_symbol_or_placeholder(meta_title):
-        title_status = 'missing'
-    else:
-        title_status = grade_length(title_len, TITLE_MIN_OK, TITLE_MIN_OPTIMAL, TITLE_MAX)
+    title = re.sub(r'\s+', ' ', title_tag.get_text(strip=True)).strip() if title_tag else ''
+    title_len = text_length(title)
+    title_status = grade_length(title_len, TITLE_MIN_OK, TITLE_MIN_OPTIMAL, TITLE_MAX)
 
-    match_status = check_title_h1_match(meta_title, h1_text)
-
-    desc_tag = soup.find('meta', attrs={'name': re.compile(r'^description$', re.I)}) or \
-               soup.find('meta', attrs={'property': 'og:description'})
-    meta_desc = re.sub(r'\s+', ' ', desc_tag['content']).strip() if desc_tag and desc_tag.get('content') else ''
-    desc_len = len(meta_desc)
+    desc_tag = (soup.find('meta', attrs={'name': 'description'})
+                or soup.find('meta', attrs={'property': 'og:description'}))
+    meta_desc = desc_tag['content'].strip() if desc_tag and desc_tag.get('content') else ''
+    meta_desc = re.sub(r'\s+', ' ', meta_desc).strip()
+    desc_len = text_length(meta_desc)
     desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
+    # تُستخدم نفس الشجرة بعد استخراج الميتا والروابط، فلا نحلّل الصفحة مرتين
+    content_soup = strip_boilerplate(soup, res.text)
+    total_img = 0
     page_images = []
-    total_img, missing_alt, weak_alt = 0, 0, 0
-    for img in soup.find_all('img'):
-        raw_src = extract_image_src(img)
-        if raw_src and is_relevant_seo_image(raw_src, img):
-            clean_src = clean_image_url(urljoin(final_url, raw_src))
-            if not clean_src: continue
-
+    for img in content_soup.find_all('img'):
+        src = get_image_src(img)
+        if src and is_relevant_seo_image(img, src):
             total_img += 1
             alt_text = (img.get('alt') or '').strip()
-            alt_st, alt_l = grade_alt(alt_text)
-            if alt_st == 'alt_missing': missing_alt += 1
-            elif alt_st in ('alt_generic', 'alt_stuffed', 'alt_long'): weak_alt += 1
-
+            alt_status, alt_len = grade_alt(alt_text)
             page_images.append({
-                'رابط الصفحة': final_url, 'نوع الصفحة': page_type,
-                'رابط الصورة': clean_src,
+                'رابط الصفحة': unquote(final_url), 'نوع الصفحة': page_type,
+                'رابط الصورة': clean_image_url(urljoin(final_url, src)),
                 'النص البديل الحالي (Alt)': alt_text,
-                'حالة النص البديل': alt_st,
-                'طول النص البديل': alt_l
+                'طول النص البديل': alt_len, 'حالة النص البديل': alt_status,
+                'صيغة الصورة': image_format(urljoin(final_url, src)),
             })
 
-    html_snippet = res.text[:20000] if page_type == T_HOME else ''
+    jd = extract_product_facts(soup) if page_type == T_PRODUCT else \
+        {'name': '', 'images': [], 'sku': '', 'offers': False}
+    prod_links = set()
+    if page_type in (T_CATEGORY, T_HOME):
+        for lk in links:
+            if _detect_type_by_url(lk, base_url) == T_PRODUCT:
+                prod_links.add(url_key(lk))
+    declared_n = (extract_declared_count(soup)
+                  if page_type in (T_CATEGORY, T_HOME) else None)
 
-    for s in soup(['script', 'style', 'nav', 'footer']): s.decompose()
-    words = len(soup.get_text(separator=' ', strip=True).split())
-    content_status = 'good' if words >= 40 else 'thin'
-
-    score = 100
-    if title_status == 'missing': score -= 30
-    elif title_status in ('very_short', 'long'): score -= 15
-    if desc_status == 'missing': score -= 25
-    elif desc_status in ('very_short', 'long'): score -= 10
-    if match_status == 'match_diff': score -= 15
-    if missing_alt > 0: score -= min(20, missing_alt * 5)
-    if content_status == 'thin': score -= 10
+    for s in content_soup(['script', 'style', 'noscript']):
+        s.decompose()
+    body_text = content_soup.get_text(separator=' ', strip=True)
+    words = len(body_text.split())
+    content_status = 'good' if words >= 50 else 'thin'
+    page_lang = detect_page_language(soup, (title + ' ' + body_text[:500]))
 
     return {
         'page_data': {
-            'نوع الصفحة': page_type, 'الرابط': final_url, 'مصدر الاكتشاف': source,
-            'متاحة': True, 'كود الاستجابة': '200', 'قابلة للأرشفة': indexable,
-            'عنوان الميتا': meta_title, 'طول العنوان': title_len, 'حالة العنوان': title_status,
-            'عنوان الصفحة (H1)': h1_text, 'مطابقة العنوان مع H1': match_status,
+            'نوع الصفحة': page_type, 'الرابط': unquote(final_url), 'مصدر الاكتشاف': source,
+            'متاحة': True, 'كود الاستجابة': '200', 'لغة الصفحة': page_lang,
+            'اسم المنتج المعروض': display_name, 'اسم منظم': jd['name'],
+            'قابلة للأرشفة': not noindex,
+            'مطابقة العنوان مع H1': title_h1_match(title, display_name),
+            'صور معلنة': len(jd['images']), 'رقم المنتج': jd['sku'],
+            'عدد معلن': declared_n,
+            'درجة السيو': None,  # تُحسب بعد تقييم الصور والروابط
+            'عنوان الميتا': title, 'طول العنوان': title_len, 'حالة العنوان': title_status,
             'وصف الميتا': meta_desc, 'طول الوصف': desc_len, 'حالة الوصف': desc_status,
-            'إجمالي الصور': total_img, 'صور بدون Alt': missing_alt, 'صور Alt ضعيف': weak_alt,
+            'إجمالي الصور': total_img, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
             'عدد الكلمات': words, 'حالة المحتوى': content_status,
-            'حالة الكانونيكال': canon_status, 'الرابط الكانوني': canonical,
-            'درجة السيو': max(10, score)
+            'حالة الكانونيكال': canon_status,
+            'الرابط الكانوني': unquote(canonical) if canon_status == 'canon_diff' else '',
+            '_raw_url': final_url,
         },
         'images_data': page_images,
         'links': links,
-        'html': html_snippet
+        'product_links': prod_links,
+        'platform_html': res.text[:60000] if page_type == T_HOME else '',
+        'platform_headers': dict(res.headers) if page_type == T_HOME else {},
     }
 
+
+
 # ==============================================================
-#  قارئ الخرائط المتقدم (دعم الخرائط المتفرعة و CDATA واللغة العربية)
+#  الجودة البنيوية للعناوين والأوصاف
+#  الطول وحده لا يكفي: «[]» ليس عنواناً قصيراً بل عنوان مفقود.
 # ==============================================================
-def parse_xml_locs(xml_text):
-    """استخراج جميع روابط <loc> بدقة مع دعم أسماء النطاقات و CDATA وفك التشفير."""
-    urls = []
+PLACEHOLDER_PATTERNS = [
+    r'^\s*\[\s*[\.\-_]*\s*\]\s*$',      # [] [.] [-] [_]
+    r'\{\{.*?\}\}', r'\{%.*?%\}',          # قوالب Liquid/Jinja
+    r'%[sd]\b', r'<%.*?%>',
+    r'\b(undefined|null|nan|none|lorem ipsum|test|xxx|todo|tbd)\b',
+    r'^\s*(page|product|item|title|default)\s*\d*\s*$',
+]
+
+
+def meaningful_text(t):
+    """النص بعد تجريد كل ما ليس حرفاً أو رقماً — لكشف العناوين الرمزية."""
+    return re.sub(r'[^0-9A-Za-z\u0600-\u06FF]+', '', str(t or ''))
+
+
+def is_placeholder(t):
+    low = str(t or '').strip().lower()
+    if not low:
+        return False
+    return any(re.search(pat, low) for pat in PLACEHOLDER_PATTERNS)
+
+
+def detect_brand(titles):
+    """اسم المتجر من اللاحقة المتكررة بعد الفاصل في العناوين."""
+    from collections import Counter
+    c = Counter()
+    valid = [t for t in titles if isinstance(t, str) and t.strip()]
+    for t in valid:
+        for sep in ['|', '–', '—', '-', '•', '·']:
+            if sep in t:
+                tail = t.rsplit(sep, 1)[-1].strip()
+                if 2 <= len(tail) <= 40:
+                    c[tail] += 1
+                break
+    if c and valid:
+        top, n = c.most_common(1)[0]
+        if n >= max(3, 0.25 * len(valid)):
+            return top
+    return ''
+
+
+QUALITY_LABEL = {
+    'ar': {'q_ok': 'سليم', 'q_symbols': 'رموز بلا نص', 'q_placeholder': 'قيمة قالب افتراضية',
+           'q_brand_only': 'اسم المتجر فقط', 'q_duplicate': 'مكرر على عدة صفحات',
+           'q_one_word': 'كلمة واحدة بلا وصف', 'q_same_as_title': 'نسخة من العنوان',
+           'q_na': '—'},
+    'en': {'q_ok': 'Sound', 'q_symbols': 'Symbols only', 'q_placeholder': 'Template placeholder',
+           'q_brand_only': 'Store name only', 'q_duplicate': 'Duplicated across pages',
+           'q_one_word': 'Single word, no description', 'q_same_as_title': 'Copy of the title',
+           'q_na': '—'},
+}
+# البنود التي تُعدّ العنصر مفقوداً فعلياً
+QUALITY_FATAL = ('q_symbols', 'q_placeholder')
+QUALITY_CREDIT = {'q_ok': 1.0, 'q_duplicate': 0.3, 'q_brand_only': 0.2,
+                  'q_one_word': 0.3, 'q_same_as_title': 0.4,
+                  'q_symbols': 0.0, 'q_placeholder': 0.0, 'q_na': 1.0}
+TEXT_DUP_THRESHOLD = 3
+
+
+def analyze_text_quality(df):
+    """يضيف تقييم الجودة البنيوية ويصحّح حالة الطول عند العناوين الرمزية."""
+    if df.empty:
+        return df, ''
+    out = df.copy()
+    ok_mask = out['متاحة'] == True  # noqa: E712
+    brand = detect_brand(out.loc[ok_mask, 'عنوان الميتا'].tolist())
+
+    def strip_brand(t):
+        v = str(t or '')
+        if brand:
+            for sep in ['|', '–', '—', '-', '•', '·']:
+                v = v.replace(f"{sep} {brand}", '').replace(f"{sep}{brand}", '')
+            v = v.replace(brand, '')
+        return v.strip(' |-–—•·')
+
+    tvals = out.loc[ok_mask, 'عنوان الميتا'].map(lambda x: str(x or '').strip())
+    dup_titles = {v for v, n in tvals[tvals != ''].value_counts().items()
+                  if n >= TEXT_DUP_THRESHOLD}
+    dvals = out.loc[ok_mask, 'وصف الميتا'].map(lambda x: str(x or '').strip())
+    dup_descs = {v for v, n in dvals[dvals != ''].value_counts().items()
+                 if n >= TEXT_DUP_THRESHOLD}
+
+    def qt(row):
+        if not row['متاحة']:
+            return 'q_na'
+        t = str(row['عنوان الميتا'] or '').strip()
+        if not t:
+            return 'q_na'
+        if is_placeholder(t):
+            return 'q_placeholder'
+        if not meaningful_text(t):
+            return 'q_symbols'
+        if brand and not meaningful_text(strip_brand(t)):
+            return 'q_brand_only'
+        if t in dup_titles:
+            return 'q_duplicate'
+        if len(meaningful_text(strip_brand(t)).strip()) and \
+                len(strip_brand(t).split()) < 2:
+            return 'q_one_word'
+        return 'q_ok'
+
+    def qd(row):
+        if not row['متاحة']:
+            return 'q_na'
+        d = str(row['وصف الميتا'] or '').strip()
+        if not d:
+            return 'q_na'
+        if is_placeholder(d):
+            return 'q_placeholder'
+        if not meaningful_text(d):
+            return 'q_symbols'
+        if d == str(row['عنوان الميتا'] or '').strip():
+            return 'q_same_as_title'
+        if d in dup_descs:
+            return 'q_duplicate'
+        return 'q_ok'
+
+    out['جودة العنوان'] = out.apply(qt, axis=1)
+    out['جودة الوصف'] = out.apply(qd, axis=1)
+
+    # عنوان رمزي أو قيمة قالب = مفقود فعلياً، لا «قصير جداً»
+    for col_q, col_s, col_len in [('جودة العنوان', 'حالة العنوان', 'طول العنوان'),
+                                  ('جودة الوصف', 'حالة الوصف', 'طول الوصف')]:
+        fatal = out[col_q].isin(QUALITY_FATAL)
+        out.loc[fatal, col_s] = 'missing'
+        out.loc[fatal, col_len] = 0
+    return out, brand
+
+
+
+# ==============================================================
+#  تدقيق الروابط (Slug) — الرابط عنصر سيو مستقل
+# ==============================================================
+CLONE_PATTERNS = [r'copy-of', r'copy_of', r'-copy\b', r'نسخة', r'نسخه',
+                  r'duplicate', r'\bتجربة\b', r'\btest\b']
+URL_MAX_PATH = 90
+
+URL_LABEL = {
+    'ar': {'u_ok': 'سليم', 'u_clone': 'منتج مستنسخ', 'u_generic': 'رقم أو رمز بلا كلمات',
+           'u_wrongname': 'يشير لمنتج آخر',
+           'u_underscore': 'شرطة سفلية بدل الواصلة', 'u_uppercase': 'حروف كبيرة',
+           'u_long': 'طويل جداً', 'u_repeat': 'كلمة مكررة داخل الرابط',
+           'u_wordy': 'كلمات كثيرة', 'u_malformed': 'رابط معطوب فيه عنوان موقع',
+           'u_na': '—'},
+    'en': {'u_ok': 'Sound', 'u_clone': 'Cloned product', 'u_generic': 'ID or code, no words',
+           'u_wrongname': 'Points to a different product',
+           'u_underscore': 'Underscores instead of hyphens', 'u_uppercase': 'Uppercase letters',
+           'u_long': 'Too long', 'u_repeat': 'Repeated word in slug',
+           'u_wordy': 'Too many words', 'u_malformed': 'Malformed: contains a URL',
+           'u_na': '—'},
+}
+URL_CREDIT = {'u_malformed': 0.5, 'u_ok': 1.0, 'u_underscore': 0.95, 'u_uppercase': 0.95, 'u_repeat': 0.95,
+              'u_wordy': 0.93, 'u_long': 0.90, 'u_generic': 0.80, 'u_wrongname': 0.65,
+              'u_clone': 0.70, 'u_na': 1.0}
+URL_MAX_WORDS = 9
+
+
+def slug_tokens(text):
+    """كلمات الرابط أو الاسم بعد التطبيع، مع تجاهل الحروف المفردة."""
+    raw = re.split(r'[\s\-_/|،,.:؛…]+', str(text or '').lower())
+    out = []
+    for t in raw:
+        t = re.sub(r'[^0-9a-z\u0600-\u06FF]', '', t)
+        if len(t) < 2:
+            continue
+        out.append(normalize_ar_token(t) if re.search(r'[\u0600-\u06FF]', t) else t)
+    return out
+
+
+def script_of(text):
+    ar = len(re.findall(r'[\u0600-\u06FF]', str(text or '')))
+    la = len(re.findall(r'[A-Za-z]', str(text or '')))
+    if ar and not la:
+        return 'ar'
+    if la and not ar:
+        return 'la'
+    if ar or la:
+        return 'ar' if ar >= la else 'la'
+    return ''
+
+
+def build_generic_vocab(names, threshold=0.22):
+    """الكلمات الشائعة في أسماء المتجر (بوكس، علبة، عود...) ليست مميِّزة."""
+    from collections import Counter
+    c = Counter()
+    n = 0
+    for nm in names:
+        toks = set(slug_tokens(nm))
+        if toks:
+            n += 1
+            c.update(toks)
+    if n < 5:
+        return set()
+    return {t for t, k in c.items() if k / n >= threshold}
+
+
+def slug_of(url):
+    path = unquote(urlparse(clean_url(url)).path)
+    segs = [x for x in path.split('/') if x]
+    if not segs:
+        return ''
+    # سلة تضع معرّف المنتج في المقطع الأخير (p123456) والاسم قبله
+    if re.fullmatch(r'p\d+', segs[-1]) and len(segs) >= 2:
+        return segs[-2]
+    return segs[-1]
+
+
+def analyze_url_quality(df, brand=''):
+    """يقيّم صياغة الرابط نفسه.
+
+    لا تُقارن كلمات الرابط باسم المنتج: الرابط قد يكون نقلاً صوتياً صحيحاً
+    (moroki-oud-luxury لمنتج «عود مروكي فاخر»)، والاسم العربي الكامل يجعل
+    الرابط طويلاً بلا فائدة. المعايير هنا تخص الرابط ذاته فقط.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    out['المسار'] = out['الرابط'].map(slug_of)
+    known = {url_key(u) for u in out['الرابط']}
+
+    # الكلمات الشائعة في أسماء منتجات هذا المتجر تحديداً
+    prod_names = out.loc[out['نوع الصفحة'] == T_PRODUCT, 'اسم المنتج المعروض'] \
+        if 'اسم المنتج المعروض' in out.columns else []
+    generic_vocab = build_generic_vocab(list(prod_names)) if len(prod_names) else set()
+    brand_tokens = set(slug_tokens(brand))
+
+    def grade(row):
+        if not row['متاحة']:
+            return 'u_na'
+        slug = str(row['المسار'] or '')
+        if not slug:
+            return 'u_na'
+        low = slug.lower()
+
+        # 1) نسخة مكررة من منتج آخر
+        if any(re.search(pat, low) for pat in CLONE_PATTERNS):
+            return 'u_clone'
+        mo = re.match(r'^(.*)-(\d{1,2})$', slug)
+        if mo:
+            parent = str(row['الرابط']).replace(slug, mo.group(1))
+            if url_key(parent) in known:
+                return 'u_clone'
+
+        # 1ب) عنوان موقع مدسوس داخل المسار (لصق خاطئ في حقل الرابط)
+        if re.search(r'https?[:;]|://|www\.|\.com|\.net|\.store\b', low):
+            return 'u_malformed'
+
+        # 2) رابط بلا كلمات وصفية
+        if re.fullmatch(r'[\d\W_]+', slug) or \
+                re.fullmatch(r'(product|item|page|post)[-_]?\d*', low):
+            return 'u_generic'
+
+        words = [w for w in re.split(r'[-_]+', slug) if w]
+
+        # 3) صياغة
+        if '_' in slug:
+            return 'u_underscore'
+        if re.search(r'[A-Z]', slug):
+            return 'u_uppercase'
+        if len(unquote(urlparse(clean_url(row['الرابط'])).path)) > URL_MAX_PATH:
+            return 'u_long'
+        norm = [normalize_ar_token(w.lower()) if re.search(r'[\u0600-\u06FF]', w)
+                else w.lower() for w in words]
+        if len(norm) != len(set(norm)) and len(norm) > 2:
+            return 'u_repeat'
+        if len(words) > URL_MAX_WORDS:
+            return 'u_wordy'
+
+        # 4) هل يشير الرابط لمنتج مختلف عن المعروض في الصفحة؟
+        # يُقارن الرابط بالاسم المعروض وبعنوان الميتا معاً: بعض المتاجر
+        # تختار رابطاً بكلمات البحث واسماً تجارياً مختلفاً، وهذا سليم.
+        name = (str(row.get('اسم منظم') or '').strip()
+                or str(row.get('اسم المنتج المعروض') or '').strip())
+        meta_t = str(row.get('عنوان الميتا') or '').strip()
+        if (name or meta_t) and row.get('نوع الصفحة') == T_PRODUCT:
+            s_tok = [t for t in slug_tokens(slug) if not t.isdigit()]
+            n_tok = (set(slug_tokens(name)) | set(slug_tokens(meta_t))) - brand_tokens
+            # تُقارن الكلمات فقط عند اتفاق الأبجدية: الرابط قد يكون نقلاً صوتياً
+            ref = name if name else meta_t
+            if s_tok and n_tok and script_of(slug) == script_of(ref):
+                distinctive = [t for t in s_tok
+                               if t not in generic_vocab and t not in brand_tokens]
+                if distinctive and not (set(distinctive) & n_tok):
+                    return 'u_wrongname'
+        return 'u_ok'
+
+    out['جودة الرابط'] = out.apply(grade, axis=1)
+    return out
+
+
+def detect_duplicate_content(df):
+    """مجموعات صفحات تتشارك نفس العنوان والوصف — محتوى مكرر فعلي."""
+    if df.empty:
+        return df, []
+    out = df.copy()
+    ok = out[out['متاحة'] == True]  # noqa: E712
+    groups = []
+    sub = ok[(ok['عنوان الميتا'].astype(str).str.strip() != '')]
+    for (t, d), grp in sub.groupby(['عنوان الميتا', 'وصف الميتا']):
+        if len(grp) > 1:
+            groups.append({'العنوان': t, 'عدد الصفحات': len(grp),
+                           'الروابط': list(grp['الرابط'])})
+    dup_urls = {u for g in groups for u in g['الروابط']}
+    out['محتوى مكرر'] = out['الرابط'].isin(dup_urls)
+    return out, groups
+
+
+# ==============================================================
+#  صيغ الصور
+# ==============================================================
+MODERN_FORMATS = ('webp', 'avif')
+
+
+def image_format(url):
+    path = urlparse(str(url or '')).path.lower()
+    mo = re.search(r'\.(jpe?g|png|webp|avif|gif|svg|bmp|tiff?)(?:$|\?)', path)
+    if mo:
+        ext = mo.group(1)
+        return 'jpg' if ext in ('jpg', 'jpeg') else ext
+    mo2 = re.search(r'(?:format|fm)=(\w+)', str(url or '').lower())
+    return mo2.group(1) if mo2 else '—'
+
+
+LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
+              'long': 0.4, 'missing': 0.0}
+
+
+def score_pages(df, images_df):
+    """تُحسب الدرجة بعد اكتمال تقييم الصور (لأن تكرار الـ Alt يحتاج نظرة شاملة)."""
+    if df.empty:
+        return df
+    per_page = {}
+    if images_df is not None and not images_df.empty:
+        for page, grp in images_df.groupby('رابط الصفحة'):
+            credit = grp['حالة النص البديل'].map(ALT_CREDIT).fillna(0).sum()
+            per_page[page] = {
+                'credit': credit, 'n': len(grp),
+                'missing': int((grp['حالة النص البديل'] == 'alt_missing').sum()),
+                'weak': int(grp['حالة النص البديل'].isin(ALT_WEAK_STATES).sum()),
+            }
+    out = df.copy()
+    scores, miss, weak = [], [], []
+    for _, r in out.iterrows():
+        if not r['متاحة']:
+            scores.append(None)
+            miss.append(0)
+            weak.append(0)
+            continue
+        s = 25 * LEN_WEIGHT.get(r['حالة العنوان'], 0) * \
+            QUALITY_CREDIT.get(r.get('جودة العنوان', 'q_na'), 1.0)
+        s += 25 * LEN_WEIGHT.get(r['حالة الوصف'], 0) * \
+            QUALITY_CREDIT.get(r.get('جودة الوصف', 'q_na'), 1.0)
+        info = per_page.get(r['الرابط'])
+        if not info or info['n'] == 0:
+            s += 25
+            miss.append(0)
+            weak.append(0)
+        else:
+            s += 25 * (info['credit'] / info['n'])
+            miss.append(info['missing'])
+            weak.append(info['weak'])
+        s += 25 if r['حالة المحتوى'] == 'good' else 0
+        s *= URL_CREDIT.get(r.get('جودة الرابط', 'u_na'), 1.0)
+        scores.append(max(0, min(100, round(s))))
+    out['درجة السيو'] = scores
+    out['صور بدون Alt'] = miss
+    out['صور Alt ضعيف'] = weak
+    return out
+
+
+# ==============================================================
+#  الزحف من الواجهة
+# ==============================================================
+PAGING_PATTERNS = ['?page={n}', '?p={n}', '/page/{n}', '?offset={o}']
+LISTING_ROOTS = ['products', 'latest-products', 'collections/all', 'shop', 'store',
+                 'blog', 'new-arrivals', 'best-selling', 'offers']
+
+
+def listing_product_links(html, base_url, page_url):
+    """روابط المنتجات من صفحة قائمة: من وسوم <a> ومن بيانات ItemList معاً."""
+    soup = make_soup(html)
+    netloc = urlparse(normalize_url(base_url)).netloc
+    out = set()
+    for a in soup.find_all('a', href=True):
+        full = clean_url(urljoin(page_url, a['href'].strip()))
+        if is_crawlable(full, netloc) and \
+                _detect_type_by_url(full, base_url) in (T_PRODUCT, T_BLOG):
+            out.add(full)
+    for node in iter_jsonld(soup):
+        for item in (node.get('itemListElement') or []):
+            if not isinstance(item, dict):
+                continue
+            tgt = None
+            if isinstance(item.get('item'), dict):
+                tgt = item['item'].get('url')
+            tgt = tgt or item.get('url')
+            if tgt:
+                full = clean_url(urljoin(page_url, str(tgt)))
+                if is_crawlable(full, netloc) and \
+                        _detect_type_by_url(full, base_url) in (T_PRODUCT, T_BLOG):
+                    out.add(full)
+    return out
+
+
+def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
+                               max_depth=MAX_PAGINATION_DEPTH, cat_products=None,
+                               listing_urls=None):
+    """يتابع ترقيم كل القوائم بكل الصيغ الشائعة.
+
+    القالب يقرر شكل الترقيم (page أو p أو /page/N)، وبعض القوالب تعرض
+    المنتجات بالتمرير فلا تستجيب لأي صيغة — وهذا يظهر في فحص الثقة.
+    """
+    base_url = normalize_url(base_url)
+    roots = list(dict.fromkeys(
+        list(category_urls) + list(listing_urls or []) +
+        [f"{base_url}/{r}" for r in LISTING_ROOTS]))
+    new_urls, fetched = [], 0
+
+    for idx, cat in enumerate(roots):
+        pattern = None
+        seen_here = set()
+        for page in range(2, max_depth + 1):
+            candidates = ([pattern] if pattern else PAGING_PATTERNS)
+            fresh = set()
+            for pat in candidates:
+                url = cat + pat.format(n=page, o=(page - 1) * 20)
+                res = safe_get(url, retries=0)
+                fetched += 1
+                if res is None or res.status_code != 200:
+                    continue
+                found = listing_product_links(res.text, base_url, cat)
+                f = found - seen_here
+                if f:
+                    fresh = f
+                    pattern = pat        # ثبّت الصيغة الناجحة لهذا القسم
+                    break
+            if not fresh:
+                break
+            seen_here |= fresh
+            if cat_products is not None:
+                cat_products.setdefault(cat, set()).update(
+                    {url_key(x) for x in fresh})
+            for u in fresh:
+                k = url_key(u)
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    new_urls.append(u)
+        if progress_cb:
+            progress_cb(idx + 1, len(roots), len(new_urls), fetched)
+    return new_urls
+
+
+def audit_urls(urls, base_url, source, workers, progress_bar=None):
+    pages, images = [], []
+    tasks = [(u, base_url, source) for u in urls]
+    total = max(len(tasks), 1)
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for res in ex.map(fetch_and_audit, tasks):
+            pages.append(res['page_data'])
+            images.extend(res['images_data'])
+            done += 1
+            if progress_bar:
+                progress_bar.progress(min(done / total, 1.0))
+    return pages, images
+
+
+# ==============================================================
+#  خريطة الموقع — مقارنة تشخيصية
+# ==============================================================
+
+# ==============================================================
+#  مصادر الاكتشاف المستقلة عن القالب
+#  مسارات تفرضها المنصة نفسها (سلة وزد) ولا يملك القالب تعطيلها.
+# ==============================================================
+SITEMAP_CANDIDATES = [
+    'sitemap.xml', 'sitemap_index.xml', 'sitemap-index.xml', 'sitemap/sitemap.xml',
+    'sitemap/index.xml', 'sitemaps/sitemap.xml', 'sitemap.xml.gz',
+    'product-sitemap.xml', 'sitemap-products.xml',
+]
+SITEMAP_NUMBERED = ['sitemap_products_{}.xml', 'sitemap_categories_{}.xml',
+                    'sitemap_pages_{}.xml', 'sitemap_blog_{}.xml',
+                    'sitemap-products-{}.xml']
+# مسارات قوائم تعمل في كل متاجر سلة وزد مهما كان القالب
+PLATFORM_LISTINGS = [
+    'products', 'latest-products', 'offers', 'categories', 'brands',
+    'collections/all', 'shop', 'blog', 'testimonials',
+]
+# صيغ الترقيم المستخدمة في المنصتين
+PAGE_PARAMS = ['?page={}', '?p={}', '/page/{}']
+
+
+
+# ==============================================================
+#  قارئ خرائط الموقع
+#  يعتمد ultimate-sitemap-parser (مفتوح المصدر، مجاني) لاكتشاف الخرائط
+#  المتداخلة والمضغوطة وتلك المعلنة في robots.txt، ويرجع لقارئنا الداخلي
+#  عند تعذّره حتى لا يتوقف الفحص.
+# ==============================================================
+try:
+    from usp.tree import sitemap_tree_for_homepage as _usp_tree
+    HAS_USP = True
+except Exception:
+    HAS_USP = False
+
+
+def sitemap_urls_via_usp(base_url, netloc):
+    """قائمة روابط الخريطة عبر المكتبة، أو None عند الفشل."""
+    if not HAS_USP:
+        return None
     try:
-        xml_clean = re.sub(r'\sxmlns(:\w+)?="[^"]+"', '', xml_text, count=1)
-        root = ET.fromstring(xml_clean)
-        for elem in root.iter():
-            tag = elem.tag.split('}')[-1].lower()
-            if tag == 'loc' and elem.text:
-                val = html.unescape(elem.text.strip())
-                if val: urls.append(val)
-        if urls: return urls
+        tree = _usp_tree(base_url)
+        out = set()
+        for page in tree.all_pages():
+            u = clean_url(page.url)
+            if u and urlparse(u).netloc.lower().replace('www.', '') == \
+                    netloc.lower().replace('www.', ''):
+                out.add(u)
+        return out if out else None
     except Exception:
-        pass
+        return None
 
-    pattern = re.compile(r'<loc>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</loc>', re.I | re.S)
-    for m in pattern.findall(xml_text):
-        val = html.unescape(m.strip())
-        if val: urls.append(val)
-    return urls
 
-def fetch_sitemap_urls(base_url):
-    base_clean = normalize_url(base_url)
-    target_netloc = normalize_domain(urlparse(base_clean).netloc)
-    found_urls = set()
-    visited_maps = set()
-    sub_maps_to_visit = []
-
-    candidates = [
-        f"{base_clean}/sitemap.xml",
-        f"{base_clean}/sitemap_index.xml",
-        f"{base_clean}/sitemap-1.xml",
-        f"{base_clean}/sitemap-2.xml",
-        f"{base_clean}/sitemap_products_1.xml",
-        f"{base_clean}/sitemap_categories_1.xml",
-        f"{base_clean}/sitemap_pages_1.xml",
-    ]
-
-    res_r = safe_get(f"{base_clean}/robots.txt", timeout=8, retries=1)
-    if res_r is not None and res_r.status_code == 200:
-        for line in res_r.text.splitlines():
+def discover_sitemaps_from_robots(base_url):
+    found = []
+    res = safe_get(f"{base_url}/robots.txt", timeout=10, retries=1)
+    if res is not None and res.status_code == 200:
+        for line in res.text.splitlines():
             if line.lower().strip().startswith('sitemap:'):
                 sm = line.split(':', 1)[1].strip()
-                if sm and sm not in candidates:
-                    candidates.insert(0, sm)
+                if sm:
+                    found.append(sm)
+    return found
 
-    def process_map_url(sm_url):
-        if sm_url in visited_maps or len(visited_maps) > 60: return
-        visited_maps.add(sm_url)
-        res = safe_get(sm_url, timeout=10, retries=1)
-        if res is None or res.status_code != 200: return
 
-        content = res.content
-        if sm_url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
-            try: content = gzip.decompress(content)
-            except Exception: pass
+LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
 
-        text = content.decode('utf-8', 'ignore')
-        locs = parse_xml_locs(text)
 
+def fetch_sitemap_locs(url, quick=False):
+    """يستخرج روابط خريطة الموقع بأقصى تسامح ممكن.
+
+    بعض المنصات تضيف ورقة أنماط أو مسافة قبل إعلان XML أو ترميزاً غير
+    معياري، فيفشل المحلل الصارم. عند فشله نستخرج وسوم loc بالتعبير
+    النمطي — الخريطة نص لا بنية معقدة.
+    """
+    res = safe_get(url, timeout=(8 if quick else 30), retries=(0 if quick else 2))
+    if res is None or res.status_code != 200:
+        return None
+    content = res.content
+    if url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
+        try:
+            content = gzip.decompress(content)
+        except Exception:
+            pass
+    text = content.decode('utf-8', 'ignore').lstrip('\ufeff \t\r\n')
+    if '<loc' not in text.lower() and '<sitemapindex' not in text.lower() \
+            and '<urlset' not in text.lower():
+        return None                     # ليست خريطة أصلاً
+    locs = [m.strip() for m in LOC_RE.findall(text) if m.strip()]
+    if locs:
+        return locs
+    try:
+        root = ET.fromstring(text.encode('utf-8'))
+        return [el.text.strip() for el in root.iter()
+                if (el.tag.split('}')[-1] if '}' in el.tag else el.tag) == 'loc'
+                and el.text]
+    except Exception:
+        return None
+
+
+def collect_sitemap_urls(base_url, max_depth=3):
+    """يعيد (الروابط، تقرير القراءة). القراءة الناقصة تُعلَن صراحةً حتى
+    لا تُتَّهم خريطة المتجر بالنقص بسبب فشل اتصال عندنا."""
+    base_url = normalize_url(base_url)
+    base_netloc = urlparse(base_url).netloc
+    urls, visited = set(), set()
+    report = {'files_ok': 0, 'files_failed': 0, 'failed_urls': []}
+
+    def walk(sm_url, depth, declared=True):
+        """declared=False للمسارات المُخمّنة: غيابها طبيعي ولا يُعدّ فشلاً."""
+        if depth > max_depth or sm_url in visited:
+            return
+        visited.add(sm_url)
+        # إعادة المحاولة للملفات المُعلَنة فقط: غياب المسار المُخمّن طبيعي
+        tries = 3 if declared else 1
+        locs = None
+        for attempt in range(tries):
+            locs = fetch_sitemap_locs(sm_url, quick=not declared)
+            if locs is not None:
+                break
+            if attempt + 1 < tries:
+                time.sleep(1.5 * (attempt + 1))
+        if locs is None:
+            if declared:
+                report['files_failed'] += 1
+                report['failed_urls'].append(sm_url)
+            return False
+        report['files_ok'] += 1
         for loc in locs:
-            clean_loc = loc.split('?')[0].strip()
-            loc_netloc = normalize_domain(urlparse(clean_loc).netloc)
-
-            # إذا كان الرابط خريطة فرعية تندرج تحت الفهرس
-            if clean_loc.lower().endswith(('.xml', '.xml.gz')) or 'sitemap' in clean_loc.lower():
-                if clean_loc not in visited_maps:
-                    sub_maps_to_visit.append(clean_loc)
+            low = loc.lower()
+            if low.endswith('.xml') or low.endswith('.xml.gz'):
+                walk(loc, depth + 1, declared=True)
             else:
-                if loc_netloc == target_netloc:
-                    found_urls.add(clean_url(loc))
+                u = clean_url(loc)
+                if u and urlparse(u).netloc == base_netloc:
+                    urls.add(u)
+        return True
 
-    for c in candidates:
-        process_map_url(c)
+    # المحاولة الأولى بالمكتبة: تغطي الخرائط المتداخلة والمضغوطة وgz
+    via_lib = sitemap_urls_via_usp(base_url, base_netloc)
+    if via_lib:
+        urls.update(via_lib)
+        report['files_ok'] += 1
 
-    # قراءة كافة الخرائط الفرعية المكتشفة تلقائياً (مثل sitemap-1 و sitemap-2)
-    while sub_maps_to_visit:
-        next_map = sub_maps_to_visit.pop(0)
-        process_map_url(next_map)
+    for c in discover_sitemaps_from_robots(base_url):
+        walk(c, 0, declared=True)
+    for c in [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
+              f"{base_url}/sitemap-index.xml", f"{base_url}/sitemap.xml.gz",
+              f"{base_url}/sitemap/sitemap.xml", f"{base_url}/sitemaps.xml",
+              f"{base_url}/sitemap_products_1.xml", f"{base_url}/sitemap_pages_1.xml",
+              f"{base_url}/wp-sitemap.xml"]:
+        walk(c, 0, declared=False)
+    report['partial'] = report['files_failed'] > 0
+    return urls, report
 
-    # محاولة استكشافية ذكية وهادئة فقط إن كانت الخرائط قليلة جداً
-    if len(found_urls) < 10:
-        for num in range(2, 6):
-            probe_url = f"{base_clean}/sitemap-{num}.xml"
-            if probe_url not in visited_maps:
-                res_probe = safe_get(probe_url, timeout=4, retries=0)
-                if res_probe is not None and res_probe.status_code == 200 and '<loc' in res_probe.text.lower():
-                    process_map_url(probe_url)
 
-    return found_urls
+def dedupe_pages(df):
+    if df.empty:
+        return df
+    df = df.copy()
+    src_col = '_raw_url' if '_raw_url' in df.columns else 'الرابط'
+    df['_key'] = df[src_col].map(url_key)
+    df['_canon'] = df.apply(
+        lambda r: url_key(r['الرابط الكانوني'])
+        if str(r.get('الرابط الكانوني') or '').strip() else r['_key'], axis=1)
+    df = df.drop_duplicates(subset=['_key'])
+    avail = df[df['متاحة'] == True]  # noqa: E712
+    dup_keys = set(avail[avail.duplicated(subset=['_canon'], keep='first')]['_key'])
+    # قالب معطوب قد يجعل كل الصفحات تشير لكانونيكال واحد؛ طيّها يمحو المتجر.
+    # في هذه الحالة نُبقي الصفحات ونرفع العلم ليظهر كخلل سيو في التقرير.
+    canon_broken = len(avail) >= 10 and len(dup_keys) > len(avail) * 0.5
+    if canon_broken:
+        df.attrs['canon_broken'] = int(len(dup_keys))
+    else:
+        df = df[~df['_key'].isin(dup_keys)]
+    out = df.drop(columns=['_key', '_canon']).reset_index(drop=True)
+    if canon_broken:
+        out.attrs['canon_broken'] = int(len(dup_keys))
+    return out
 
-def get_unique_images(images_df):
-    if images_df is None or images_df.empty:
-        return images_df
-    counts = images_df.groupby('رابط الصورة')['رابط الصفحة'].nunique()
-    u_df = images_df.drop_duplicates(subset=['رابط الصورة']).copy()
-    u_df['عدد الصفحات'] = u_df['رابط الصورة'].map(counts)
-    return u_df.reset_index(drop=True)
 
-# حصد ترقيم الأقسام والمنتجات
-def harvest_category_pagination(base_url, listing_urls, seen_keys, max_pages, workers=5):
-    base_netloc = urlparse(normalize_url(base_url)).netloc
-    new_links = []
+def compute_summary(df, coverage=None, images_df=None):
+    ok = df[df['متاحة'] == True]  # noqa: E712
+    alt_counts = {}
+    uimg = unique_images(images_df)
+    if uimg is not None and not uimg.empty:
+        alt_counts = uimg['حالة النص البديل'].value_counts().to_dict()
+    s = {
+        'total_pages': len(df),
+        'score': round(ok['درجة السيو'].mean(), 1) if not ok.empty else 0.0,
+        'products': int((df['نوع الصفحة'] == T_PRODUCT).sum()),
+        'categories': int((df['نوع الصفحة'] == T_CATEGORY).sum()),
+        'info_pages': int((df['نوع الصفحة'] == T_INFO).sum()),
+        'blog_pages': int((df['نوع الصفحة'] == T_BLOG).sum()),
+        'archive_pages': int((df['نوع الصفحة'] == T_ARCHIVE).sum()),
+        'unclassified': int((df['نوع الصفحة'] == T_UNKNOWN).sum()),
+        'broken_pages': int(((df['متاحة'] == False) &  # noqa: E712
+                             (~df['كود الاستجابة'].astype(str)
+                              .str.contains('فشل اتصال|خطأ فني|محذوف',
+                                            na=False))).sum()),
+        'unreachable_pages': int(((df['متاحة'] == False) &  # noqa: E712
+                                  (df['كود الاستجابة'].astype(str)
+                                   .str.contains('فشل اتصال|خطأ فني', na=False))).sum()),
+        'bad_titles': int((~ok['حالة العنوان'].isin(['optimal'])).sum()),
+        'critical_titles': int(ok['حالة العنوان'].isin(
+            ['missing', 'very_short', 'long']).sum()),
+        'bad_descs': int((~ok['حالة الوصف'].isin(['optimal'])).sum()),
+        'critical_descs': int(ok['حالة الوصف'].isin(
+            ['missing', 'very_short', 'long']).sum()),
+        'total_images': int(len(uimg)) if uimg is not None and not uimg.empty else 0,
+        'image_slots': int(ok['إجمالي الصور'].sum()),
+        'missing_alts': int(alt_counts.get('alt_missing', 0)),
+        'weak_alts': int(sum(alt_counts.get(k, 0) for k in ALT_WEAK_STATES)),
+        'good_alts': int(alt_counts.get('alt_ok', 0)),
+        'dup_alts': int(alt_counts.get('alt_duplicate', 0)),
+        'title_symbols': int(ok['جودة العنوان'].isin(QUALITY_FATAL).sum())
+        if 'جودة العنوان' in ok.columns else 0,
+        'title_brand_only': int((ok['جودة العنوان'] == 'q_brand_only').sum())
+        if 'جودة العنوان' in ok.columns else 0,
+        'title_dup': int((ok['جودة العنوان'] == 'q_duplicate').sum())
+        if 'جودة العنوان' in ok.columns else 0,
+        'desc_dup': int((ok['جودة الوصف'] == 'q_duplicate').sum())
+        if 'جودة الوصف' in ok.columns else 0,
+        'desc_same': int((ok['جودة الوصف'] == 'q_same_as_title').sum())
+        if 'جودة الوصف' in ok.columns else 0,
+        'url_clone': int((ok['جودة الرابط'] == 'u_clone').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_wrongname': int((ok['جودة الرابط'] == 'u_wrongname').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_style': int(ok['جودة الرابط'].isin(
+            ['u_underscore', 'u_uppercase', 'u_long', 'u_repeat', 'u_wordy']).sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_malformed': int((ok['جودة الرابط'] == 'u_malformed').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_generic': int((ok['جودة الرابط'] == 'u_generic').sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'url_bad': int((~ok['جودة الرابط'].isin(['u_ok', 'u_na'])).sum())
+        if 'جودة الرابط' in ok.columns else 0,
+        'dup_content': int(ok['محتوى مكرر'].sum()) if 'محتوى مكرر' in ok.columns else 0,
+        'canon_broken': int(df.attrs.get('canon_broken', 0)),
+        'canon_missing': int((ok['حالة الكانونيكال'] == 'canon_missing').sum()),
+        'canon_diff': int((ok['حالة الكانونيكال'] == 'canon_diff').sum()),
+        'thin_pages': int((ok['حالة المحتوى'] == 'thin').sum()),
+        'noindex_pages': int((~ok['قابلة للأرشفة'].fillna(True)).sum())
+        if 'قابلة للأرشفة' in ok.columns else 0,
+        'h1_mismatch': int((ok['مطابقة العنوان مع H1'] == 'match_diff').sum())
+        if 'مطابقة العنوان مع H1' in ok.columns else 0,
+        'deleted_pages': int((df['كود الاستجابة'].astype(str)
+                              .str.contains('محذوف', na=False)).sum()),
+        'coverage_enabled': bool(coverage),
+    }
+    if uimg is not None and not uimg.empty and 'صيغة الصورة' in uimg.columns:
+        fmts = uimg['صيغة الصورة'].value_counts().to_dict()
+        modern = sum(v for k, v in fmts.items() if k in MODERN_FORMATS)
+        s['img_formats'] = fmts
+        s['img_modern'] = int(modern)
+        s['img_legacy'] = int(len(uimg) - modern)
+        s['img_modern_pct'] = round(modern / len(uimg) * 100, 1)
+    if coverage:
+        s.update({
+            'visible_products': coverage.get('products_live', 0),
+            'sitemap_products': coverage.get('sitemap_total', 0),
+            'sitemap_live': coverage.get('sitemap_live', 0),
+            'not_indexed_count': coverage.get('products_unlisted', 0),
+            'dead_count': coverage.get('sitemap_dead', 0),
+            'hidden_count': len(coverage.get('orphan_pages', [])),
+            'scroll_only_count': len(coverage.get('scroll_only_products', [])),
+            'unlisted_count': len(coverage.get('unlisted_pages', [])),
+            'orphan_by_type': coverage.get('orphan_by_type', {}),
+            'indexed_pct': coverage.get('indexed_pct', 100.0),
+        })
+    return s
 
-    def probe_page(task):
-        cat_url, page_num = task
-        sep = '&' if '?' in cat_url else '?'
-        paged_url = f"{cat_url}{sep}page={page_num}"
-        res = safe_get(paged_url, timeout=7, retries=0)
-        if res is None or res.status_code != 200:
-            return []
-        soup = make_soup(res.text)
-        return list(extract_page_links(soup, paged_url, base_netloc))
 
-    for cat_url in list(listing_urls)[:20]:
-        page_idx = 2
-        while page_idx <= 20:
-            if len(seen_keys) + len(new_links) >= max_pages: break
-            tasks = [(cat_url, p) for p in range(page_idx, min(page_idx + workers, 21))]
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                batch_results = list(ex.map(probe_page, tasks))
+def localize_df(df, lang):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if '_raw_url' in out.columns:
+        out = out.drop(columns=['_raw_url'])
+    if 'نوع الصفحة' in out.columns:
+        out['نوع الصفحة'] = out['نوع الصفحة'].map(lambda v: PAGE_TYPE_LABEL[lang].get(v, v))
+    for col in ['حالة العنوان', 'حالة الوصف', 'حالة المحتوى', 'حالة النص البديل',
+                'حالة الكانونيكال', 'مطابقة العنوان مع H1']:
+        if col in out.columns:
+            out[col] = out[col].map(lambda v: STATUS_LABEL[lang].get(v, v))
+    for col in ['جودة العنوان', 'جودة الوصف']:
+        if col in out.columns:
+            out[col] = out[col].map(lambda v: QUALITY_LABEL[lang].get(v, v))
+    if 'جودة الرابط' in out.columns:
+        out['جودة الرابط'] = out['جودة الرابط'].map(lambda v: URL_LABEL[lang].get(v, v))
+    if 'النص البديل الحالي (Alt)' in out.columns:
+        empty = STATUS_LABEL[lang]['alt_empty']
+        out['النص البديل الحالي (Alt)'] = out['النص البديل الحالي (Alt)'].map(
+            lambda v: v if str(v).strip() else empty)
+    if lang == 'en':
+        out = out.rename(columns={k: v for k, v in COL_EN.items() if k in out.columns})
+    return out
 
-            fresh_count = 0
-            for link_list in batch_results:
-                for link in link_list:
-                    k = url_key(link)
-                    if k not in seen_keys:
-                        seen_keys.add(k)
-                        new_links.append(link)
-                        fresh_count += 1
-            if fresh_count == 0: break
-            page_idx += workers
 
-    return new_links
 
-def retry_failed_pages(pages_result, images_result, target, linked_keys,
-                       progress_cb=None, delay=1.2, limit=300):
-    idxs = [i for i, p in enumerate(pages_result)
-            if not p['متاحة'] and p['كود الاستجابة'] in RETRYABLE_CODES][:limit]
-    if not idxs: return
-    time.sleep(2)
-    for n, i in enumerate(idxs, 1):
-        old = pages_result[i]
-        res = audit_single_page((old['الرابط'], target, old['مصدر الاكتشاف']), timeout=15)
-        pages_result[i] = res['page_data']
-        images_result.extend(res['images_data'])
-        for link in res['links']:
-            linked_keys.add(url_key(link))
-        if progress_cb:
-            pct = 0.94 + 0.04 * (n / len(idxs))
-            progress_cb(pct, f"إعادة فحص هادئة للصفحات المتعثرة: {n}/{len(idxs)} ({int(pct * 100)}%)")
-        time.sleep(delay)
+
 
 # ==============================================================
-#  محرك الفحص الشامل (Run Full Audit)
+#  التحقق بالبيانات المهيكلة (JSON-LD) وعدّادات المتجر
+#
+#  مصدر يقين لا تخمين: هذه البيانات يكتبها المتجر من قاعدة بياناته
+#  لمحركات البحث. مقارنتها بما استنتجه الزاحف من الشكل تكشف النقص.
 # ==============================================================
-CONTENT_TYPES = {T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO}
+def iter_jsonld(soup):
+    for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
+        try:
+            data = json.loads(tag.string or '{}')
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                stack.extend(node)
+            elif isinstance(node, dict):
+                yield node
+                for v in node.values():
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
 
-def run_full_audit(target_url, max_pages=1500, workers=6, progress_cb=None):
-    target = normalize_url(target_url)
-    if progress_cb: progress_cb(0.05, "جلب وفحص خرائط الموقع بالكامل... (5%)")
 
-    sitemap_urls = fetch_sitemap_urls(target)
+def node_types(node):
+    t = node.get('@type')
+    return {str(x) for x in (t if isinstance(t, list) else [t]) if x}
 
-    discovered_seeds = set()
-    for seed in [f"{target}/products", f"{target}/latest-products", f"{target}/categories"]:
-        res_seed = safe_get(seed, timeout=5, retries=0)
-        if res_seed is not None and res_seed.status_code == 200:
-            discovered_seeds.add(seed)
 
-    queue = list(dict.fromkeys([target] + list(sitemap_urls) + list(discovered_seeds)))
-    seen = {url_key(u) for u in queue}
+def extract_product_facts(soup):
+    """اسم المنتج وصوره كما يعلنها المتجر لمحركات البحث."""
+    facts = {'name': '', 'images': [], 'sku': '', 'offers': False}
+    for node in iter_jsonld(soup):
+        if 'Product' not in node_types(node):
+            continue
+        nm = node.get('name')
+        if isinstance(nm, str) and nm.strip() and not facts['name']:
+            facts['name'] = re.sub(r'\s+', ' ', nm).strip()
+        img = node.get('image')
+        imgs = img if isinstance(img, list) else ([img] if img else [])
+        for it in imgs:
+            if isinstance(it, dict):
+                it = it.get('url') or it.get('contentUrl')
+            if isinstance(it, str) and it.strip():
+                facts['images'].append(it.strip())
+        if node.get('sku') and not facts['sku']:
+            facts['sku'] = str(node['sku'])
+        if node.get('offers'):
+            facts['offers'] = True
+        break
+    facts['images'] = list(dict.fromkeys(facts['images']))
+    return facts
 
-    pages_result, images_result = [], []
-    internally_linked_keys = set()
-    category_urls = set()
-    platform, done_count = 'unknown', 0
 
-    # الجولة الأولى: الفحص الموزع الذكي
-    while queue and len(pages_result) < max_pages:
-        batch = queue[:workers * 3]
-        queue = queue[workers * 3:]
-        tasks = [(u, target, 'خريطة الموقع' if u in sitemap_urls else 'رابط داخلي') for u in batch]
+# صيغ إعلان عدد المنتجات في صفحات الأقسام
+COUNT_PATTERNS = [
+    r'عدد\s*المنتجات\s*[:：]?\s*([\d,]+)',
+    r'([\d,]+)\s*منتج(?:اً|ا)?\b',
+    r'من\s*أصل\s*([\d,]+)',
+    r'\b([\d,]+)\s*products?\b',
+    r'showing\s*\d+\s*(?:-|to)\s*\d+\s*of\s*([\d,]+)',
+]
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(audit_single_page, tasks))
 
-        for res in results:
-            p_data = res['page_data']
-            pages_result.append(p_data)
-            images_result.extend(res['images_data'])
+def extract_declared_count(soup, text=None):
+    """الرقم الذي يعلنه المتجر نفسه لعدد منتجات القسم."""
+    best = None
+    for node in iter_jsonld(soup):
+        if node_types(node) & {'ItemList', 'CollectionPage'}:
+            n = node.get('numberOfItems')
+            if isinstance(n, (int, float)) and n > 0:
+                return int(n)
+    body = text if text is not None else soup.get_text(' ', strip=True)
+    body = body[:4000]
+    for pat in COUNT_PATTERNS:
+        for mo in re.finditer(pat, body, re.I):
+            try:
+                v = int(mo.group(1).replace(',', ''))
+            except Exception:
+                continue
+            if 0 < v < 100000:
+                best = v if best is None else max(best, v)
+    return best
 
-            if res.get('html') and platform == 'unknown':
-                platform = detect_platform(res['html'], url=target)
 
-            if p_data['نوع الصفحة'] == T_CATEGORY and p_data['متاحة']:
-                category_urls.add(p_data['الرابط'])
+def build_structured_report(df, declared_counts, cat_products=None):
+    """يقارن ما يعلنه المتجر بما رصده الزاحف — قسماً بقسم.
 
-            for link in res['links']:
-                k = url_key(link)
-                internally_linked_keys.add(k)
-                if k not in seen and len(seen) < max_pages:
-                    seen.add(k)
-                    queue.append(link)
+    لا تُجمع أعداد الأقسام ولا يؤخذ أكبرها: المنتج قد ينتمي لأكثر من قسم،
+    فالمقارنة الصحيحة هي بين عدّاد كل قسم وعدد منتجاته المرصودة فيه.
+    """
+    ok = df[df['متاحة'] == True]  # noqa: E712
+    prod = ok[ok['نوع الصفحة'] == T_PRODUCT]
+    n_found = len(prod)
+    # توحيد المفاتيح: قد يأتي رابط القسم مشفّراً من الزحف ومفكوكاً من الجدول
+    cat_products = {url_key(k): v for k, v in (cat_products or {}).items()}
 
-            done_count += 1
-            if progress_cb:
-                est_total = min(max_pages, max(done_count + len(queue), 1))
-                pct = min(0.92, 0.05 + 0.87 * (done_count / est_total))
-                progress_cb(pct, f"جارٍ الفحص: {done_count} صفحة ({int(pct * 100)}%)")
+    def as_int(v):
+        try:
+            if v is not None and pd.notna(v) and int(v) > 0:
+                return int(v)
+        except (TypeError, ValueError):
+            pass
+        return None
 
-    # الجولة الثانية: متابعة ترقيم الأقسام
-    if len(pages_result) < max_pages:
-        if progress_cb: progress_cb(0.93, "متابعة صفحات التصنيفات والترقيم... (93%)")
-        harvest_seeds = list(category_urls) + [f"{target}/products", f"{target}/latest-products"]
-        extra_products = harvest_category_pagination(target, harvest_seeds, seen, max_pages, workers=workers)
+    cats, short = [], []
+    for url, raw in (declared_counts or {}).items():
+        dec = as_int(raw)
+        if dec is None:
+            continue
+        found = len(cat_products.get(url_key(url), set()))
+        row = {'القسم': unquote(url), 'عدد معلن': dec, 'مرصود': found,
+               'ناقص': max(dec - found, 0)}
+        cats.append(row)
+        if found < dec:
+            short.append(row)
 
-        if extra_products:
-            extra_tasks = [(u, target, 'ترقيم وتمرير') for u in extra_products[:max_pages - len(pages_result)]]
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                extra_results = list(ex.map(audit_single_page, extra_tasks))
-            for res in extra_results:
-                pages_result.append(res['page_data'])
-                images_result.extend(res['images_data'])
+    total_missing = sum(r['ناقص'] for r in short)
+    checked = len(cats)
+    matched = checked - len(short)
 
-    # الجولة الثالثة: إعادة هادئة للصفحات المتعثرة
-    retry_failed_pages(pages_result, images_result, target, internally_linked_keys, progress_cb)
+    name_gap, img_gap, no_jsonld = [], [], 0
+    for _, r in prod.iterrows():
+        j_name = str(r.get('اسم منظم') or '').strip()
+        if not j_name:
+            no_jsonld += 1
+            continue
+        shown = str(r.get('اسم المنتج المعروض') or '').strip()
+        if shown and slug_tokens(j_name) and \
+                not (set(slug_tokens(j_name)) & set(slug_tokens(shown))):
+            name_gap.append({'الرابط': r['الرابط'], 'الاسم المعلن': j_name,
+                             'الاسم المعروض': shown})
+        dec_i = as_int(r.get('صور معلنة')) or 0
+        seen_i = as_int(r.get('إجمالي الصور')) or 0
+        if dec_i and seen_i < dec_i:
+            img_gap.append({'الرابط': r['الرابط'], 'صور معلنة': dec_i,
+                            'صور مرصودة': seen_i})
 
-    full_df = pd.DataFrame(pages_result).drop_duplicates(subset=['الرابط']).reset_index(drop=True)
-    full_df['_key'] = full_df['الرابط'].map(url_key)
-    full_df['_canon_key'] = full_df['الرابط الكانوني'].map(url_key)
-    full_df = full_df.drop_duplicates(subset=['_key']).reset_index(drop=True)
+    return {
+        'found_products': n_found,
+        'categories_checked': checked,
+        'categories_matched': matched,
+        'categories_short': short,
+        'category_rows': cats,
+        'missing_products': total_missing,
+        'coverage_pct': round(matched / checked * 100, 1) if checked else None,
+        'name_mismatch': name_gap,
+        'image_gap': img_gap,
+        'no_jsonld': no_jsonld,
+        'jsonld_pages': len(prod) - no_jsonld,
+    }
 
-    # إنشاء مجموعة مفاتيح الخريطة
+
+# ==============================================================
+#  الفحص الذاتي — الأداة تحكم على موثوقية نتائجها قبل العميل
+# ==============================================================
+CHECK_FAIL, CHECK_WARN, CHECK_PASS = 'fail', 'warn', 'pass'
+
+
+def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
+                    structured=None):
+    """يفحص نتائج الفحص نفسها بحثاً عن علامات عدم الموثوقية.
+
+    الهدف ليس إثبات صحة الأرقام — بل رصد الحالات التي تشير إلى أن الزاحف
+    لم يرَ المتجر كما يراه الزائر، قبل أن يصل التقرير إلى عميل.
+    """
+    checks = []
+
+    def add(level, title, msg, action=""):
+        checks.append({'level': level, 'title': title, 'msg': msg, 'action': action})
+
+    ok = df[df['متاحة'] == True] if not df.empty else df  # noqa: E712
+    n_ok = len(ok)
+    uimg = unique_images(images_df)
+    n_img = 0 if uimg is None or uimg.empty else len(uimg)
+
+    # 1) المنصة
+    if platform in SUPPORTED_PLATFORMS:
+        add(CHECK_PASS, "منصة المتجر",
+            f"تم التعرف على المنصة: {PLATFORM_LABEL[platform]}.")
+    else:
+        known = PLATFORM_LABEL.get(platform, 'غير معروفة')
+        add(CHECK_WARN, "منصة المتجر",
+            f"المنصة ({known}) خارج المنصات التي عُوِّرت عليها الأداة "
+            "(سلة وزد وشوبيفاي). الفحوص التالية هي ما يحدد موثوقية النتائج.",
+            "راجع باقي الفحوص وعيّنة التحقق اليدوي قبل الإرسال.")
+
+    # 2) حجم الزحف
+    if n_ok == 0:
+        add(CHECK_FAIL, "حجم الزحف", "لم تُفحص أي صفحة بنجاح.",
+            "تحقق من أن الرابط صحيح وأن المتجر لا يحجب الزحف.")
+    elif n_ok < 5:
+        add(CHECK_FAIL, "حجم الزحف",
+            f"{n_ok} صفحة فقط — رقم صغير جداً لمتجر إلكتروني.",
+            "على الأرجح القائمة مبنية بـ JavaScript فلم يجد الزاحف روابط. "
+            "هذا المتجر خارج نطاق الأداة.")
+    else:
+        add(CHECK_PASS, "حجم الزحف", f"{n_ok} صفحة مفحوصة بنجاح.")
+
+    # 3) وجود منتجات
+    n_prod = summary.get('products', 0)
+    if n_ok >= 2 and n_prod == 0:
+        no_map = summary.get('sitemap_products', 0) == 0
+        why = ("المتجر يعرض منتجاته بـ JavaScript ولا توجد خريطة موقع، فلا مصدر "
+               "لقائمة المنتجات." if no_map else
+               "بنية روابط هذا المتجر غير معتادة.")
+        add(CHECK_FAIL, "اكتشاف المنتجات",
+            f"لم يُعثر على أي صفحة منتج. {why}",
+            "افتح الصفحة الرئيسية واضغط بزر الفأرة الأيمن ثم «عرض المصدر»: إن لم "
+            "تجد روابط المنتجات في الكود فالمتجر خارج نطاق الأداة حالياً. "
+            "الحل: تفعيل خريطة الموقع في إعدادات المتجر.")
+    elif n_prod:
+        add(CHECK_PASS, "اكتشاف المنتجات", f"{n_prod} صفحة منتج.")
+
+    # 4) نسبة غير المصنفة
+    if n_ok:
+        ratio = summary.get('unclassified', 0) / n_ok * 100
+        if ratio > 25:
+            add(CHECK_FAIL, "دقة التصنيف",
+                f"{round(ratio, 1)}% من الصفحات لم تُصنّف آلياً.",
+                "قواعد التصنيف لا تناسب بنية هذا المتجر. راجع تبويب الصفحات.")
+        elif ratio > 10:
+            add(CHECK_WARN, "دقة التصنيف",
+                f"{round(ratio, 1)}% من الصفحات غير مصنّفة.",
+                "راجعها في تبويب الصفحات قبل الإرسال.")
+        else:
+            add(CHECK_PASS, "دقة التصنيف",
+                f"{round(ratio, 1)}% فقط غير مصنّفة.")
+
+    # 5) رصد الصور على صفحات المنتجات (كاشف JavaScript الأهم)
+    prod_pages = ok[ok['نوع الصفحة'] == T_PRODUCT] if n_ok else ok
+    if len(prod_pages) >= 3:
+        with_imgs = int((prod_pages['إجمالي الصور'] > 0).sum())
+        pct = with_imgs / len(prod_pages) * 100
+        if pct == 0:
+            add(CHECK_FAIL, "رصد صور المنتجات",
+                "لم تُرصد أي صورة على صفحات المنتجات.",
+                "معرض الصور مبني بـ JavaScript. أرقام الصور في التقرير غير صحيحة.")
+        elif pct < 60:
+            add(CHECK_WARN, "رصد صور المنتجات",
+                f"{round(pct, 1)}% فقط من صفحات المنتجات تحتوي صوراً مرصودة.",
+                "افتح صفحة منتج وقارن عدد الصور الفعلي بالمسجّل.")
+        else:
+            add(CHECK_PASS, "رصد صور المنتجات",
+                f"{round(pct, 1)}% من صفحات المنتجات بها صور مرصودة "
+                f"({n_img} صورة فريدة).")
+
+    # 6) قراءة البيانات الوصفية
+    if n_ok:
+        no_title = int((ok['طول العنوان'] == 0).sum())
+        if no_title == n_ok:
+            add(CHECK_FAIL, "قراءة العناوين",
+                "كل الصفحات بلا عنوان — مؤشر على فشل في قراءة الصفحات.",
+                "لا ترسل التقرير. افتح أي صفحة وتحقق من وجود وسم title.")
+        elif no_title / n_ok > 0.5:
+            add(CHECK_WARN, "قراءة العناوين",
+                f"{no_title} صفحة بلا عنوان من أصل {n_ok}.",
+                "تحقق من عيّنة في تبويب التحقق اليدوي.")
+        else:
+            add(CHECK_PASS, "قراءة العناوين",
+                f"العناوين مقروءة في {n_ok - no_title} صفحة من {n_ok}.")
+
+    # 6ب) العناوين الرمزية وقيم القوالب
+    if n_ok and 'جودة العنوان' in ok.columns:
+        sym = int(ok['جودة العنوان'].isin(QUALITY_FATAL).sum())
+        if sym / n_ok > 0.6:
+            add(CHECK_WARN, "سلامة العناوين",
+                f"{sym} عنوان من أصل {n_ok} مجرد رموز أو قيمة قالب افتراضية — "
+                "نسبة مرتفعة تعني أن قالب المتجر لا يولّد عناوين ميتا.",
+                "تحقق من عيّنة يدوياً. هذه نتيجة حقيقية عن المتجر لا خلل في القراءة.")
+        elif sym:
+            add(CHECK_WARN, "سلامة العناوين",
+                f"{sym} عنوان مجرد رموز أو قيمة قالب (مثل [] أو {{{{ }}}}).",
+                "عُوملت كعناوين مفقودة في الأرقام.")
+        else:
+            add(CHECK_PASS, "سلامة العناوين", "لا توجد عناوين رمزية أو قيم قوالب.")
+
+    # 6ج) مطابقة الرابط لاسم المنتج
+    prod = ok[ok['نوع الصفحة'] == T_PRODUCT] if n_ok else ok
+    if len(prod) >= 5 and 'جودة الرابط' in prod.columns:
+        wrong = int((prod['جودة الرابط'] == 'u_wrongname').sum())
+        noname = int((prod['اسم المنتج المعروض'].astype(str).str.strip() == '').sum()) \
+            if 'اسم المنتج المعروض' in prod.columns else 0
+        if noname == len(prod):
+            add(CHECK_WARN, "قراءة اسم المنتج",
+                "تعذّرت قراءة اسم المنتج من أي صفحة، فلم تُفحص مطابقة الروابط.",
+                "قالب المتجر لا يستخدم وسم H1 للاسم.")
+        elif wrong / len(prod) > 0.5:
+            add(CHECK_WARN, "مطابقة الروابط",
+                f"{wrong} رابط من {len(prod)} يحمل اسماً مختلفاً — نسبة مرتفعة.",
+                "افتح عيّنة وتأكد أن الأمر واقع فعلي لا خطأ في قراءة الاسم.")
+        else:
+            add(CHECK_PASS, "مطابقة الروابط",
+                f"{len(prod) - wrong} رابط من {len(prod)} يطابق اسم منتجه.")
+
+    # 6د) مقارنة بما يعلنه المتجر نفسه — أقوى فحص تغطية
+    if structured:
+        checked = structured.get('categories_checked', 0)
+        matched = structured.get('categories_matched', 0)
+        short = structured.get('categories_short') or []
+        miss = structured.get('missing_products', 0)
+        if checked and short:
+            # مع وجود خريطة موقع تكون المنتجات مفحوصة أصلاً، فالنقص في الترابط
+            # لا في الفحص. بغياب الخريطة يكون النقص حقيقياً في التغطية.
+            has_map = summary.get('sitemap_products', 0) > 0
+            if has_map:
+                add(CHECK_WARN, "ترابط الأقسام الداخلي",
+                    f"{len(short)} قسماً من {checked} لا يعرض روابط كل منتجاته في "
+                    f"صفحته ({miss} منتجاً يظهر بالتمرير أو بزر «المزيد»).",
+                    "المنتجات نفسها مفحوصة بالكامل من خريطة الموقع — هذه ملاحظة عن "
+                    "الترابط الداخلي للمتجر لا نقص في الفحص.")
+            else:
+                add(CHECK_FAIL, "تغطية المنتجات",
+                    f"{len(short)} قسماً يعلن {miss} منتجاً أكثر مما وصل إليه الفحص، "
+                    "ولا توجد خريطة موقع للاعتماد عليها.",
+                    "المتجر يحمّل منتجاته بالتمرير وبلا خريطة موقع — أرقام "
+                    "المنتجات في هذا التقرير ناقصة. لا ترسله.")
+        elif checked:
+            add(CHECK_PASS, "ترابط الأقسام الداخلي",
+                f"{matched} قسماً من {checked} يعرض روابط كل منتجاته.")
+        else:
+            add(CHECK_PASS, "ترابط الأقسام الداخلي",
+                "لا توجد عدّادات في صفحات الأقسام للمقارنة بها.")
+
+        n_prod = structured.get('found_products', 0)
+        gaps = structured.get('image_gap') or []
+        if gaps:
+            lvl = CHECK_FAIL if len(gaps) / max(n_prod, 1) > 0.5 else CHECK_WARN
+            add(lvl, "مطابقة عدد الصور",
+                f"{len(gaps)} صفحة منتج تعلن صوراً أكثر مما رصده الزاحف.",
+                "معرض الصور يُحمَّل بـ JavaScript جزئياً. أرقام الصور أقل من الواقع.")
+        elif n_prod:
+            add(CHECK_PASS, "مطابقة عدد الصور",
+                "عدد الصور المرصود يطابق ما يعلنه المتجر.")
+
+        nm = structured.get('name_mismatch') or []
+        if nm:
+            add(CHECK_WARN, "مطابقة أسماء المنتجات",
+                f"{len(nm)} منتجاً اسمه المعلن لمحركات البحث يختلف عن المعروض "
+                "في الصفحة.",
+                "راجعها في تبويب «البيانات المعلنة».")
+
+        nj = structured.get('no_jsonld', 0)
+        if n_prod and nj == n_prod:
+            add(CHECK_WARN, "البيانات المهيكلة",
+                "لا توجد بيانات منتجات مهيكلة في أي صفحة.",
+                "هذا بحد ذاته نقص سيو في المتجر، ويحرم الأداة من مصدر تحقق.")
+        elif n_prod:
+            add(CHECK_PASS, "البيانات المهيكلة",
+                f"{structured.get('jsonld_pages', 0)} صفحة منتج تحمل بيانات مهيكلة.")
+
+    # 6هـ) تعذّر الاتصال — مؤشر على ضغط الفحص لا على عطل في المتجر
+    unreach = summary.get('unreachable_pages', 0)
+    if unreach:
+        total_pages = max(len(df), 1)
+        lvl = CHECK_WARN if unreach / total_pages < 0.15 else CHECK_FAIL
+        add(lvl, "استقرار الاتصال",
+            f"{unreach} صفحة تعذّر الاتصال بها رغم إعادة المحاولة.",
+            "قد يحدّ المتجر من سرعة الزحف. خفّض «المسارات المتوازية» إلى 2 "
+            "وأعد الفحص للحصول على تغطية كاملة.")
+
+    # 6ح) صفحات تمنع الأرشفة
+    if summary.get('noindex_pages'):
+        n_all = max(len(df), 1)
+        lvl = CHECK_FAIL if summary['noindex_pages'] / n_all > 0.3 else CHECK_WARN
+        add(lvl, "منع الأرشفة",
+            f"{summary['noindex_pages']} صفحة تطلب من محركات البحث تجاهلها "
+            "(وسم noindex).",
+            "تحقق من إعدادات المتجر: قد تكون صفحات مهمة ممنوعة من الظهور.")
+
+    # 6ز) كانونيكال معطوب يشير لصفحة واحدة
+    if summary.get('canon_broken'):
+        add(CHECK_FAIL, "وسم الكانونيكال",
+            f"{summary['canon_broken']} صفحة تشير بوسم الكانونيكال إلى صفحة أخرى "
+            "واحدة، وهو خلل في قالب المتجر يجعل محركات البحث تتجاهل هذه الصفحات "
+            "كلها.",
+            "أبلغ التاجر فوراً: هذا أخطر خلل سيو ممكن، ويعالج بإصلاح وسم "
+            "الكانونيكال في القالب.")
+
+    # 6ح) مصادر الاكتشاف المستخدمة
+    if crawl_meta:
+        srcs = crawl_meta.get('source_counts') or {}
+        if srcs:
+            add(CHECK_PASS, "مصادر الاكتشاف",
+                "الصفحات جاءت من: " + "، ".join(f"{k} ({v})" for k, v in srcs.items()))
+
+    # 6و) خريطة الموقع مصدر القائمة — غيابها يعني فحصاً ناقصاً
+    sm_total = summary.get('sitemap_products', 0)
+    coverage_obj = coverage if isinstance(coverage, dict) else {}
+    if summary.get('coverage_enabled'):
+        if sm_total == 0:
+            # غياب الخريطة ليس خللاً في الفحص: الزحف كالزائر يغطي المتجر.
+            # النقص الحقيقي يكشفه فحص «تغطية المنتجات» بعدّادات الأقسام.
+            add(CHECK_WARN, "خريطة الموقع",
+                "لا توجد خريطة موقع، فاعتمد الفحص على تتبع الروابط كما يفعل "
+                "الزائر — وهذا يغطي كل صفحة مرتبطة برابط.",
+                "غياب الخريطة بحد ذاته نقص سيو في المتجر يستحق الذكر للعميل. "
+                "وإن كان المتجر يحمّل منتجاته بالتمرير فسيظهر ذلك في فحص "
+                "«تغطية المنتجات».")
+        elif coverage_obj.get('partial_read'):
+            add(CHECK_FAIL, "قراءة خريطة الموقع",
+                f"تعذّرت قراءة {coverage_obj.get('files_failed', 0)} من ملفات خريطة "
+                "الموقع، فالقائمة التي اعتمدها الفحص ناقصة.",
+                "خفّض «المسارات المتوازية» إلى 2 وأعد الفحص. لا تعتمد أرقام "
+                "الخريطة في هذا التقرير.")
+        elif summary.get('unlisted_count', 0) > sm_total * 0.3:
+            add(CHECK_WARN, "خريطة الموقع",
+                f"{summary['unlisted_count']} صفحة معروضة غير مدرجة في الخريطة "
+                f"مقابل {sm_total} مدرجة — الخريطة ناقصة.",
+                "هذه نتيجة حقيقية عن المتجر، لكن راجع عيّنة للتأكد.")
+        else:
+            add(CHECK_PASS, "خريطة الموقع",
+                f"{sm_total} رابط في الخريطة، منها {summary.get('sitemap_live', 0)} "
+                "يعمل ويصل إليه الزائر.")
+
+    # 7) المحتوى النصي الضعيف (مؤشر آخر على JavaScript)
+    if n_ok:
+        thin = summary.get('thin_pages', 0) / n_ok * 100
+        if thin > 50:
+            add(CHECK_FAIL, "قراءة المحتوى",
+                f"{round(thin, 1)}% من الصفحات بمحتوى نصي شبه فارغ.",
+                "المتجر يبني محتواه بـ JavaScript — النتائج غير معتمدة.")
+        elif thin > 20:
+            add(CHECK_WARN, "قراءة المحتوى",
+                f"{round(thin, 1)}% من الصفحات بمحتوى نصي ضعيف.",
+                "تأكد أن هذا واقع المتجر لا خلل في القراءة.")
+        else:
+            add(CHECK_PASS, "قراءة المحتوى", "المحتوى النصي مقروء بشكل طبيعي.")
+
+    # 8) اكتمال الزحف
+    if crawl_meta and crawl_meta.get('truncated'):
+        add(CHECK_WARN, "اكتمال الزحف",
+            f"توقف الزحف مع بقاء {crawl_meta.get('pending', 0)} رابط غير مفحوص.",
+            "ارفع الحد الأقصى للصفحات من الإعدادات وأعد الفحص.")
+    else:
+        add(CHECK_PASS, "اكتمال الزحف", "غُطّيت كل الروابط المكتشفة.")
+
+    # 9) اتساق المعروض مع خريطة الموقع
+    if coverage and coverage.get('sitemap_count'):
+        vis, sm = coverage['visible_count'], coverage['sitemap_count']
+        if sm and vis / sm < 0.6:
+            add(CHECK_WARN, "تغطية المنتجات",
+                f"{vis} منتج معروض مقابل {sm} في خريطة الموقع.",
+                "قد يستخدم المتجر تمريراً لانهائياً بدل ترقيم الصفحات، "
+                "فلم يصل الزاحف لكل المنتجات.")
+        else:
+            add(CHECK_PASS, "تغطية المنتجات",
+                f"{vis} منتج معروض مقابل {sm} في الخريطة — متسق.")
+
+    # 10) الروابط المعطلة
+    if n_ok:
+        br = summary.get('broken_pages', 0)
+        if br / max(len(df), 1) > 0.15:
+            add(CHECK_WARN, "الروابط المعطلة",
+                f"{br} رابط معطل — نسبة مرتفعة قد تعني حجباً جزئياً للزاحف.",
+                "افتح عيّنة منها في المتصفح للتأكد أنها معطلة فعلاً.")
+        else:
+            add(CHECK_PASS, "الروابط المعطلة", f"{br} رابط معطل — ضمن المعقول.")
+
+    fails = sum(1 for c in checks if c['level'] == CHECK_FAIL)
+    warns = sum(1 for c in checks if c['level'] == CHECK_WARN)
+    verdict = ('blocked' if fails else 'review' if warns else 'ready')
+    return {'checks': checks, 'fails': fails, 'warns': warns, 'verdict': verdict}
+
+
+
+
+# ==============================================================
+#  محرك الاكتشاف والفحص — يبدأ من خريطة الموقع
+#
+#  الخريطة تعطي القائمة الكاملة فوراً، فلا تفوتنا منتجات بسبب التمرير.
+#  ثم تُفتح كل صفحة: المحذوف والمخفي يردّان بخطأ فيخرجان تلقائياً.
+#  وروابط كل صفحة تُجمع مجاناً أثناء الفحص، فنعرف المرتبط من اليتيم
+#  بلا أي طلب إضافي.
+# ==============================================================
+def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
+                       progress=None, max_rounds=6):
+    base_url = normalize_url(base_url)
+    if progress:
+        progress('sitemap_read')
+    sitemap_urls, sm_report = collect_sitemap_urls(base_url)
     sitemap_keys = {url_key(u) for u in sitemap_urls}
 
-    # تحديد الصفحات المستبعدة والمحولة
-    gone_mask = full_df['كود الاستجابة'].isin(GONE_CODES)
-    redirect_mask = full_df['كود الاستجابة'] == REDIRECT_HOME
-    noindex_mask = (full_df['متاحة'] == True) & (full_df['قابلة للأرشفة'] == False)
+    # مسارات القوائم التي تفرضها المنصة تُجرَّب دائماً مهما كان القالب.
+    # غياب أي منها طبيعي، فلا يُحتسب رابطاً معطلاً في المتجر.
+    platform_seeds = {f"{base_url}/{p}" for p in PLATFORM_LISTINGS}
+    speculative = {url_key(u) for u in platform_seeds}
+    queue = sorted({clean_url(u) for u in sitemap_urls} | {base_url}
+                   | platform_seeds)
+    seen = {url_key(u) for u in queue}
+    linked = set()              # مفاتيح ظهرت كرابط في أي صفحة
+    cat_links = {}              # رابط القسم -> مجموعة روابط منتجاته
+    pages, images = [], []
+    platform = 'unknown'
+    rounds = 0
+    truncated = False
 
-    in_sitemap = full_df['_key'].isin(sitemap_keys) | full_df['_canon_key'].isin(sitemap_keys)
-    dead_pages = full_df[gone_mask & ~redirect_mask & in_sitemap]['الرابط'].tolist()
-    redirect_home_pages = full_df[redirect_mask & in_sitemap]['الرابط'].tolist()
-    noindex_pages = full_df[noindex_mask]['الرابط'].tolist()
+    while queue and rounds < max_rounds:
+        rounds += 1
+        room = max_pages - len(pages)
+        if room <= 0:
+            truncated = True
+            break
+        batch, queue = queue[:room], queue[room:]
+        if queue:
+            truncated = True
+        nxt = []
+        src = 'خريطة الموقع' if rounds == 1 else 'رابط داخلي'
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for res in ex.map(fetch_and_audit,
+                              [(u, base_url, src) for u in batch]):
+                row = res['page_data']
+                pages.append(row)
+                images.extend(res['images_data'])
+                if res.get('platform_html') and platform == 'unknown':
+                    platform = detect_platform(res['platform_html'],
+                                               res.get('platform_headers'), base_url)
+                raw = row.get('_raw_url', row['الرابط'])
+                seen.add(url_key(raw))
+                if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
+                    cat_links.setdefault(raw, set()).update(
+                        {url_key(x) for x in res.get('product_links', set())})
+                for link in res.get('links', ()):
+                    k = url_key(link)
+                    linked.add(k)
+                    if k not in seen:
+                        seen.add(k)
+                        nxt.append(link)
+        queue = nxt + queue
+        if progress:
+            progress('audit', done=len(pages), pending=len(queue), round=rounds)
 
-    # جدول التقرير للصفحات المتاحة
-    df = full_df[~gone_mask & ~noindex_mask].reset_index(drop=True)
-    kept_keys = set(df['_key'])
-    df = df.drop(columns=['_key', '_canon_key'], errors='ignore')
+    # إسقاط المسارات المُخمّنة التي لم توجد: لم يعلنها المتجر ولم يربطها
+    pages = [r for r in pages
+             if r['متاحة'] or url_key(r.get('_raw_url', r['الرابط'])) not in speculative
+             or url_key(r.get('_raw_url', r['الرابط'])) in sitemap_keys
+             or url_key(r.get('_raw_url', r['الرابط'])) in linked]
 
-    raw_imgs_df = pd.DataFrame(images_result)
-    if not raw_imgs_df.empty:
-        raw_imgs_df = raw_imgs_df[raw_imgs_df['رابط الصفحة'].map(url_key).isin(kept_keys)]
-    imgs_df = get_unique_images(raw_imgs_df)
+    for row in pages:
+        raw = row.get('_raw_url', row['الرابط'])
+        k = url_key(raw)
+        row['في الخريطة'] = k in sitemap_keys
+        row['مرتبط برابط'] = k in linked
 
-    if imgs_df is not None and not imgs_df.empty:
-        counts = imgs_df[imgs_df['حالة النص البديل'] == 'alt_ok']['النص البديل الحالي (Alt)'].value_counts()
-        dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
-        if dupes:
-            imgs_df.loc[imgs_df['النص البديل الحالي (Alt)'].isin(dupes), 'حالة النص البديل'] = 'alt_duplicate'
+    from collections import Counter
+    src_counts = dict(Counter(r.get('مصدر الاكتشاف', '—') for r in pages))
+    meta = {'source_counts': src_counts,
+            'truncated': truncated, 'pending': len(queue), 'rounds': rounds,
+            'cat_products': cat_links, 'sitemap_count': len(sitemap_keys),
+            'sitemap_urls': sitemap_urls, 'sitemap_report': sm_report,
+            'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages
+                             if r['نوع الصفحة'] in (T_BLOG, T_ARCHIVE)]}
+    return pages, images, meta, platform
 
-    valid_titles = df[df['عنوان الميتا'].str.strip() != '']['عنوان الميتا']
-    dup_titles = set(valid_titles[valid_titles.duplicated()].unique())
-    valid_descs = df[df['وصف الميتا'].str.strip() != '']['وصف الميتا']
-    dup_descs = set(valid_descs[valid_descs.duplicated()].unique())
 
-    live_df = df[df['متاحة'] == True].copy()
-    live_keys = set(live_df['الرابط'].map(url_key))
-    target_k = url_key(target)
+def build_sitemap_report(df, base_url, sm_report=None):
+    """يصنّف علاقة كل صفحة بخريطة الموقع بعد فتحها فعلياً."""
+    if df.empty or 'في الخريطة' not in df.columns:
+        return None
+    in_map = df['في الخريطة'] == True                      # noqa: E712
+    alive = df['متاحة'] == True                            # noqa: E712
+    linked = df['مرتبط برابط'] == True                     # noqa: E712
 
-    # الصفحات الغائبة عن الخريطة (فحص الرابط + الكانونيكال + استبعاد ما أتى من الخريطة ذاتها)
-    is_in_sm = (
-        live_df['الرابط'].map(url_key).isin(sitemap_keys) |
-        live_df['الرابط الكانوني'].map(url_key).isin(sitemap_keys) |
-        (live_df['مصدر الاكتشاف'] == 'خريطة الموقع')
-    )
-    unlisted_pages = live_df[
-        live_df['نوع الصفحة'].isin(CONTENT_TYPES) & (~is_in_sm)
-    ]['الرابط'].tolist()
+    def rows(mask, extra=None):
+        out = []
+        for _, r in df[mask].iterrows():
+            item = {'الرابط': r['الرابط'],
+                    'نوع الصفحة': r['نوع الصفحة']}
+            if extra:
+                item[extra] = r['كود الاستجابة']
+            out.append(item)
+        return out
 
-    # الصفحات اليتيمة
-    orphan_pages = []
-    for u in sitemap_urls:
-        k = url_key(u)
-        if k in live_keys and k != target_k and k not in internally_linked_keys:
-            orphan_pages.append(u)
-
-    unreachable = df[df['متاحة'] == False]
-
-    # إحصائيات المنتجات بدقة
-    total_active_products = int((df['نوع الصفحة'] == T_PRODUCT).sum())
-    redirected_products_count = int(full_df[redirect_mask & (full_df['نوع الصفحة'] == T_PRODUCT)].shape[0])
-
-    coverage = {
-        'sitemap_count': len(sitemap_urls),
-        'unlisted_pages': unlisted_pages,
-        'orphan_pages': orphan_pages,
-        'dead_pages': dead_pages,
-        'redirect_home_pages': redirect_home_pages,
-        'redirect_home_by_type': {str(k): int(v) for k, v in
-                                  full_df[redirect_mask]['نوع الصفحة'].value_counts().items()},
-        'noindex_pages': noindex_pages,
-        'unreachable_pages': unreachable['الرابط'].tolist(),
-        'unreachable_codes': {str(k): int(v) for k, v in unreachable['كود الاستجابة'].value_counts().items()},
+    is_prod = df['نوع الصفحة'] == T_PRODUCT
+    dead = rows(in_map & ~alive, 'كود الاستجابة')
+    # المنتج غير المرتبط يصل إليه الزائر بالتمرير، فليس يتيماً بالمعنى الضار
+    orphan = rows(in_map & alive & ~linked & ~is_prod)
+    scroll_only = rows(in_map & alive & ~linked & is_prod)
+    unlisted = rows(~in_map & alive)
+    live_in_map = int((in_map & alive).sum())
+    prod_live = int((alive & (df['نوع الصفحة'] == T_PRODUCT)).sum())
+    prod_unlisted = int((~in_map & alive &
+                         (df['نوع الصفحة'] == T_PRODUCT)).sum())
+    partial = bool((sm_report or {}).get('partial'))
+    return {
+        'partial_read': partial,
+        'files_failed': (sm_report or {}).get('files_failed', 0),
+        'sitemap_total': int(in_map.sum()),
+        'sitemap_live': live_in_map,
+        'sitemap_dead': len(dead),
+        'orphan_pages': orphan,
+        'scroll_only_products': scroll_only,
+        'dead_pages': dead,
+        'unlisted_pages': [] if partial else unlisted,
+        'unlisted_suppressed': len(unlisted) if partial else 0,
+        'products_live': prod_live,
+        'products_unlisted': prod_unlisted,
+        'indexed_pct': round((prod_live - prod_unlisted) / prod_live * 100, 1)
+        if prod_live else 100.0,
+        'orphan_by_type': dict(df[in_map & alive & ~linked & ~is_prod]['نوع الصفحة']
+                               .value_counts()),
     }
 
-    def type_count(t):
-        return int((df['نوع الصفحة'] == t).sum())
 
-    summary = {
-        'total_pages': len(df),
-        'score': round(live_df['درجة السيو'].mean(), 1) if not live_df.empty else 0,
-        'products': total_active_products,
-        'redirected_products': redirected_products_count,
-        'total_discovered_products': total_active_products + redirected_products_count,
-        'categories': type_count(T_CATEGORY),
-        'info_pages': type_count(T_INFO),
-        'blog_pages': type_count(T_BLOG),
-        'archive_pages': type_count(T_ARCHIVE),
-        'unknown_pages': type_count(T_UNKNOWN),
-        'broken_pages': len(unreachable),
-        'excluded_pages': int(gone_mask.sum()) + len(noindex_pages),
-        'redirect_home_count': int(redirect_mask.sum()),
-        'missing_titles': int((df['حالة العنوان'] == 'missing').sum()),
-        'duplicate_titles': len(dup_titles),
-        'title_mismatch': int((df['مطابقة العنوان مع H1'] == 'match_diff').sum()),
-        'missing_descs': int((df['حالة الوصف'] == 'missing').sum()),
-        'short_descs': int((df['حالة الوصف'] == 'very_short').sum()),
-        'duplicate_descs': len(dup_descs),
-        'total_images': len(imgs_df) if imgs_df is not None and not imgs_df.empty else 0,
-        'missing_alts': int((imgs_df['حالة النص البديل'] == 'alt_missing').sum()) if imgs_df is not None and not imgs_df.empty else 0,
-        'weak_alts': int(imgs_df['حالة النص البديل'].isin(['alt_generic', 'alt_stuffed', 'alt_duplicate', 'alt_long']).sum()) if imgs_df is not None and not imgs_df.empty else 0,
-        'platform': platform
-    }
+# ==============================================================
+#  مسار الفحص الكامل — نقطة دخول واحدة
+#
+#  تستدعيه الواجهة ويستدعيه الاختبار الآلي بنفس الطريقة، فلا يمكن
+#  أن يختلف ما يُختبر عمّا يعمل فعلاً.
+# ==============================================================
+def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
+                  do_pagination=True, do_sitemap_check=True, progress=None):
+    """يشغّل الفحص من أوله لآخره ويعيد كل النتائج في قاموس واحد."""
+    def say(stage, **kw):
+        if progress:
+            try:
+                progress(stage, **kw)
+            except Exception:
+                pass
 
-    return df, imgs_df, summary, coverage, dup_titles, dup_descs
+    target = normalize_url(target)
+    reset_throttle()
+
+    say('discover_start')
+    pages, imgs, crawl_meta, platform = discover_and_audit(
+        target, max_pages, workers,
+        (lambda st, **k: say(st, **k)))
+    cat_products = crawl_meta.setdefault('cat_products', {})
+
+    if do_pagination and cat_products:
+        # الترقيم لازم فقط حين لا تكفي الخريطة مصدراً للقائمة
+        say('pagination_start')
+        seen_keys = {url_key(r.get('_raw_url', r['الرابط'])) for r in pages}
+        listing_roots = list(cat_products.keys()) + [
+            r.get('_raw_url', r['الرابط']) for r in pages
+            if r['نوع الصفحة'] in (T_CATEGORY, T_ARCHIVE, T_BLOG, T_HOME)]
+        extra = harvest_paginated_products(
+            target, list(dict.fromkeys(listing_roots)), seen_keys,
+            (lambda i, tot, f, fe: say('pagination', i=i, total=tot,
+                                       found=f, fetched=fe)),
+            cat_products=cat_products,
+            listing_urls=crawl_meta.get('listing_urls'))
+        if extra:
+            say('extra_start', count=len(extra))
+            p2, i2 = audit_urls(extra, target, 'ترقيم القوائم', workers, None)
+            for r in p2:
+                r['في الخريطة'] = False
+                r['مرتبط برابط'] = True
+            pages += p2
+            imgs += i2
+
+    # فشل الاتصال قد يكون ضغطاً مؤقتاً لا رابطاً معطلاً: نعيد المحاولة بتمهّل
+    retry = [r['_raw_url'] for r in pages
+             if not r['متاحة'] and 'فشل اتصال' in str(r['كود الاستجابة'])]
+    if retry:
+        say('retry_start', count=len(retry))
+        time.sleep(2)
+        fixed, fixed_imgs = audit_urls(retry[:120], target, 'إعادة محاولة', 2, None)
+        good = {}
+        for r in fixed:
+            if r['متاحة']:
+                good[r['_raw_url']] = r
+        if good:
+            merged = []
+            for r in pages:
+                g = good.get(r['_raw_url'])
+                if g:
+                    g = dict(g)
+                    g['في الخريطة'] = r.get('في الخريطة', False)
+                    g['مرتبط برابط'] = r.get('مرتبط برابط', False)
+                    merged.append(g)
+                else:
+                    merged.append(r)
+            pages = merged
+            imgs += [im for im in fixed_imgs
+                     if im['رابط الصفحة'] in {g['الرابط'] for g in good.values()}]
+
+    df = dedupe_pages(pd.DataFrame(pages))
+    images_df = pd.DataFrame(imgs)
+    if not images_df.empty:
+        images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])] \
+            .copy().reset_index(drop=True)
+        images_df = apply_duplicate_alt(images_df)
+    df, brand = analyze_text_quality(df)
+    df = analyze_url_quality(df, brand)
+    df, dup_groups = detect_duplicate_content(df)
+    df = score_pages(df, images_df)
+
+    coverage = (build_sitemap_report(df, target, crawl_meta.get('sitemap_report'))
+                if do_sitemap_check else None)
+
+    declared = {}
+    for _, r in df.iterrows():
+        v = r.get('عدد معلن')
+        try:
+            if v is not None and pd.notna(v) and int(v) > 0:
+                declared[r['الرابط']] = int(v)
+        except (TypeError, ValueError):
+            continue
+    structured = build_structured_report(df, declared, cat_products)
+
+    summary = compute_summary(df, coverage, images_df)
+    summary['structured'] = structured
+    summary['platform'] = platform
+    summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+    selfcheck = run_self_checks(df, images_df, coverage, platform, summary,
+                                crawl_meta, structured)
+    say('done')
+
+    return {'df': df, 'images_df': images_df, 'summary': summary,
+            'coverage': coverage, 'structured': structured,
+            'selfcheck': selfcheck, 'brand': brand, 'dup_groups': dup_groups,
+            'platform': platform, 'crawl_meta': crawl_meta,
+            'declared': declared}
+
+
+# ==============================================================
