@@ -2122,9 +2122,9 @@ def build_sitemap_report(df, base_url, sm_report=None):
     def rows(mask, extra=None):
         out = []
         for _, r in df[mask].iterrows():
-            item = {'الرابط': r['الرابط'], 'نوع الصفحة': r['نوع الصفحة']}
+            item = {'الرابط': str(r['الرابط']), 'نوع الصفحة': str(r['نوع الصفحة'])}
             if extra:
-                item[extra] = r['كود الاستجابة']
+                item[extra] = str(r['كود الاستجابة'])
             out.append(item)
         return out
 
@@ -2138,9 +2138,15 @@ def build_sitemap_report(df, base_url, sm_report=None):
     prod_unlisted = int((~in_map & alive & (df['نوع الصفحة'] == T_PRODUCT)).sum())
     partial = bool((sm_report or {}).get('partial'))
     
+    # تحويل قيم value_counts إلى int قياسي لمنع خطأ json.dumps
+    orphan_counts = {
+        str(k): int(v)
+        for k, v in df[in_map & alive & ~linked & ~is_prod]['نوع الصفحة'].value_counts().items()
+    }
+    
     return {
         'partial_read': partial,
-        'files_failed': (sm_report or {}).get('files_failed', 0),
+        'files_failed': int((sm_report or {}).get('files_failed', 0)),
         'sitemap_total': int(in_map.sum()),
         'sitemap_live': live_in_map,
         'sitemap_dead': len(dead),
@@ -2151,9 +2157,9 @@ def build_sitemap_report(df, base_url, sm_report=None):
         'unlisted_suppressed': len(unlisted) if partial else 0,
         'products_live': prod_live,
         'products_unlisted': prod_unlisted,
-        'indexed_pct': round((prod_live - prod_unlisted) / prod_live * 100, 1)
+        'indexed_pct': float(round((prod_live - prod_unlisted) / prod_live * 100, 1))
         if prod_live else 100.0,
-        'orphan_by_type': dict(df[in_map & alive & ~linked & ~is_prod]['نوع الصفحة'].value_counts()),
+        'orphan_by_type': orphan_counts,
     }
 
 
