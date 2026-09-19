@@ -28,7 +28,12 @@ st.set_page_config(page_title="مركز عمليات السيو | أنس راش�
                    layout="wide", page_icon="🚀",
                    initial_sidebar_state="expanded")
 init_db()
-
+for _key, _default in [('audit_df', None), ('images_df', None), ('summary', None),
+                       ('current_url', ""), ('coverage', None),
+                       ('platform', 'unknown'), ('selfcheck', None),
+                       ('brand', ''), ('dup_groups', None), ('structured', None)]:
+    if _key not in st.session_state:
+        st.session_state[_key] = _default
 # ==============================================================
 #  التنسيق
 # ==============================================================
