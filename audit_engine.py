@@ -1,9 +1,3 @@
-"""
-محرك الفحص الشامل: الاكتشاف، القراءة، التقييم، والفحص الذاتي.
-
-يدعم سلة، زد، وشوبيفاي بنسبة 100% ويتغلب على الجافاسكربت والتمرير اللانهائي
-عبر محرك هجين (Playwright Headless + Native APIs + Deep DOM Traversal).
-"""
 import requests
 from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
