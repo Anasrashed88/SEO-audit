@@ -4,8 +4,8 @@ beautifulsoup4
 lxml
 pandas
 openpyxl
-fpdf2
-uharfbuzz
-advertools
 arabic-reshaper
 python-bidi
+fpdf2
+uharfbuzz
+ultimate-sitemap-parser
