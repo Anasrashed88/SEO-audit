@@ -255,8 +255,34 @@ def safe_get(url, timeout=14, retries=2, headers=None):
 
 
 # ==============================================================
-#  أدوات الروابط والفلترة وحظر التاقات الصارم
+#  أدوات النصوص والروابط والفلترة وحظر التاقات
 # ==============================================================
+AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
+
+
+def normalize_ar_token(tok):
+    t = tok.strip('.,،؛:!?()[]')
+    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)
+    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+    t = t.replace('ى', 'ي').replace('ة', 'ه')
+    for pre in AR_PREFIXES:
+        if t.startswith(pre) and len(t) > len(pre) + 1:
+            t = t[len(pre):]
+            break
+    return t
+
+
+def slug_tokens(text):
+    raw = re.split(r'[\s\-_/|،,.:؛…]+', str(text or '').lower())
+    out = []
+    for t in raw:
+        t = re.sub(r'[^0-9a-z\u0600-\u06FF]', '', t)
+        if len(t) < 2:
+            continue
+        out.append(normalize_ar_token(t) if re.search(r'[\u0600-\u06FF]', t) else t)
+    return out
+
+
 def normalize_url(url):
     if not url:
         return ""
@@ -295,7 +321,6 @@ def make_soup(markup):
     return BeautifulSoup(markup, PARSER)
 
 
-# الكلمات المستبعدة بالكامل واستبعاد التاقات (Tags / وسوم)
 TAG_IDENTIFIERS = {'tag', 'tags', 'وسم', 'وسوم', 'wsm', 'tag-products', 'product-tag', 'product-tags'}
 
 EXCLUDE_EXACT_SEGMENTS = {
@@ -312,7 +337,6 @@ BAD_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.avif', '.p
 
 
 def is_tag_url(url):
-    """التحقق الصارم مما إذا كان الرابط يخص وسماً/تاغ (Tag) لاستبعاده نهائياً من الفحص."""
     if not url:
         return False
     u = unquote(url.lower())
@@ -328,7 +352,6 @@ def is_tag_url(url):
         if re.match(r'^(tag|tags|وسم|وسوم)\b', s):
             return True
 
-    # فحص باراميترات الاستعلام Query String
     if p.query:
         q_lower = p.query.lower()
         if any(k in q_lower for k in ('tag=', 'tags=', 'tag_id=', 'tags_id=', 'وسم=', 'وسوم=')):
@@ -357,6 +380,16 @@ def is_crawlable(url, base_netloc):
     return True
 
 
+def image_format(url):
+    path = urlparse(str(url or '')).path.lower()
+    mo = re.search(r'\.(jpe?g|png|webp|avif|gif|svg|bmp|tiff?)(?:$|\?)', path)
+    if mo:
+        ext = mo.group(1)
+        return 'jpg' if ext in ('jpg', 'jpeg') else ext
+    mo2 = re.search(r'(?:format|fm)=(\w+)', str(url or '').lower())
+    return mo2.group(1) if mo2 else '—'
+
+
 # ==============================================================
 #  القياس والتقييم
 # ==============================================================
@@ -376,21 +409,6 @@ def grade_length(length, min_ok, min_optimal, max_len):
     if length <= max_len:
         return 'optimal'
     return 'long'
-
-
-AR_PREFIXES = ('وال', 'بال', 'فال', 'كال', 'لل', 'ال', 'و')
-
-
-def normalize_ar_token(tok):
-    t = tok.strip('.,،؛:!?()[]')
-    t = re.sub(r'[\u064B-\u0652\u0670]', '', t)
-    t = t.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
-    t = t.replace('ى', 'ي').replace('ة', 'ه')
-    for pre in AR_PREFIXES:
-        if t.startswith(pre) and len(t) > len(pre) + 1:
-            t = t[len(pre):]
-            break
-    return t
 
 
 GENERIC_ALT = {
@@ -578,7 +596,6 @@ def detect_page_type(url, base_url, soup=None):
     if soup and _has_jsonld_type(soup, ('Product',)):
         return T_PRODUCT
         
-    # التعرف على منتجات سلة وزد وشوبيفاي بدقة
     if ('products' in segments or 'product' in segments) and len(segments) >= 2:
         return T_PRODUCT
     if re.search(r'/p-?\d+', path) or '-p-' in path:
@@ -626,7 +643,7 @@ def detect_page_language(soup, text_sample=""):
 
 
 # ==============================================================
-#  استخراج صور المحتوى
+#  استخراج صور المحتوى والبيانات المهيكلة JSON-LD
 # ==============================================================
 JUNK_KEYWORDS = [
     'spinner', 'loader', 'loading', 'ajax', 'icon', 'badge', 'payment', 'gateway',
@@ -756,14 +773,89 @@ def find_page_h1(soup):
     return ''
 
 
+def iter_jsonld(soup):
+    for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
+        try:
+            data = json.loads(tag.string or '{}')
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                stack.extend(node)
+            elif isinstance(node, dict):
+                yield node
+                for v in node.values():
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+
+
+def node_types(node):
+    t = node.get('@type')
+    return {str(x) for x in (t if isinstance(t, list) else [t]) if x}
+
+
+def extract_product_facts(soup):
+    facts = {'name': '', 'images': [], 'sku': '', 'offers': False}
+    for node in iter_jsonld(soup):
+        if 'Product' not in node_types(node):
+            continue
+        nm = node.get('name')
+        if isinstance(nm, str) and nm.strip() and not facts['name']:
+            facts['name'] = re.sub(r'\s+', ' ', nm).strip()
+        img = node.get('image')
+        imgs = img if isinstance(img, list) else ([img] if img else [])
+        for it in imgs:
+            if isinstance(it, dict):
+                it = it.get('url') or it.get('contentUrl')
+            if isinstance(it, str) and it.strip():
+                facts['images'].append(clean_image_url(it.strip()))
+        if node.get('sku') and not facts['sku']:
+            facts['sku'] = str(node['sku'])
+        if node.get('offers'):
+            facts['offers'] = True
+        break
+    facts['images'] = list(dict.fromkeys(facts['images']))
+    return facts
+
+
+COUNT_PATTERNS = [
+    r'عدد\s*المنتجات\s*[:：]?\s*([\d,]+)',
+    r'([\d,]+)\s*منتج(?:اً|ا)?\b',
+    r'من\s*أصل\s*([\d,]+)',
+    r'\b([\d,]+)\s*products?\b',
+    r'showing\s*\d+\s*(?:-|to)\s*\d+\s*of\s*([\d,]+)',
+]
+
+
+def extract_declared_count(soup, text=None):
+    for node in iter_jsonld(soup):
+        if node_types(node) & {'ItemList', 'CollectionPage'}:
+            n = node.get('numberOfItems')
+            if isinstance(n, (int, float)) and n > 0:
+                return int(n)
+    body = text if text is not None else soup.get_text(' ', strip=True)
+    body = body[:4000]
+    best = None
+    for pat in COUNT_PATTERNS:
+        for mo in re.finditer(pat, body, re.I):
+            try:
+                v = int(mo.group(1).replace(',', ''))
+            except Exception:
+                continue
+            if 0 < v < 100000:
+                best = v if best is None else max(best, v)
+    return best
+
+
 # ==============================================================
-#  استخراج الروابط الشامل ودعم المكونات المخصصة لسلة وزد
+#  استخراج الروابط الشامل ودعم مكونات سلة وزد
 # ==============================================================
 def extract_all_links(soup, raw_html, current_url, base_netloc):
-    """استخراج جميع الروابط بما في ذلك Web Components وكائنات JSON والروابط المخفية."""
     links = set()
     
-    # 1. روابط <a> القياسية وخصائص البيانات
+    # 1. روابط <a> وخصائص البيانات
     for a in soup.find_all(['a', 'salla-button', 'div', 'button'], href=True):
         href = a['href'].strip()
         if href and not href.startswith(('mailto:', 'tel:', 'javascript:', '#')):
@@ -798,9 +890,8 @@ def extract_all_links(soup, raw_html, current_url, base_netloc):
             except Exception:
                 pass
 
-    # 3. استخراج بواسطة Regex من نصوص الـ HTML (لالتقاط روابط سلة وزد المضمنة في السكربتات)
+    # 3. استخراج بالـ Regex للروابط المضمنة
     if raw_html:
-        # روابط سلة وزد الشهيرة مثل /.../p12345678 أو /c12345678
         pattern = re.compile(r'href=[\'"]([^\'"]+/[pc]-?\d+)[\'"]|["\'](https?://[^"\']+/[pc]-?\d+)["\']', re.I)
         for m in pattern.findall(raw_html):
             cand = m[0] or m[1]
@@ -813,8 +904,218 @@ def extract_all_links(soup, raw_html, current_url, base_netloc):
 
 
 # ==============================================================
-#  فحص صفحة واحدة
+#  محركات الحصد المخصصة للمنصات (شوبيفاي - سلة - زد)
 # ==============================================================
+def harvest_shopify_all(base_url):
+    """سحب شامل لشوبيفاي عبر API المنتجات والمجموعات المباشر"""
+    base_url = normalize_url(base_url)
+    urls = set()
+    
+    # 1. سحب المنتجات
+    page = 1
+    while page <= 40:
+        endpoint = f"{base_url}/products.json?limit=250&page={page}"
+        res = safe_get(endpoint, timeout=10, retries=1)
+        if not res or res.status_code != 200:
+            break
+        try:
+            products = res.json().get('products', [])
+            if not products:
+                break
+            for p in products:
+                handle = p.get('handle')
+                if handle:
+                    urls.add(f"{base_url}/products/{handle}")
+            if len(products) < 250:
+                break
+            page += 1
+        except Exception:
+            break
+
+    # 2. سحب المجموعات (Collections)
+    page = 1
+    while page <= 20:
+        endpoint = f"{base_url}/collections.json?limit=250&page={page}"
+        res = safe_get(endpoint, timeout=10, retries=1)
+        if not res or res.status_code != 200:
+            break
+        try:
+            collections = res.json().get('collections', [])
+            if not collections:
+                break
+            for c in collections:
+                handle = c.get('handle')
+                if handle:
+                    urls.add(f"{base_url}/collections/{handle}")
+            if len(collections) < 250:
+                break
+            page += 1
+        except Exception:
+            break
+
+    return urls
+
+
+def harvest_salla_ajax_products(base_url, category_url):
+    """سحب منتجات سلة من مسارات التصنيف بالاعتماد على طلبات الـ Ajax"""
+    found = set()
+    netloc = urlparse(base_url).netloc
+    headers = {
+        'Accept': 'application/json, text/html, */*',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    
+    for page in range(1, 30):
+        test_urls = [
+            f"{category_url}?page={page}",
+            f"{category_url}/products?page={page}",
+        ]
+        page_found = 0
+        for u in test_urls:
+            res = safe_get(u, headers=headers, retries=1)
+            if not res or res.status_code != 200:
+                continue
+            try:
+                data = res.json()
+                if isinstance(data, dict):
+                    html_content = data.get('html') or data.get('data', '')
+                    if isinstance(html_content, str):
+                        soup = make_soup(html_content)
+                        links = extract_all_links(soup, html_content, base_url, netloc)
+                        prods = {l for l in links if _detect_type_by_url(l, base_url) == T_PRODUCT}
+                        if prods:
+                            found.update(prods)
+                            page_found += len(prods)
+                            break
+            except Exception:
+                soup = make_soup(res.text)
+                links = extract_all_links(soup, res.text, base_url, netloc)
+                prods = {l for l in links if _detect_type_by_url(l, base_url) == T_PRODUCT}
+                if prods:
+                    found.update(prods)
+                    page_found += len(prods)
+                    break
+        if page_found == 0:
+            break
+    return found
+
+
+def harvest_zid_catalog(base_url):
+    """سحب مسارات وروابط متجر زد الأساسية والتصنيفات"""
+    base_url = normalize_url(base_url)
+    found = set()
+    netloc = urlparse(base_url).netloc
+    for path in ['/categories', '/products', '/collections']:
+        target_url = f"{base_url}{path}"
+        res = safe_get(target_url)
+        if res and res.status_code == 200:
+            soup = make_soup(res.text)
+            links = extract_all_links(soup, res.text, base_url, netloc)
+            found.update(links)
+    return found
+
+
+def harvest_infinite_scroll_playwright(url, base_url, max_scrolls=30):
+    """استخراج منتجات التمرير اللانهائي عبر Playwright باختراق الـ Shadow DOM"""
+    if not HAS_PLAYWRIGHT:
+        return set()
+    found_urls = set()
+    base_netloc = urlparse(normalize_url(base_url)).netloc
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'])
+            context = browser.new_context(user_agent=HEADERS['User-Agent'], viewport={'width': 1920, 'height': 1080})
+            page = context.new_page()
+
+            def on_response(response):
+                try:
+                    if 'json' in (response.headers.get('content-type') or ''):
+                        text = response.text()
+                        for match in re.finditer(r'/(?:products|product|p)/[a-zA-Z0-9_\-\u0600-\u06FF]+|/[^/"]+/p-?\d+', text):
+                            m_url = clean_url(urljoin(base_url, match.group(0)))
+                            if is_crawlable(m_url, base_netloc) and _detect_type_by_url(m_url, base_url) == T_PRODUCT:
+                                found_urls.add(m_url)
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+            page.goto(url, timeout=25000, wait_until='domcontentloaded')
+            page.wait_for_timeout(1500)
+
+            deep_extract_script = """
+            () => {
+                const urls = new Set();
+                function traverse(node) {
+                    if (!node) return;
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        if (node.tagName === 'A' && node.href) urls.add(node.href);
+                        for (const attr of ['href', 'data-href', 'url', 'data-url', 'data-product-url']) {
+                            const val = node.getAttribute(attr);
+                            if (val) urls.add(val);
+                        }
+                    }
+                    if (node.shadowRoot) traverse(node.shadowRoot);
+                    for (const child of node.childNodes) traverse(child);
+                }
+                traverse(document.body);
+                return Array.from(urls);
+            }
+            """
+
+            stagnant_count, last_total = 0, 0
+            for _ in range(max_scrolls):
+                raw_hrefs = page.evaluate(deep_extract_script)
+                for h in raw_hrefs:
+                    full = clean_url(urljoin(url, str(h).strip()))
+                    if is_crawlable(full, base_netloc) and _detect_type_by_url(full, base_url) == T_PRODUCT:
+                        found_urls.add(full)
+
+                try:
+                    load_btn = page.query_selector('button[class*="load-more"], .load-more, salla-infinite-scroll button')
+                    if load_btn and load_btn.is_visible():
+                        load_btn.click()
+                        page.wait_for_timeout(800)
+                except Exception:
+                    pass
+
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1000)
+
+                current_total = len(found_urls)
+                if current_total == last_total:
+                    stagnant_count += 1
+                    if stagnant_count >= 4:
+                        break
+                else:
+                    stagnant_count = 0
+                last_total = current_total
+
+            browser.close()
+    except Exception:
+        pass
+    return found_urls
+
+
+# ==============================================================
+#  فحص الصفحة الواحدة + صمام أمان Playwright
+# ==============================================================
+def fetch_page_with_playwright_fallback(url):
+    """جلب المحتوى عبر المتصفح الخفي إذا كانت الصفحة تعتمد كلياً على الـ JavaScript"""
+    if not HAS_PLAYWRIGHT:
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'])
+            page = browser.new_page(user_agent=HEADERS['User-Agent'], viewport={'width': 1366, 'height': 768})
+            page.goto(url, timeout=25000, wait_until='domcontentloaded')
+            page.wait_for_timeout(1500)
+            content = page.content()
+            browser.close()
+            return content
+    except Exception:
+        return None
+
+
 def broken_page_row(url, reason, source):
     return {
         'page_data': {
@@ -852,7 +1153,16 @@ def _fetch_and_audit(url, base_url, source):
         return broken_page_row(clean_url(res.url), 'ليست صفحة HTML', source)
 
     final_url = clean_url(res.url)
-    soup = make_soup(res.text)
+    html_text = res.text
+    soup = make_soup(html_text)
+
+    # إذا كانت الصفحة فارغة وتعتمد على Hydration كامل، نتدخل بالمتصفح الخفي
+    content_words = len((soup.body or soup).get_text(' ', strip=True).split())
+    if content_words < 15 and HAS_PLAYWRIGHT:
+        rendered_html = fetch_page_with_playwright_fallback(final_url)
+        if rendered_html:
+            html_text = rendered_html
+            soup = make_soup(html_text)
 
     home_key = url_key(normalize_url(base_url))
     if url_key(clean_url(url)) != home_key:
@@ -869,7 +1179,7 @@ def _fetch_and_audit(url, base_url, source):
     page_type = detect_page_type(final_url, base_url, soup)
     base_netloc = urlparse(normalize_url(base_url)).netloc
     
-    links = extract_all_links(soup, res.text, final_url, base_netloc)
+    links = extract_all_links(soup, html_text, final_url, base_netloc)
 
     canonical = ''
     for link in soup.find_all('link', href=True):
@@ -904,7 +1214,7 @@ def _fetch_and_audit(url, base_url, source):
     desc_len = text_length(meta_desc)
     desc_status = grade_length(desc_len, DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)
 
-    content_soup = strip_boilerplate(soup, res.text)
+    content_soup = strip_boilerplate(soup, html_text)
     total_img = 0
     page_images = []
     
@@ -962,156 +1272,9 @@ def _fetch_and_audit(url, base_url, source):
         'images_data': page_images,
         'links': links,
         'product_links': prod_links,
-        'platform_html': res.text[:70000] if page_type == T_HOME else '',
+        'platform_html': html_text[:70000] if page_type == T_HOME else '',
         'platform_headers': dict(res.headers) if page_type == T_HOME else {},
     }
-
-
-# ==============================================================
-#  محركات التغلب على الجافاسكربت والتمرير اللانهائي (Headless + API)
-# ==============================================================
-def harvest_shopify_products_api(base_url):
-    """محرك شوبيفاي المباشر: يسحب المنتجات 100% بدون أي حاجة للجافاسكربت."""
-    base_url = normalize_url(base_url)
-    urls = set()
-    page = 1
-    while page <= 20:
-        endpoint = f"{base_url}/products.json?limit=250&page={page}"
-        res = safe_get(endpoint, timeout=10, retries=1)
-        if res is None or res.status_code != 200:
-            break
-        try:
-            data = res.json()
-            products = data.get('products', [])
-            if not products:
-                break
-            for p in products:
-                handle = p.get('handle')
-                if handle:
-                    urls.add(f"{base_url}/products/{handle}")
-            page += 1
-        except Exception:
-            break
-    return urls
-
-
-def harvest_infinite_scroll_playwright(url, base_url, max_scrolls=35):
-    """
-    المتصفح الخفي المتطور (Playwright):
-    يتمرر لأسفل الصفحة تلقائياً مع اختراق الـ Shadow DOM واعتراض طلبات الشبكة
-    لالتقاط كافة منتجات التمرير اللانهائي حتى 100%.
-    """
-    if not HAS_PLAYWRIGHT:
-        return set()
-    found_urls = set()
-    base_netloc = urlparse(normalize_url(base_url)).netloc
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage'])
-            context = browser.new_context(
-                user_agent=HEADERS['User-Agent'],
-                viewport={'width': 1920, 'height': 1080}
-            )
-            page = context.new_page()
-
-            # اعتراض استجابات الـ API أثناء التمرير
-            def on_response(response):
-                try:
-                    if 'json' in (response.headers.get('content-type') or ''):
-                        text = response.text()
-                        for match in re.finditer(r'/(?:products|product|p)/[a-zA-Z0-9_\-\u0600-\u06FF]+|/[^/"]+/p-?\d+', text):
-                            m_url = clean_url(urljoin(base_url, match.group(0)))
-                            if is_crawlable(m_url, base_netloc) and _detect_type_by_url(m_url, base_url) == T_PRODUCT:
-                                found_urls.add(m_url)
-                except Exception:
-                    pass
-
-            page.on("response", on_response)
-
-            # استخدام domcontentloaded لتجنب تعليق شبكات التتبع
-            page.goto(url, timeout=30000, wait_until='domcontentloaded')
-            page.wait_for_timeout(2000)
-
-            # دالة JavaScript تعبر الـ DOM وتخترق Shadow DOM لسلة وزد
-            deep_extract_script = """
-            () => {
-                const urls = new Set();
-                function traverse(node) {
-                    if (!node) return;
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        if (node.tagName === 'A' && node.href) {
-                            urls.add(node.href);
-                        }
-                        for (const attr of ['href', 'data-href', 'url', 'data-url', 'data-product-url']) {
-                            const val = node.getAttribute(attr);
-                            if (val) urls.add(val);
-                        }
-                        const prod = node.getAttribute('product');
-                        if (prod) {
-                            try {
-                                const parsed = JSON.parse(prod);
-                                if (parsed.url) urls.add(parsed.url);
-                            } catch(e) {}
-                        }
-                    }
-                    if (node.shadowRoot) {
-                        traverse(node.shadowRoot);
-                    }
-                    for (const child of node.childNodes) {
-                        traverse(child);
-                    }
-                }
-                traverse(document.body);
-                return Array.from(urls);
-            }
-            """
-
-            stagnant_count = 0
-            last_total = 0
-
-            for _ in range(max_scrolls):
-                # استخراج الروابط الحالية
-                raw_hrefs = page.evaluate(deep_extract_script)
-                for h in raw_hrefs:
-                    full = clean_url(urljoin(url, str(h).strip()))
-                    if is_crawlable(full, base_netloc) and _detect_type_by_url(full, base_url) == T_PRODUCT:
-                        found_urls.add(full)
-
-                # النقر على زر "تحميل المزيد" إن وجد
-                try:
-                    load_btn = page.query_selector('button[class*="load-more"], .load-more, salla-infinite-scroll button')
-                    if load_btn and load_btn.is_visible():
-                        load_btn.click()
-                        page.wait_for_timeout(1000)
-                except Exception:
-                    pass
-
-                # تمرير سلس يحاكي المستخدم
-                page.evaluate("window.scrollBy({top: 1000, behavior: 'smooth'})")
-                page.wait_for_timeout(800)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1200)
-
-                current_total = len(found_urls)
-                if current_total == last_total:
-                    stagnant_count += 1
-                    if stagnant_count >= 5:  # توقف عند ثبات المنتجات 5 مرات متتالية
-                        break
-                else:
-                    stagnant_count = 0
-                last_total = current_total
-
-            # استخراج أخير
-            raw_hrefs = page.evaluate(deep_extract_script)
-            for h in raw_hrefs:
-                full = clean_url(urljoin(url, str(h).strip()))
-                if is_crawlable(full, base_netloc) and _detect_type_by_url(full, base_url) == T_PRODUCT:
-                    found_urls.add(full)
-
-            browser.close()
-    except Exception:
-        pass
-    return found_urls
 
 
 # ==============================================================
@@ -1264,17 +1427,6 @@ URL_CREDIT = {'u_malformed': 0.5, 'u_ok': 1.0, 'u_underscore': 0.95, 'u_uppercas
 URL_MAX_WORDS = 9
 
 
-def slug_tokens(text):
-    raw = re.split(r'[\s\-_/|،,.:؛…]+', str(text or '').lower())
-    out = []
-    for t in raw:
-        t = re.sub(r'[^0-9a-z\u0600-\u06FF]', '', t)
-        if len(t) < 2:
-            continue
-        out.append(normalize_ar_token(t) if re.search(r'[\u0600-\u06FF]', t) else t)
-    return out
-
-
 def script_of(text):
     ar = len(re.findall(r'[\u0600-\u06FF]', str(text or '')))
     la = len(re.findall(r'[A-Za-z]', str(text or '')))
@@ -1396,18 +1548,6 @@ def detect_duplicate_content(df):
 
 
 MODERN_FORMATS = ('webp', 'avif')
-
-
-def image_format(url):
-    path = urlparse(str(url or '')).path.lower()
-    mo = re.search(r'\.(jpe?g|png|webp|avif|gif|svg|bmp|tiff?)(?:$|\?)', path)
-    if mo:
-        ext = mo.group(1)
-        return 'jpg' if ext in ('jpg', 'jpeg') else ext
-    mo2 = re.search(r'(?:format|fm)=(\w+)', str(url or '').lower())
-    return mo2.group(1) if mo2 else '—'
-
-
 LEN_WEIGHT = {'optimal': 1.0, 'acceptable': 0.7, 'very_short': 0.3,
               'long': 0.4, 'missing': 0.0}
 
@@ -1490,7 +1630,6 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
         pattern = None
         seen_here = set()
         
-        # 1. إذا كان المتصفح الخفي متاحاً، يتم فحص الصفحات ذات التمرير اللانهائي مباشرة
         if HAS_PLAYWRIGHT:
             pw_found = harvest_infinite_scroll_playwright(cat, base_url)
             fresh_pw = pw_found - seen_here
@@ -1504,13 +1643,11 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
                 if cat_products is not None:
                     cat_products.setdefault(cat, set()).update({url_key(x) for x in fresh_pw})
 
-        # 2. الترقيم عبر HTTP requests ودعم AJAX endpoints
         for page in range(2, max_depth + 1):
             candidates = ([pattern] if pattern else PAGING_PATTERNS)
             fresh = set()
             for pat in candidates:
                 url = cat + pat.format(n=page, o=(page - 1) * 20)
-                # إرسال ترويسة AJAX لمحاكاة طلبات سلة وزد
                 res = safe_get(url, retries=0, headers={'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json, text/html'})
                 fetched += 1
                 if res is None or res.status_code != 200:
@@ -1822,85 +1959,6 @@ def localize_df(df, lang):
     return out
 
 
-# ==============================================================
-#  البيانات المهيكلة JSON-LD
-# ==============================================================
-def iter_jsonld(soup):
-    for tag in soup.find_all('script', attrs={'type': 'application/ld+json'}):
-        try:
-            data = json.loads(tag.string or '{}')
-        except Exception:
-            continue
-        stack = [data]
-        while stack:
-            node = stack.pop()
-            if isinstance(node, list):
-                stack.extend(node)
-            elif isinstance(node, dict):
-                yield node
-                for v in node.values():
-                    if isinstance(v, (dict, list)):
-                        stack.append(v)
-
-
-def node_types(node):
-    t = node.get('@type')
-    return {str(x) for x in (t if isinstance(t, list) else [t]) if x}
-
-
-def extract_product_facts(soup):
-    facts = {'name': '', 'images': [], 'sku': '', 'offers': False}
-    for node in iter_jsonld(soup):
-        if 'Product' not in node_types(node):
-            continue
-        nm = node.get('name')
-        if isinstance(nm, str) and nm.strip() and not facts['name']:
-            facts['name'] = re.sub(r'\s+', ' ', nm).strip()
-        img = node.get('image')
-        imgs = img if isinstance(img, list) else ([img] if img else [])
-        for it in imgs:
-            if isinstance(it, dict):
-                it = it.get('url') or it.get('contentUrl')
-            if isinstance(it, str) and it.strip():
-                facts['images'].append(clean_image_url(it.strip()))
-        if node.get('sku') and not facts['sku']:
-            facts['sku'] = str(node['sku'])
-        if node.get('offers'):
-            facts['offers'] = True
-        break
-    facts['images'] = list(dict.fromkeys(facts['images']))
-    return facts
-
-
-COUNT_PATTERNS = [
-    r'عدد\s*المنتجات\s*[:：]?\s*([\d,]+)',
-    r'([\d,]+)\s*منتج(?:اً|ا)?\b',
-    r'من\s*أصل\s*([\d,]+)',
-    r'\b([\d,]+)\s*products?\b',
-    r'showing\s*\d+\s*(?:-|to)\s*\d+\s*of\s*([\d,]+)',
-]
-
-
-def extract_declared_count(soup, text=None):
-    for node in iter_jsonld(soup):
-        if node_types(node) & {'ItemList', 'CollectionPage'}:
-            n = node.get('numberOfItems')
-            if isinstance(n, (int, float)) and n > 0:
-                return int(n)
-    body = text if text is not None else soup.get_text(' ', strip=True)
-    body = body[:4000]
-    best = None
-    for pat in COUNT_PATTERNS:
-        for mo in re.finditer(pat, body, re.I):
-            try:
-                v = int(mo.group(1).replace(',', ''))
-            except Exception:
-                continue
-            if 0 < v < 100000:
-                best = v if best is None else max(best, v)
-    return best
-
-
 def build_structured_report(df, declared_counts, cat_products=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     prod = ok[ok['نوع الصفحة'] == T_PRODUCT]
@@ -2031,70 +2089,101 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
 
 
 # ==============================================================
-#  محرك الاكتشاف والفحص الشامل
+#  محرك الاكتشاف والفحص الشامل (المطور)
 # ==============================================================
-def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
-                       progress=None, max_rounds=6):
+def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progress=None):
     base_url = normalize_url(base_url)
     if progress:
         progress('sitemap_read')
         
+    # 1. كشف المنصة أولاً عبر الصفحة الرئيسية
+    home_res = safe_get(base_url)
+    platform = 'unknown'
+    if home_res and home_res.status_code == 200:
+        platform = detect_platform(home_res.text, dict(home_res.headers), base_url)
+
+    # 2. قراءة خريطة الموقع
     sitemap_urls, sm_report = collect_sitemap_urls(base_url)
     sitemap_keys = {url_key(u) for u in sitemap_urls}
 
-    # فحص شوبيفاي المباشر لحصد المنتجات 100% فوراً
-    shopify_products = harvest_shopify_products_api(base_url)
+    # 3. تجميع الروابط المبدئية حسب المنصة المكتشفة
+    initial_urls = set(sitemap_urls) | {base_url}
     
+    if platform == 'shopify':
+        initial_urls.update(harvest_shopify_all(base_url))
+    elif platform == 'zid':
+        initial_urls.update(harvest_zid_catalog(base_url))
+        
     platform_seeds = {f"{base_url}/{p}" for p in PLATFORM_LISTINGS}
-    speculative = {url_key(u) for u in platform_seeds}
-    queue = sorted({clean_url(u) for u in sitemap_urls} | {base_url} | platform_seeds | shopify_products)
+    initial_urls.update(platform_seeds)
+
+    # تجهيز طابور الزحف
+    base_netloc = urlparse(base_url).netloc
+    queue = list({clean_url(u) for u in initial_urls if is_crawlable(u, base_netloc)})
     seen = {url_key(u) for u in queue}
+    
     linked = set()
     cat_links = {}
     pages, images = [], []
-    platform = 'unknown'
-    rounds = 0
     truncated = False
+    step = 0
 
-    while queue and rounds < max_rounds:
-        rounds += 1
-        room = max_pages - len(pages)
-        if room <= 0:
-            truncated = True
-            break
-        batch, queue = queue[:room], queue[room:]
-        if queue:
-            truncated = True
-        nxt = []
-        src = 'خريطة الموقع' if rounds == 1 and sitemap_urls else 'رابط داخلي'
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            for res in ex.map(fetch_and_audit, [(u, base_url, src) for u in batch]):
+    # 4. دورة زحف مستمرة وشاملة
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        while queue and len(pages) < max_pages:
+            step += 1
+            batch_size = min(workers * 4, max_pages - len(pages), len(queue))
+            batch = queue[:batch_size]
+            queue = queue[batch_size:]
+
+            tasks = [(u, base_url, 'خريطة الموقع' if url_key(u) in sitemap_keys else 'زحف داخلي') for u in batch]
+            
+            for res in ex.map(fetch_and_audit, tasks):
                 row = res['page_data']
                 pages.append(row)
                 images.extend(res['images_data'])
+                
+                # التقاط المنصة إذا كانت غير محددة بعد
                 if res.get('platform_html') and platform == 'unknown':
-                    platform = detect_platform(res['platform_html'],
-                                               res.get('platform_headers'), base_url)
+                    platform = detect_platform(res['platform_html'], res.get('platform_headers'), base_url)
+                    if platform == 'shopify':
+                        for su in harvest_shopify_all(base_url):
+                            k = url_key(su)
+                            if k not in seen:
+                                seen.add(k)
+                                queue.append(su)
+
                 raw = row.get('_raw_url', row['الرابط'])
-                seen.add(url_key(raw))
+                
+                # تتبع منتجات الأقسام
                 if row['نوع الصفحة'] in (T_CATEGORY, T_HOME):
                     cat_links.setdefault(raw, set()).update(
                         {url_key(x) for x in res.get('product_links', set())})
+                    
+                    # فحص Ajax لمنتجات سلة
+                    if platform == 'salla' and row['نوع الصفحة'] == T_CATEGORY:
+                        salla_extra = harvest_salla_ajax_products(base_url, raw)
+                        for se in salla_extra:
+                            k = url_key(se)
+                            if k not in seen:
+                                seen.add(k)
+                                queue.append(se)
+
+                # إضافة الروابط الجديدة للطابور
                 for link in res.get('links', ()):
                     k = url_key(link)
                     linked.add(k)
                     if k not in seen:
                         seen.add(k)
-                        nxt.append(link)
-        queue = nxt + queue
-        if progress:
-            progress('audit', done=len(pages), pending=len(queue), round=rounds)
+                        queue.append(link)
 
-    pages = [r for r in pages
-             if r['متاحة'] or url_key(r.get('_raw_url', r['الرابط'])) not in speculative
-             or url_key(r.get('_raw_url', r['الرابط'])) in sitemap_keys
-             or url_key(r.get('_raw_url', r['الرابط'])) in linked]
+            if progress:
+                progress('audit', done=len(pages), pending=len(queue), round=step)
 
+    if len(pages) >= max_pages and queue:
+        truncated = True
+
+    # تصنيف الظهور بالخريطة والارتباط الداخلي
     for row in pages:
         raw = row.get('_raw_url', row['الرابط'])
         k = url_key(raw)
@@ -2103,12 +2192,18 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     from collections import Counter
     src_counts = dict(Counter(r.get('مصدر الاكتشاف', '—') for r in pages))
-    meta = {'source_counts': src_counts,
-            'truncated': truncated, 'pending': len(queue), 'rounds': rounds,
-            'cat_products': cat_links, 'sitemap_count': len(sitemap_keys),
-            'sitemap_urls': sitemap_urls, 'sitemap_report': sm_report,
-            'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages
-                             if r['نوع الصفحة'] in (T_CATEGORY, T_HOME, T_BLOG)]}
+    meta = {
+        'source_counts': src_counts,
+        'truncated': truncated, 
+        'pending': len(queue), 
+        'rounds': step,
+        'cat_products': cat_links, 
+        'sitemap_count': len(sitemap_keys),
+        'sitemap_urls': sitemap_urls, 
+        'sitemap_report': sm_report,
+        'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages if r['نوع الصفحة'] in (T_CATEGORY, T_HOME, T_BLOG)]
+    }
+    
     return pages, images, meta, platform
 
 
@@ -2138,7 +2233,6 @@ def build_sitemap_report(df, base_url, sm_report=None):
     prod_unlisted = int((~in_map & alive & (df['نوع الصفحة'] == T_PRODUCT)).sum())
     partial = bool((sm_report or {}).get('partial'))
     
-    # تحويل قيم value_counts إلى int قياسي لمنع خطأ json.dumps
     orphan_counts = {
         str(k): int(v)
         for k, v in df[in_map & alive & ~linked & ~is_prod]['نوع الصفحة'].value_counts().items()
@@ -2183,7 +2277,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
         target, max_pages, workers, (lambda st, **k: say(st, **k)))
     cat_products = crawl_meta.setdefault('cat_products', {})
 
-    # تنفيذ التمرير اللانهائي والترقيم على كافة الأقسام والكاتالوج والصفحة الرئيسية
+    # التمرير والترقيم الإضافي للمسارات إذا طُلب ذلك
     if do_pagination:
         say('pagination_start')
         seen_keys = {url_key(r.get('_raw_url', r['الرابط'])) for r in pages}
@@ -2205,6 +2299,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
             pages += p2
             imgs += i2
 
+    # محاولة إعادة فحص الصفحات التي فشل الاتصال بها
     retry = [r['_raw_url'] for r in pages
              if not r['متاحة'] and 'فشل اتصال' in str(r['كود الاستجابة'])]
     if retry:
@@ -2226,7 +2321,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
             pages = merged
             imgs += [im for im in fixed_imgs if im['رابط الصفحة'] in {g['الرابط'] for g in good.values()}]
 
-    # طبقة أمان إضافية لضمان استبعاد أي رابط وسم (Tag) قد يكون تسلل
+    # استبعاد روابط الوسوم نهائياً
     pages = [r for r in pages if not is_tag_url(r.get('_raw_url', r.get('الرابط', '')))]
 
     df = dedupe_pages(pd.DataFrame(pages))
