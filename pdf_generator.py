@@ -1,7 +1,7 @@
 """مولّد تقرير العميل وعرض السعر بصيغة PDF."""
 import re
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from fpdf import FPDF
 import arabic_reshaper
@@ -31,6 +31,9 @@ PDF_TXT = {
         'm_pages': 'صفحة معروضة', 'm_products': 'منتج', 'm_images': 'صورة',
         'm_issues': 'بند يحتاج معالجة', 'm_cats': 'قسم',
         'u_page': 'صفحة', 'u_product': 'منتج', 'u_cat': 'تصنيف', 'u_article': 'مقال',
+        'h_url': 'الرابط', 'h_where': 'أين يظهر', 'h_code': 'الكود',
+        'w_map': 'الخريطة', 'w_link': 'رابط داخلي', 'w_both': 'الخريطة + رابط داخلي',
+        'more_links': 'و{n} رابط آخر في ملف «روابط لا تعمل» ضمن حزمة البيانات.',
         'u_link': 'رابط', 'u_title': 'عنوان', 'u_desc': 'وصف', 'u_img': 'صورة',
         'na': 'غير متاح',
     },
@@ -50,6 +53,9 @@ PDF_TXT = {
         'm_pages': 'visible pages', 'm_products': 'products', 'm_images': 'images',
         'm_issues': 'items to fix', 'm_cats': 'categories',
         'u_page': 'pages', 'u_product': 'products', 'u_cat': 'categories',
+        'h_url': 'URL', 'h_where': 'Found in', 'h_code': 'Code',
+        'w_map': 'Sitemap', 'w_link': 'Internal link', 'w_both': 'Sitemap + internal link',
+        'more_links': 'Plus {n} more in the "Broken Links" file of the data package.',
         'u_article': 'articles', 'u_link': 'links', 'u_title': 'titles',
         'u_desc': 'descriptions', 'u_img': 'images', 'na': 'not available',
     },
@@ -105,6 +111,16 @@ SECTION_TXT = {
                       'أصلاً. والصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط '
                       'داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. '
                       'والروابط المحوّلة داخل الخريطة تستهلك ميزانية الزحف بلا مقابل.',
+        },
+        'broken': {
+            'title': 'روابط لا تعمل وليس لها تحويل',
+            'intro': 'روابط داخل المتجر أو في خريطة الموقع ترد مباشرة بأن الصفحة غير '
+                     'موجودة (خطأ 404)، دون أي تحويل إلى صفحة بديلة. لا تشمل هذه القائمة '
+                     'الروابط المحوّلة، ولا الصفحات التي تعذّر الوصول إليها مؤقتاً أثناء الفحص.',
+            'impact': 'الزائر الذي يصل إلى صفحة غير موجودة يغادر غالباً دون شراء. ومحركات '
+                      'البحث تستهلك جزءاً من زحفها على هذه الروابط، وإذا كانت الصفحة قد '
+                      'اكتسبت روابط أو زيارات سابقاً فإن قيمتها تضيع بالكامل. تحويل 301 '
+                      'إلى أقرب صفحة بديلة يحفظ هذه القيمة ويعيد الزائر إلى مسار الشراء.',
         },
         'diagnosis': {
             'title': 'التشخيص وخطة العمل',
@@ -167,6 +183,16 @@ SECTION_TXT = {
                       'engines. A sitemap page with no internal link path stays worthless: '
                       'it gains no authority and brings no traffic. Redirecting URLs inside '
                       'the sitemap consume crawl budget for nothing.',
+        },
+        'broken': {
+            'title': 'Broken links with no redirect',
+            'intro': 'URLs inside the store or in the sitemap that return "not found" '
+                     '(404) directly, with no redirect to an alternative page. Redirected '
+                     'URLs and pages that were temporarily unreachable are not included.',
+            'impact': 'A visitor who lands on a missing page usually leaves without buying. '
+                      'Search engines also spend crawl budget on these URLs, and any links '
+                      'or traffic the page earned are lost. A 301 redirect to the closest '
+                      'alternative keeps that value and returns the visitor to the purchase path.',
         },
         'diagnosis': {
             'title': 'Diagnosis and action plan',
@@ -300,8 +326,10 @@ def build_diagnosis(score, stats, lang):
         if stats.get('not_indexed_count'):
             points.append(f"{stats['not_indexed_count']} منتجاً معروضاً في المتجر "
                           "لا يظهر في خريطة الموقع.")
-        if stats.get('broken_pages'):
-            points.append(f"{stats['broken_pages']} رابط معطل داخل المتجر يصل إليه الزائر.")
+        if stats.get('broken_no_redirect'):
+            points.append(f"{stats['broken_no_redirect']} رابط لا يعمل وليس له تحويل (404)، "
+                          "فيصل الزائر ومحركات البحث إلى صفحة غير موجودة. الحل تحويل 301 "
+                          "لكل رابط إلى أقرب صفحة بديلة.")
         if stats.get('archive_pages', 0) > 20:
             points.append(f"{stats['archive_pages']} صفحة أرشيف (وسوم وقوائم) تعرض "
                           "محتوى مكرراً بعنوان واحد، وتستهلك ميزانية الزحف دون أن "
@@ -404,8 +432,9 @@ def build_diagnosis(score, stats, lang):
     if stats.get('not_indexed_count'):
         points.append(f"{stats['not_indexed_count']} visible products are absent "
                       "from the sitemap.")
-    if stats.get('broken_pages'):
-        points.append(f"{stats['broken_pages']} broken links are reachable by visitors.")
+    if stats.get('broken_no_redirect'):
+        points.append(f"{stats['broken_no_redirect']} URLs return 404 with no redirect; "
+                      "each needs a 301 to the closest alternative page.")
     if stats.get('archive_pages', 0) > 20:
         points.append(f"{stats['archive_pages']} archive pages (tags and lists) show "
                       "duplicated content under a single title and consume crawl "
@@ -582,6 +611,59 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
                 self.line(M, self.get_y(), 210 - M, self.get_y())
             self.ln(6)
 
+        def fit(self, txt, width, size=8.5):
+            """يقصّ النص من نهايته حتى يتسع للعرض المتاح."""
+            self.set_font(FONT, "", size)
+            t = str(txt)
+            if self.get_string_width(fmt(t)) <= width:
+                return t
+            while t and self.get_string_width(fmt(t + '…')) > width:
+                t = t[:-1]
+            return t + '…'
+
+        def link_list(self, rows, limit=30):
+            """قائمة روابط: المسار، مكان ظهوره، كود الاستجابة."""
+            wc, ww = 16, 44
+            wu = W - wc - ww
+            head = [(T['h_code'], wc, 'C'), (T['h_where'], ww, 'C'), (T['h_url'], wu, ALIGN)]
+            if not rtl:
+                head = list(reversed(head))
+            self.set_font(FONT, BOLD(), 9)
+            self.set_fill_color(*C_INK)
+            self.set_text_color(255, 255, 255)
+            self.set_x(M)
+            for i, (h, w, a) in enumerate(head):
+                self.cell(w, 8, fmt(h), 0, 1 if i == len(head) - 1 else 0, a, fill=True)
+            for i, r in enumerate(rows[:limit]):
+                if self.get_y() > 262:
+                    self.add_page()
+                y = self.get_y()
+                if i % 2 == 0:
+                    self.set_fill_color(*C_BG)
+                    self.rect(M, y, W, 7, 'F')
+                # بلا شرطة في البداية: في الاتجاه العربي تنتقل الشرطة لآخر السطر فتربك القراءة
+                path = unquote(urlparse(str(r.get('الرابط', ''))).path).strip('/') or '/'
+                in_map = str(r.get('في الخريطة')) in ('نعم', 'True', 'Yes')
+                linked = str(r.get('مرتبط برابط')) in ('نعم', 'True', 'Yes')
+                where = T['w_both'] if (in_map and linked) else \
+                    T['w_link'] if linked else T['w_map']
+                code = str(r.get('كود الاستجابة', '404')).replace('خطأ ', '')
+                cells = [(code, wc, 'C', C_BAD), (where, ww, 'C', C_MUTED),
+                         (self.fit(path, wu - 3), wu, ALIGN, C_INK)]
+                if not rtl:
+                    cells = list(reversed(cells))
+                self.set_x(M)
+                for j, (txt, w, a, col) in enumerate(cells):
+                    self.set_font(FONT, "", 8.5)
+                    self.set_text_color(*col)
+                    self.cell(w, 7, fmt(txt), 0, 1 if j == len(cells) - 1 else 0, a)
+                self.set_draw_color(*C_LINE)
+                self.line(M, self.get_y(), 210 - M, self.get_y())
+            if len(rows) > limit:
+                self.ln(2)
+                self.para(T['more_links'].format(n=len(rows) - limit), size=8.5)
+            self.ln(5)
+
         def impact(self, key):
             txt = S[key].get('impact')
             if not txt:
@@ -737,9 +819,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
          'Deleted product URLs redirecting home',
          f"{stats.get('deleted_pages', 0)} {T['u_link']}",
          'bad' if stats.get('deleted_pages') else 'ok'),
-        ('روابط معطلة يصل إليها الزائر' if rtl else 'Broken links reachable by visitors',
-         f"{stats.get('broken_pages', 0)} {T['u_link']}",
-         'bad' if stats.get('broken_pages') else 'ok'),
+        ('روابط لا تعمل وليس لها تحويل (404)' if rtl else 'Broken links with no redirect (404)',
+         f"{stats.get('broken_no_redirect', 0)} {T['u_link']}",
+         'bad' if stats.get('broken_no_redirect') else 'ok'),
         ('صفحات تعذّر الاتصال بها أثناء الفحص' if rtl else
          'Pages unreachable during the scan',
          f"{stats.get('unreachable_pages', 0)} {T['u_page']}",
@@ -889,6 +971,19 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         ])
         pdf.impact('sitemap')
 
+    # ======================= روابط لا تعمل بلا تحويل =======================
+    if stats.get('broken_no_redirect'):
+        n += 1
+        pdf.add_page()
+        pdf.section(n, 'broken')
+        rows = stats.get('broken_links') or []
+        if rows:
+            pdf.link_list(rows)
+        else:
+            pdf.table([(('روابط لا تعمل وليس لها تحويل' if rtl else 'Broken links, no redirect'),
+                        f"{stats['broken_no_redirect']} {T['u_link']}", 'bad')])
+        pdf.impact('broken')
+
     # ======================= التشخيص =======================
     n += 1
     pdf.add_page()
@@ -945,7 +1040,8 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 DEFAULT_PRICES = {
     'meta_title': 15.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
     'meta_desc': 10.0,    # وصف الميتا لكل صفحة
-    'image_alt': 3.0,     # النص البديل لكل صورة
+    'image_alt': 5.0,     # النص البديل لكل صورة
+    'broken_fix': 10.0,   # معالجة رابط لا يعمل: تحويل 301 لأقرب بديل + تنظيف الخريطة
 }
 PAYMENT = {
     'iban': 'SA87 1000 0026 5571 0000 0103',
@@ -970,6 +1066,7 @@ def build_quote(summary, prices=None, discount_rate=0.0):
     titles = int(summary.get('bad_titles', 0))
     descs = int(summary.get('bad_descs', 0))
     alts = int(summary.get('missing_alts', 0)) + int(summary.get('weak_alts', 0))
+    broken = int(summary.get('broken_no_redirect', 0))
 
     items = []
     if titles:
@@ -978,11 +1075,13 @@ def build_quote(summary, prices=None, discount_rate=0.0):
         items.append({'key': 'meta_desc', 'qty': descs, 'unit': pr['meta_desc']})
     if alts:
         items.append({'key': 'image_alt', 'qty': alts, 'unit': pr['image_alt']})
+    if broken:
+        items.append({'key': 'broken_fix', 'qty': broken, 'unit': pr['broken_fix']})
     for it in items:
         it['total'] = round(it['qty'] * it['unit'], 2)
 
     subtotal = round(sum(i['total'] for i in items), 2)
-    units = titles + descs + alts
+    units = titles + descs + alts + broken
     rate = max(0.0, min(float(discount_rate or 0.0), 0.9))
     disc = round(subtotal * rate, 2)
     return {'items': items, 'subtotal': subtotal, 'units': units,
@@ -1005,7 +1104,10 @@ INVOICE_TXT = {
                        'من نتائج البحث',
         'image_alt': 'كتابة النصوص البديلة للصور',
         'image_alt_d': 'وصف دقيق لكل صورة يُظهرها في بحث صور جوجل',
-        'unit_page': 'صفحة', 'unit_img': 'صورة',
+        'broken_fix': 'معالجة الروابط التي لا تعمل',
+        'broken_fix_d': 'تحويل 301 لكل رابط معطل إلى أقرب صفحة بديلة، '
+                        'وحذفه من خريطة الموقع وتصحيح الروابط الداخلية التي تشير إليه',
+        'unit_page': 'صفحة', 'unit_img': 'صورة', 'unit_link': 'رابط',
         'subtotal': 'المجموع', 'discount': 'خصم الكمية', 'total': 'الإجمالي المستحق',
         'novat': 'الأسعار غير شاملة ضريبة القيمة المضافة',
         'pay': 'بيانات الدفع', 'iban': 'الآيبان', 'stc': 'STC Bank',
@@ -1027,7 +1129,10 @@ INVOICE_TXT = {
         'image_alt': 'Image alt texts',
         'image_alt_d': 'A precise description per image so it appears in '
                        'Google Image search',
-        'unit_page': 'pages', 'unit_img': 'images',
+        'broken_fix': 'Broken link repair',
+        'broken_fix_d': 'A 301 redirect for each broken URL to the closest alternative '
+                        'page, removed from the sitemap with internal links corrected',
+        'unit_page': 'pages', 'unit_img': 'images', 'unit_link': 'links',
         'subtotal': 'Subtotal', 'discount': 'Volume discount', 'total': 'Total due',
         'novat': 'Prices exclude VAT',
         'pay': 'Payment details', 'iban': 'IBAN', 'stc': 'STC Bank',
@@ -1150,7 +1255,8 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
 
     for idx, it in enumerate(quote['items']):
         name = T[it['key']]
-        unit_lbl = T['unit_img'] if it['key'] == 'image_alt' else T['unit_page']
+        unit_lbl = {'image_alt': T['unit_img'],
+                    'broken_fix': T['unit_link']}.get(it['key'], T['unit_page'])
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
         for word in T[it['key'] + '_d'].split():
