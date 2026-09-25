@@ -19,10 +19,10 @@ from audit_engine import (
     T_ARCHIVE, T_UNKNOWN, T_BROKEN, CHECK_FAIL, CHECK_WARN, CHECK_PASS,
     init_db, run_full_scan, compute_summary, localize_df, unique_images,
     normalize_url, clean_url, dedupe_pages, run_self_checks,
-    url_key,
+    url_key, build_broken_links,
 )
 from pdf_generator import generate_client_pdf, generate_invoice_pdf, build_quote, DEFAULT_PRICES
-from export_utils import build_zip
+from export_utils import build_zip, build_filtered_exports, to_csv_bytes
 
 st.set_page_config(page_title="مركز عمليات السيو | أنس راشد",
                    layout="wide", page_icon="🚀",
@@ -723,6 +723,7 @@ if nav == "🔍 فحص متجر جديد":
             exp_summary = dict(summary)
             exp_summary['platform_label'] = (PLATFORM_LABEL if lang == 'ar'
                                              else PLATFORM_LABEL_EN).get(platform, '—')
+            exp_summary['broken_links'] = build_broken_links(df).to_dict('records')
             netloc = urlparse(st.session_state.current_url).netloc or "store"
             try:
                 pdf_bytes = generate_client_pdf(st.session_state.current_url,
@@ -749,7 +750,7 @@ if nav == "🔍 فحص متجر جديد":
 
             st.markdown("---")
             st.markdown("##### 💰 عرض السعر")
-            pc1, pc2, pc3 = st.columns(3)
+            pc1, pc2, pc3, pc4 = st.columns(4)
             with pc1:
                 p_title = st.number_input("سعر عنوان الميتا + الرابط (ريال)",
                                           1.0, 200.0, DEFAULT_PRICES['meta_title'], 1.0)
@@ -759,6 +760,9 @@ if nav == "🔍 فحص متجر جديد":
             with pc3:
                 p_alt = st.number_input("سعر وصف الصورة (ريال)",
                                         0.5, 100.0, DEFAULT_PRICES['image_alt'], 0.5)
+            with pc4:
+                p_broken = st.number_input("سعر معالجة رابط لا يعمل (ريال)",
+                                           1.0, 200.0, DEFAULT_PRICES['broken_fix'], 1.0)
             dc1, dc2 = st.columns([1, 3])
             with dc1:
                 use_disc = st.checkbox("إضافة خصم", value=False)
@@ -767,14 +771,15 @@ if nav == "🔍 فحص متجر جديد":
                                      disabled=not use_disc)
             quote = build_quote(summary,
                                 {'meta_title': p_title, 'meta_desc': p_desc,
-                                 'image_alt': p_alt},
+                                 'image_alt': p_alt, 'broken_fix': p_broken},
                                 discount_rate=(disc_pct / 100 if use_disc else 0.0))
-            qc = st.columns(4)
+            qc = st.columns(5)
             qc[0].metric("عناوين وروابط", f"{summary.get('bad_titles', 0)}")
             qc[1].metric("أوصاف ميتا", f"{summary.get('bad_descs', 0)}")
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
-            qc[3].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
+            qc[3].metric("روابط لا تعمل", f"{summary.get('broken_no_redirect', 0)}")
+            qc[4].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
             if quote['discount']:
                 st.caption(f"شمل خصماً {int(quote['discount_rate'] * 100)}% "
                            f"({quote['discount']:,.0f}) · الأسعار غير شاملة "
@@ -811,6 +816,31 @@ if nav == "🔍 فحص متجر جديد":
                     "📦 حزمة البيانات (ZIP)" if lang == 'ar' else "📦 Data package (ZIP)",
                     zip_bytes, f"Data_Package_{netloc}_{lang}.zip", "application/zip",
                     use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("##### 🎯 تحميل ما يحتاج عملاً فقط" if lang == 'ar'
+                        else "##### 🎯 Download only what needs work")
+            filtered = build_filtered_exports(df, images_df, lang)
+            buttons = [
+                ('fix', "📄 الصفحات التي بها مشاكل", "📄 Pages with issues"),
+                ('alt_missing', "🖼️ صور بلا وصف Alt", "🖼️ Images missing alt"),
+                ('alt_weak', "🖼️ صور وصفها غير وصفي أو مكرر", "🖼️ Weak or duplicate alt"),
+                ('broken', "🔗 روابط لا تعمل وبلا تحويل", "🔗 Broken links, no redirect"),
+            ]
+            fcols = st.columns(len(buttons))
+            for col, (key, lbl_ar, lbl_en) in zip(fcols, buttons):
+                with col:
+                    label = lbl_ar if lang == 'ar' else lbl_en
+                    if key in filtered:
+                        fname, table = filtered[key]
+                        st.download_button(f"{label} ({len(table)})", to_csv_bytes(table),
+                                           f"{netloc}_{fname}", "text/csv",
+                                           use_container_width=True, key=f"dl_{key}_{lang}")
+                    else:
+                        st.button(f"{label} (0)", disabled=True, use_container_width=True,
+                                  key=f"dl_{key}_{lang}_empty",
+                                  help="لا يوجد ما يحتاج عملاً في هذا البند." if lang == 'ar'
+                                  else "Nothing to fix here.")
 
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
