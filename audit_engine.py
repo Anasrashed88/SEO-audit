@@ -2082,6 +2082,34 @@ def dedupe_pages(df):
     return out
 
 
+def _avail_series(df):
+    return df['متاحة'].fillna(False).astype(bool) if 'متاحة' in df.columns \
+        else pd.Series(True, index=df.index)
+
+
+def title_url_fix_mask(df):
+    """صفحات يحتاج عنوانها أو رابطها إصلاحاً: طول غير مثالي، أو عنوان مكرر/رموز/اسم المتجر فقط،
+    أو رابط بصياغة سيئة. نفس التعريف يُحسب به بند «العناوين والروابط» في عرض السعر."""
+    if df is None or df.empty:
+        return pd.Series(False, index=getattr(df, 'index', None))
+    m = df['حالة العنوان'] != 'optimal'
+    if 'جودة العنوان' in df.columns:
+        m |= ~df['جودة العنوان'].fillna('q_na').isin(['q_ok', 'q_na'])
+    if 'جودة الرابط' in df.columns:
+        m |= ~df['جودة الرابط'].fillna('u_na').isin(['u_ok', 'u_na'])
+    return _avail_series(df) & m
+
+
+def desc_fix_mask(df):
+    """صفحات يحتاج وصف الميتا فيها إصلاحاً: طول غير مثالي، أو وصف مكرر أو نسخة من العنوان."""
+    if df is None or df.empty:
+        return pd.Series(False, index=getattr(df, 'index', None))
+    m = df['حالة الوصف'] != 'optimal'
+    if 'جودة الوصف' in df.columns:
+        m |= ~df['جودة الوصف'].fillna('q_na').isin(['q_ok', 'q_na'])
+    return _avail_series(df) & m
+
+
 def _code_series(df):
     return df['كود الاستجابة'].astype(str)
 
@@ -2111,6 +2139,9 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None):
         # تعذّر الوصول مؤقتاً (رفض، مهلة، خطأ خادم) — ليست محذوفة
         'unreachable_pages': int(((df['متاحة'] == False) & ~not_found & ~deleted).sum()),  # noqa: E712
         'bad_titles': int((~ok['حالة العنوان'].isin(['optimal'])).sum()),
+        # ما يحتاج عملاً فعلاً (يطابق ملفات التحميل وكميات عرض السعر)
+        'fix_titles_urls': int(title_url_fix_mask(df).sum()),
+        'fix_descs': int(desc_fix_mask(df).sum()),
         'critical_titles': int(ok['حالة العنوان'].isin(
             ['missing', 'very_short', 'long']).sum()),
         'bad_descs': int((~ok['حالة الوصف'].isin(['optimal'])).sum()),
