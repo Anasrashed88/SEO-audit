@@ -7,6 +7,7 @@ import pandas as pd
 from audit_engine import (
     PAGE_TYPE_ORDER, PAGE_TYPE_LABEL, STATUS_LABEL, QUALITY_LABEL, URL_LABEL,
     COL_EN, ALT_WEAK_STATES, localize_df, unique_images, build_broken_links,
+    title_url_fix_mask, desc_fix_mask,
     T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_ARCHIVE, T_UNKNOWN,
     T_BROKEN,
 )
@@ -27,6 +28,9 @@ ZIP_NAMES = {
            'alt_missing': "00_صور_بلا_وصف.csv",
            'alt_weak': "00_صور_وصفها_غير_وصفي_أو_مكرر.csv",
            'broken': "8_روابط_لا_تعمل_بلا_تحويل.csv",
+           'titles': "00_عناوين_وروابط_تحتاج_إصلاح.csv",
+           'descs': "00_أوصاف_ميتا_تحتاج_إصلاح.csv",
+           'bundle': "ملفات_العمل.zip",
            'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
            'imggap': "12_صفحات_صورها_ناقصة.csv",
            'namegap': "13_اسم_معلن_مختلف.csv",
@@ -45,6 +49,9 @@ ZIP_NAMES = {
            'alt_missing': "00_images_missing_alt.csv",
            'alt_weak': "00_images_weak_or_duplicate_alt.csv",
            'broken': "8_broken_links_no_redirect.csv",
+           'titles': "00_titles_and_urls_to_fix.csv",
+           'descs': "00_meta_descriptions_to_fix.csv",
+           'bundle': "work_files.zip",
            'redirect': "11_dead_urls_in_sitemap.csv",
            'imggap': "12_pages_with_missing_images.csv",
            'namegap': "13_declared_name_mismatch.csv",
@@ -144,6 +151,85 @@ def build_image_list(images_df, states, lang='ar'):
     return localize_df(sub, lang)
 
 
+COL_EN.setdefault('اسم المنتج المعروض', 'Displayed Name')
+
+
+def _title_issues(r, lang):
+    L, QL, UL = STATUS_LABEL[lang], QUALITY_LABEL[lang], URL_LABEL[lang]
+    need = []
+    st = r.get('حالة العنوان')
+    if st in ('missing', 'very_short', 'long'):
+        need.append(('العنوان' if lang == 'ar' else 'Title') + f" ({L[st]})")
+    elif st == 'acceptable':
+        need.append('العنوان أقصر من المثالي' if lang == 'ar' else 'Title below ideal length')
+    q = r.get('جودة العنوان')
+    if q not in ('q_ok', 'q_na', None) and not (isinstance(q, float)):
+        need.append(('العنوان: ' if lang == 'ar' else 'Title: ') + QL.get(q, str(q)))
+    u = r.get('جودة الرابط')
+    if u not in ('u_ok', 'u_na', None) and not (isinstance(u, float)):
+        need.append(('الرابط: ' if lang == 'ar' else 'URL: ') + UL.get(u, str(u)))
+    return ' · '.join(need)
+
+
+def _desc_issues(r, lang):
+    L, QL = STATUS_LABEL[lang], QUALITY_LABEL[lang]
+    need = []
+    st = r.get('حالة الوصف')
+    if st in ('missing', 'very_short', 'long'):
+        need.append(('الوصف' if lang == 'ar' else 'Description') + f" ({L[st]})")
+    elif st == 'acceptable':
+        need.append('الوصف أقصر من المثالي' if lang == 'ar' else 'Description below ideal length')
+    q = r.get('جودة الوصف')
+    if q not in ('q_ok', 'q_na', None) and not (isinstance(q, float)):
+        need.append(('الوصف: ' if lang == 'ar' else 'Description: ') + QL.get(q, str(q)))
+    return ' · '.join(need)
+
+
+def _priority_sorted(rows):
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out.sort_values('درجة السيو', na_position='last').reset_index(drop=True)
+    out.insert(0, 'الأولوية', range(1, len(out) + 1))
+    return out
+
+
+def build_titles_urls_list(df, lang='ar'):
+    """الصفحات التي يحتاج عنوانها أو رابطها إصلاحاً فقط — ومعها ما يلزم لكتابة العنوان الجديد."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in df[title_url_fix_mask(df)].iterrows():
+        rows.append({
+            'نوع الصفحة': r['نوع الصفحة'], 'الرابط': r['الرابط'],
+            'درجة السيو': r.get('درجة السيو'),
+            'ما يحتاج إصلاحاً': _title_issues(r, lang),
+            'عنوان الميتا الحالي': r.get('عنوان الميتا', ''),
+            'طول العنوان': r.get('طول العنوان', 0),
+            'اسم المنتج المعروض': r.get('اسم المنتج المعروض', ''),
+            'المسار': r.get('المسار', ''),
+        })
+    return localize_df(_priority_sorted(rows), lang)
+
+
+def build_descs_list(df, lang='ar'):
+    """الصفحات التي يحتاج وصف الميتا فيها إصلاحاً فقط."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in df[desc_fix_mask(df)].iterrows():
+        rows.append({
+            'نوع الصفحة': r['نوع الصفحة'], 'الرابط': r['الرابط'],
+            'درجة السيو': r.get('درجة السيو'),
+            'ما يحتاج إصلاحاً': _desc_issues(r, lang),
+            'وصف الميتا الحالي': r.get('وصف الميتا', ''),
+            'طول الوصف': r.get('طول الوصف', 0),
+            'عنوان الميتا الحالي': r.get('عنوان الميتا', ''),
+            'اسم المنتج المعروض': r.get('اسم المنتج المعروض', ''),
+        })
+    return localize_df(_priority_sorted(rows), lang)
+
+
 def build_broken_list(df, lang='ar'):
     """الروابط التي لا تعمل وليس لها إعادة توجيه، جاهزة للتصدير."""
     out = build_broken_links(df)
@@ -157,9 +243,9 @@ def build_filtered_exports(df, images_df, lang='ar'):
     """الملفات التي يمكن تحميلها منفصلة من الواجهة:
     يعيد {المفتاح: (اسم الملف، جدول)} للجداول غير الفارغة فقط."""
     names = ZIP_NAMES[lang]
-    fix, _ = build_fix_lists(df, images_df, lang)
     tables = {
-        'fix': fix,
+        'titles': build_titles_urls_list(df, lang),
+        'descs': build_descs_list(df, lang),
         'alt_missing': build_image_list(images_df, ALT_MISSING_STATES, lang),
         'alt_weak': build_image_list(images_df, ALT_WEAK_EXPORT, lang),
         'broken': build_broken_list(df, lang),
@@ -169,6 +255,15 @@ def build_filtered_exports(df, images_df, lang='ar'):
 
 def to_csv_bytes(table):
     return table.to_csv(index=False).encode('utf-8-sig')
+
+
+def build_filtered_zip(filtered):
+    """كل ملفات العمل في ملف مضغوط واحد."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for fname, table in filtered.values():
+            z.writestr(fname, to_csv_bytes(table))
+    return buf.getvalue()
 
 
 def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
@@ -209,16 +304,13 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
                                localize_df(pd.DataFrame(data), lang)
                                .to_csv(index=False, encoding='utf-8-sig'))
 
-        fix, noalt = build_fix_lists(df, images_df, lang)
-        if fix is not None and not fix.empty:
-            z.writestr(names['fix'], fix.to_csv(index=False, encoding='utf-8-sig'))
-        if noalt is not None and not noalt.empty:
-            z.writestr(names['noalt'], noalt.to_csv(index=False, encoding='utf-8-sig'))
-
+        titles = build_titles_urls_list(df, lang)
+        descs = build_descs_list(df, lang)
         alt_missing = build_image_list(images_df, ALT_MISSING_STATES, lang)
         alt_weak = build_image_list(images_df, ALT_WEAK_EXPORT, lang)
         broken = build_broken_list(df, lang)
-        for key, table in (('alt_missing', alt_missing), ('alt_weak', alt_weak),
+        for key, table in (('titles', titles), ('descs', descs),
+                           ('alt_missing', alt_missing), ('alt_weak', alt_weak),
                            ('broken', broken)):
             if table is not None and not table.empty:
                 z.writestr(names[key], table.to_csv(index=False, encoding='utf-8-sig'))
@@ -230,9 +322,12 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
             if limg is not None and not limg.empty:
                 limg.to_excel(w, index=False,
                               sheet_name='Images Audit' if lang == 'en' else 'فحص الصور')
-            if fix is not None and not fix.empty:
-                fix.to_excel(w, index=False,
-                             sheet_name='To Fix' if lang == 'en' else 'يحتاج إصلاح')
+            if titles is not None and not titles.empty:
+                titles.to_excel(w, index=False,
+                                sheet_name='Titles & URLs' if lang == 'en' else 'عناوين وروابط')
+            if descs is not None and not descs.empty:
+                descs.to_excel(w, index=False,
+                               sheet_name='Meta Descriptions' if lang == 'en' else 'أوصاف الميتا')
             if alt_missing is not None and not alt_missing.empty:
                 alt_missing.to_excel(w, index=False,
                                      sheet_name='Missing Alt' if lang == 'en' else 'صور بلا وصف')
