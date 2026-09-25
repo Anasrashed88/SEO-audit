@@ -2106,6 +2106,8 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None):
         'unclassified': int((ok['نوع الصفحة'] == T_UNKNOWN).sum()),
         # روابط غير موجودة فعلاً (404/410)
         'broken_pages': int(((df['متاحة'] == False) & not_found).sum()),  # noqa: E712
+        # روابط لا تعمل وليس لها إعادة توجيه (404/410 مباشرة)
+        'broken_no_redirect': int(broken_no_redirect_mask(df).sum()),
         # تعذّر الوصول مؤقتاً (رفض، مهلة، خطأ خادم) — ليست محذوفة
         'unreachable_pages': int(((df['متاحة'] == False) & ~not_found & ~deleted).sum()),  # noqa: E712
         'bad_titles': int((~ok['حالة العنوان'].isin(['optimal'])).sum()),
@@ -2373,6 +2375,54 @@ def build_redirect_report(pages):
                  .sort_values(['_o', '_m', 'الرابط الأصلي']) \
                  .drop(columns=['_o', '_m']).reset_index(drop=True)
     return rep
+
+
+BROKEN_COLUMNS = ['الرابط', 'نوع الرابط', 'كود الاستجابة', 'في الخريطة',
+                  'مرتبط برابط', 'مصدر الاكتشاف', 'الإجراء المقترح']
+
+
+def broken_no_redirect_mask(df):
+    """روابط ترد مباشرة بأن الصفحة غير موجودة (404 أو 410) دون أي تحويل.
+    لا تشمل: الروابط المحوّلة، ولا المحوّلة للرئيسية، ولا الرفض المؤقت (429/5xx)."""
+    if df is None or df.empty or 'كود الاستجابة' not in df.columns:
+        return pd.Series(False, index=getattr(df, 'index', None))
+    codes = df['كود الاستجابة'].astype(str)
+    chain = df['سلسلة التحويل'].fillna('').astype(str) if 'سلسلة التحويل' in df.columns \
+        else pd.Series('', index=df.index)
+    avail = df['متاحة'].fillna(False).astype(bool) if 'متاحة' in df.columns \
+        else pd.Series(False, index=df.index)
+    return (~avail) & codes.str.contains(r'خطأ 4(?:04|10)\b', na=False) & (chain.str.strip() == '')
+
+
+def build_broken_links(df):
+    """جدول الروابط التي لا تعمل وليس لها إعادة توجيه، مع مكان ظهورها والإجراء المقترح."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=BROKEN_COLUMNS)
+    sub = df[broken_no_redirect_mask(df)].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=BROKEN_COLUMNS)
+
+    def yes_no(col):
+        if col not in sub.columns:
+            return pd.Series('لا', index=sub.index)
+        return sub[col].map(lambda v: 'نعم' if bool(v) and str(v) not in ('False', 'لا', 'nan') else 'لا')
+
+    out = pd.DataFrame({
+        'الرابط': sub['الرابط'].astype(str),
+        'نوع الرابط': sub['نوع الرابط'] if 'نوع الرابط' in sub.columns
+        else sub['الرابط'].map(lambda u: _detect_type_by_url(clean_url(str(u)), '')),
+        'كود الاستجابة': sub['كود الاستجابة'].astype(str).str.replace('خطأ ', '', regex=False),
+        'في الخريطة': yes_no('في الخريطة'),
+        'مرتبط برابط': yes_no('مرتبط برابط'),
+        'مصدر الاكتشاف': sub['مصدر الاكتشاف'] if 'مصدر الاكتشاف' in sub.columns else '',
+        'الإجراء المقترح': A_404,
+    })
+    # الأهم أولاً: ما يصل إليه الزائر برابط داخلي، ثم ما تعلنه الخريطة
+    out = out.assign(_l=out['مرتبط برابط'].map({'نعم': 0, 'لا': 1}),
+                     _m=out['في الخريطة'].map({'نعم': 0, 'لا': 1})) \
+             .sort_values(['_l', '_m', 'الرابط']).drop(columns=['_l', '_m']) \
+             .reset_index(drop=True)
+    return out[BROKEN_COLUMNS]
 
 
 def redirect_stats(rep):
