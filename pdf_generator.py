@@ -1063,8 +1063,9 @@ def build_quote(summary, prices=None, discount_rate=0.0):
     pr = dict(DEFAULT_PRICES)
     pr.update(prices or {})
 
-    titles = int(summary.get('bad_titles', 0))
-    descs = int(summary.get('bad_descs', 0))
+    # الكميات = عدد الصفوف في ملفي «العناوين والروابط» و«أوصاف الميتا» بالضبط
+    titles = int(summary.get('fix_titles_urls', summary.get('bad_titles', 0)))
+    descs = int(summary.get('fix_descs', summary.get('bad_descs', 0)))
     alts = int(summary.get('missing_alts', 0)) + int(summary.get('weak_alts', 0))
     broken = int(summary.get('broken_no_redirect', 0))
 
