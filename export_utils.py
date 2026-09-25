@@ -6,7 +6,7 @@ import pandas as pd
 
 from audit_engine import (
     PAGE_TYPE_ORDER, PAGE_TYPE_LABEL, STATUS_LABEL, QUALITY_LABEL, URL_LABEL,
-    COL_EN, ALT_WEAK_STATES, localize_df, unique_images,
+    COL_EN, ALT_WEAK_STATES, localize_df, unique_images, build_broken_links,
     T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_ARCHIVE, T_UNKNOWN,
     T_BROKEN,
 )
@@ -24,6 +24,9 @@ ZIP_NAMES = {
            'scroll': "15_منتجات_بالتمرير_فقط.csv",
            'fix': "00_صفحات_تحتاج_إصلاح.csv",
            'noalt': "00_صور_تحتاج_وصفاً.csv",
+           'alt_missing': "00_صور_بلا_وصف.csv",
+           'alt_weak': "00_صور_وصفها_غير_وصفي_أو_مكرر.csv",
+           'broken': "8_روابط_لا_تعمل_بلا_تحويل.csv",
            'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
            'imggap': "12_صفحات_صورها_ناقصة.csv",
            'namegap': "13_اسم_معلن_مختلف.csv",
@@ -39,6 +42,9 @@ ZIP_NAMES = {
            'scroll': "15_scroll_only_products.csv",
            'fix': "00_pages_to_fix.csv",
            'noalt': "00_images_needing_alt.csv",
+           'alt_missing': "00_images_missing_alt.csv",
+           'alt_weak': "00_images_weak_or_duplicate_alt.csv",
+           'broken': "8_broken_links_no_redirect.csv",
            'redirect': "11_dead_urls_in_sitemap.csv",
            'imggap': "12_pages_with_missing_images.csv",
            'namegap': "13_declared_name_mismatch.csv",
@@ -113,6 +119,58 @@ def build_fix_lists(df, images_df, lang='ar'):
     return fix, noalt
 
 
+ALT_MISSING_STATES = ('alt_missing',)
+# «ضعيف» = غير وصفي أو مكرر، ومعهما الحشو والطول الزائد لأنها تحتاج إعادة كتابة أيضاً
+# (ونفس التعريف تُحسب به كمية الصور في عرض السعر)
+ALT_WEAK_EXPORT = tuple(ALT_WEAK_STATES)
+
+
+def build_image_list(images_df, states, lang='ar'):
+    """صور فريدة بحالات محددة فقط، مرتبة حسب الصفحة."""
+    uimg = unique_images(images_df)
+    if uimg is None or uimg.empty:
+        return pd.DataFrame()
+    sub = uimg[uimg['حالة النص البديل'].isin(states)].copy()
+    if sub.empty:
+        return pd.DataFrame()
+    order = {'alt_missing': 0, 'alt_generic': 1, 'alt_duplicate': 2,
+             'alt_stuffed': 3, 'alt_long': 4}
+    sub['_o'] = sub['حالة النص البديل'].map(order).fillna(9)
+    sub = sub.sort_values(['_o', 'رابط الصفحة']).drop(columns=['_o'])
+    cols = ['رابط الصفحة', 'نوع الصفحة', 'رابط الصورة',
+            'النص البديل الحالي (Alt)', 'حالة النص البديل', 'عدد الصفحات']
+    sub = sub[[c for c in cols if c in sub.columns]]
+    sub.insert(0, 'م', range(1, len(sub) + 1))
+    return localize_df(sub, lang)
+
+
+def build_broken_list(df, lang='ar'):
+    """الروابط التي لا تعمل وليس لها إعادة توجيه، جاهزة للتصدير."""
+    out = build_broken_links(df)
+    if out.empty:
+        return pd.DataFrame()
+    out.insert(0, 'م', range(1, len(out) + 1))
+    return localize_df(out, lang)
+
+
+def build_filtered_exports(df, images_df, lang='ar'):
+    """الملفات التي يمكن تحميلها منفصلة من الواجهة:
+    يعيد {المفتاح: (اسم الملف، جدول)} للجداول غير الفارغة فقط."""
+    names = ZIP_NAMES[lang]
+    fix, _ = build_fix_lists(df, images_df, lang)
+    tables = {
+        'fix': fix,
+        'alt_missing': build_image_list(images_df, ALT_MISSING_STATES, lang),
+        'alt_weak': build_image_list(images_df, ALT_WEAK_EXPORT, lang),
+        'broken': build_broken_list(df, lang),
+    }
+    return {k: (names[k], t) for k, t in tables.items() if t is not None and not t.empty}
+
+
+def to_csv_bytes(table):
+    return table.to_csv(index=False).encode('utf-8-sig')
+
+
 def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
     names = ZIP_NAMES[lang]
     ldf = localize_df(df, lang)
@@ -122,6 +180,8 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for tkey in PAGE_TYPE_ORDER:
+            if tkey == T_BROKEN:
+                continue   # تُكتب أدناه كقائمة نظيفة للروابط المعطلة بلا تحويل
             label = PAGE_TYPE_LABEL[lang][tkey]
             sub = ldf[ldf[type_col] == label] if type_col in ldf.columns else pd.DataFrame()
             if not sub.empty:
@@ -155,6 +215,14 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
         if noalt is not None and not noalt.empty:
             z.writestr(names['noalt'], noalt.to_csv(index=False, encoding='utf-8-sig'))
 
+        alt_missing = build_image_list(images_df, ALT_MISSING_STATES, lang)
+        alt_weak = build_image_list(images_df, ALT_WEAK_EXPORT, lang)
+        broken = build_broken_list(df, lang)
+        for key, table in (('alt_missing', alt_missing), ('alt_weak', alt_weak),
+                           ('broken', broken)):
+            if table is not None and not table.empty:
+                z.writestr(names[key], table.to_csv(index=False, encoding='utf-8-sig'))
+
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
             ldf.to_excel(w, index=False,
@@ -165,9 +233,15 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
             if fix is not None and not fix.empty:
                 fix.to_excel(w, index=False,
                              sheet_name='To Fix' if lang == 'en' else 'يحتاج إصلاح')
-            if noalt is not None and not noalt.empty:
-                noalt.to_excel(w, index=False,
-                               sheet_name='No Alt' if lang == 'en' else 'صور بلا وصف')
+            if alt_missing is not None and not alt_missing.empty:
+                alt_missing.to_excel(w, index=False,
+                                     sheet_name='Missing Alt' if lang == 'en' else 'صور بلا وصف')
+            if alt_weak is not None and not alt_weak.empty:
+                alt_weak.to_excel(w, index=False,
+                                  sheet_name='Weak Alt' if lang == 'en' else 'صور وصفها ضعيف')
+            if broken is not None and not broken.empty:
+                broken.to_excel(w, index=False,
+                                sheet_name='Broken Links' if lang == 'en' else 'روابط لا تعمل')
         z.writestr(names['excel'], xbuf.getvalue())
     return buf.getvalue()
 
