@@ -22,7 +22,7 @@ from audit_engine import (
     url_key, build_broken_links,
 )
 from pdf_generator import generate_client_pdf, generate_invoice_pdf, build_quote, DEFAULT_PRICES
-from export_utils import build_zip, build_filtered_exports, to_csv_bytes
+from export_utils import build_zip, build_filtered_exports, to_csv_bytes, build_filtered_zip
 
 st.set_page_config(page_title="مركز عمليات السيو | أنس راشد",
                    layout="wide", page_icon="🚀",
@@ -774,8 +774,10 @@ if nav == "🔍 فحص متجر جديد":
                                  'image_alt': p_alt, 'broken_fix': p_broken},
                                 discount_rate=(disc_pct / 100 if use_disc else 0.0))
             qc = st.columns(5)
-            qc[0].metric("عناوين وروابط", f"{summary.get('bad_titles', 0)}")
-            qc[1].metric("أوصاف ميتا", f"{summary.get('bad_descs', 0)}")
+            qc[0].metric("عناوين وروابط",
+                         f"{summary.get('fix_titles_urls', summary.get('bad_titles', 0))}")
+            qc[1].metric("أوصاف ميتا",
+                         f"{summary.get('fix_descs', summary.get('bad_descs', 0))}")
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
             qc[3].metric("روابط لا تعمل", f"{summary.get('broken_no_redirect', 0)}")
@@ -822,7 +824,8 @@ if nav == "🔍 فحص متجر جديد":
                         else "##### 🎯 Download only what needs work")
             filtered = build_filtered_exports(df, images_df, lang)
             buttons = [
-                ('fix', "📄 الصفحات التي بها مشاكل", "📄 Pages with issues"),
+                ('titles', "🏷️ عناوين وروابط تحتاج إصلاح", "🏷️ Titles & URLs to fix"),
+                ('descs', "📝 أوصاف ميتا تحتاج إصلاح", "📝 Meta descriptions to fix"),
                 ('alt_missing', "🖼️ صور بلا وصف Alt", "🖼️ Images missing alt"),
                 ('alt_weak', "🖼️ صور وصفها غير وصفي أو مكرر", "🖼️ Weak or duplicate alt"),
                 ('broken', "🔗 روابط لا تعمل وبلا تحويل", "🔗 Broken links, no redirect"),
@@ -841,6 +844,16 @@ if nav == "🔍 فحص متجر جديد":
                                   key=f"dl_{key}_{lang}_empty",
                                   help="لا يوجد ما يحتاج عملاً في هذا البند." if lang == 'ar'
                                   else "Nothing to fix here.")
+            if filtered:
+                total_rows = sum(len(t) for _, t in filtered.values())
+                st.download_button(
+                    (f"🗂️ تحميل كل ملفات العمل دفعة واحدة (ZIP) — {len(filtered)} ملفات · {total_rows} صف"
+                     if lang == 'ar' else
+                     f"🗂️ Download all work files (ZIP) — {len(filtered)} files · {total_rows} rows"),
+                    build_filtered_zip(filtered),
+                    f"{netloc}_{'ملفات_العمل' if lang == 'ar' else 'work_files'}.zip",
+                    "application/zip", use_container_width=True, type="primary",
+                    key=f"dl_bundle_{lang}")
 
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
