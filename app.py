@@ -902,12 +902,10 @@ if nav == "🔍 فحص متجر جديد":
                 p_alt = st.number_input("سعر وصف الصورة (ريال)",
                                         0.5, 100.0, DEFAULT_PRICES['image_alt'], 0.5)
             with pc4:
-                p_internal = st.number_input("سعر تصحيح رابط داخلي (ريال)",
-                                             1.0, 200.0, DEFAULT_PRICES['internal_link_fix'], 1.0)
-            p_redirect = DEFAULT_PRICES['redirect_fix']
-            if platform == 'zid':
-                p_redirect = st.number_input("سعر تحويل 301 لرابط معطل (ريال) — زد",
-                                             1.0, 200.0, DEFAULT_PRICES['redirect_fix'], 1.0)
+                p_broken = st.number_input("سعر معالجة رابط معطل (ريال)",
+                                           1.0, 200.0, DEFAULT_PRICES['broken_link_fix'], 1.0,
+                                           help="يشمل ما يحتاجه كل رابط: تحويل 301 (في زد)، "
+                                                "أو تصحيح الرابط الداخلي، أو الاثنين معاً.")
             dc1, dc2 = st.columns([1, 3])
             with dc1:
                 use_disc = st.checkbox("إضافة خصم", value=False)
@@ -916,8 +914,7 @@ if nav == "🔍 فحص متجر جديد":
                                      disabled=not use_disc)
             quote = build_quote(summary,
                                 {'meta_title': p_title, 'meta_desc': p_desc,
-                                 'image_alt': p_alt, 'redirect_fix': p_redirect,
-                                 'internal_link_fix': p_internal},
+                                 'image_alt': p_alt, 'broken_link_fix': p_broken},
                                 discount_rate=(disc_pct / 100 if use_disc else 0.0))
             qc = st.columns(5)
             qc[0].metric("عناوين وروابط",
@@ -926,9 +923,7 @@ if nav == "🔍 فحص متجر جديد":
                          f"{summary.get('fix_descs', summary.get('bad_descs', 0))}")
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
-            qc[3].metric("روابط تحتاج معالجة",
-                         f"{summary.get('redirect_qty', 0)} تحويل · "
-                         f"{summary.get('internal_fix_qty', 0)} تصحيح")
+            qc[3].metric("روابط تحتاج معالجة", f"{summary.get('broken_actionable', 0)}")
             qc[4].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
             if quote['discount']:
                 st.caption(f"شمل خصماً {int(quote['discount_rate'] * 100)}% "
