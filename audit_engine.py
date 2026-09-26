@@ -3725,7 +3725,8 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
                         queue.append(link)
 
             if progress:
-                progress('audit', done=len(pages), pending=len(queue), round=step)
+                progress('audit', done=len(pages), pending=len(queue), round=step,
+                         cached=_CACHE['hits'])
 
     truncated = len(pages) >= max_pages and bool(queue)
 
@@ -3863,6 +3864,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     if is_gentle():
         workers = 1
     cached_before = cache_open(target, use_cache)
+    say('cache_loaded', count=cached_before, enabled=bool(use_cache))
 
     say('discover_start')
     pages, imgs, crawl_meta, platform = discover_and_audit(
