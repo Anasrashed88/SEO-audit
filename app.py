@@ -19,10 +19,11 @@ from audit_engine import (
     T_ARCHIVE, T_UNKNOWN, T_BROKEN, CHECK_FAIL, CHECK_WARN, CHECK_PASS,
     init_db, run_full_scan, compute_summary, localize_df, unique_images,
     normalize_url, clean_url, dedupe_pages, run_self_checks,
-    url_key, build_broken_links,
+    url_key, build_broken_links, build_zid_redirects, verify_redirects,
 )
 from pdf_generator import generate_client_pdf, generate_invoice_pdf, build_quote, DEFAULT_PRICES
-from export_utils import build_zip, build_filtered_exports, to_csv_bytes, build_filtered_zip
+from export_utils import (build_zip, build_filtered_exports, to_csv_bytes, build_filtered_zip,
+                          table_bytes)
 
 st.set_page_config(page_title="مركز عمليات السيو | أنس راشد",
                    layout="wide", page_icon="🚀",
@@ -136,8 +137,9 @@ with st.sidebar:
     st.markdown("#### ⚙️ إعدادات الفحص")
     max_pages = st.number_input("الحد الأقصى للصفحات", 50, 5000, MAX_PAGES_DEFAULT, 50)
     workers = st.slider("المسارات المتوازية", 1, 8, 4)
-    do_pagination = st.checkbox("متابعة ترقيم الأقسام", value=True,
-                                help="يلتقط المنتجات في الصفحات التالية من كل قسم.")
+    do_pagination = st.checkbox("متابعة ترقيم الأقسام عند الحاجة", value=True,
+                                help="تعمل تلقائياً فقط إذا كانت خريطة الموقع ناقصة، "
+                                     "لتوفير وقت الفحص.")
     do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True,
                                    help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
     st.markdown("---")
@@ -154,10 +156,19 @@ if nav == "🔍 فحص متجر جديد":
         st.write("")
         start_btn = st.button("بدء الفحص", type="primary", use_container_width=True)
 
+    with st.expander("🗺️ خيارات خريطة الموقع (اختياري) — استخدمها إذا فشلت قراءة الخرائط"):
+        st.caption("إذا منعت حماية المتجر الأداة من تحميل ملف خريطة: افتح الملف في متصفحك، "
+                   "واحفظه (في Safari: ملف ← حفظ باسم ← التنسيق: مصدر الصفحة)، ثم ارفعه هنا. "
+                   "الملفات المرفوعة لا تُحمَّل من المتجر مرة أخرى.")
+        sm_text = st.text_area("روابط خرائط الموقع (رابط في كل سطر)", height=80,
+                               placeholder="https://example.store/sitemap.xml")
+        sm_files = st.file_uploader("رفع ملفات الخريطة", type=['xml', 'gz', 'txt'],
+                                    accept_multiple_files=True)
+
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
             for k in ['audit_df', 'images_df', 'summary', 'coverage', 'selfcheck',
-                      'dup_groups', 'structured']:
+                      'dup_groups', 'structured', 'sitemap_report']:
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
@@ -193,6 +204,10 @@ if nav == "🔍 فحص متجر جديد":
                     head.write(f"**المرحلة 3** — فحص {kw.get('count')} منتج "
                                "من الصفحات التالية")
                     bar.progress(0)
+                elif stage == 'sitemap_retry':
+                    note.caption(f"إعادة قراءة هادئة لـ {kw.get('count')} ملف خريطة تعذّر تحميله...")
+                elif stage == 'pagination_skipped':
+                    note.caption(f"تخطّي متابعة الترقيم: {kw.get('reason')}")
                 elif stage == 'retry_start':
                     head.write(f"**إعادة محاولة** — {kw.get('count')} صفحة "
                                "تعذّر الاتصال بها")
@@ -200,8 +215,12 @@ if nav == "🔍 فحص متجر جديد":
                 elif stage == 'done':
                     bar.progress(1.0)
 
+            uploads = [(f.name, f.getvalue()) for f in (sm_files or [])]
+            inputs = [ln.strip() for ln in (sm_text or '').splitlines() if ln.strip()]
             result = run_full_scan(target, max_pages, workers, do_pagination,
-                                   do_sitemap_check, progress)
+                                   do_sitemap_check, progress,
+                                   sitemap_uploads=uploads or None,
+                                   sitemap_inputs=inputs or None)
             status.update(label="اكتمل الفحص", state="complete", expanded=False)
 
         df = result['df']
@@ -221,6 +240,7 @@ if nav == "🔍 فحص متجر جديد":
         st.session_state.coverage = coverage
         st.session_state.selfcheck = selfcheck
         st.session_state.structured = structured
+        st.session_state.sitemap_report = (result.get('crawl_meta') or {}).get('sitemap_report')
 
         conn = sqlite3.connect(DB_FILE)
         conn.cursor().execute(
@@ -460,6 +480,13 @@ if nav == "🔍 فحص متجر جديد":
                 dots = {CHECK_PASS: COLOR['ok'], CHECK_WARN: COLOR['warn'],
                         CHECK_FAIL: COLOR['bad']}
                 order = {CHECK_FAIL: 0, CHECK_WARN: 1, CHECK_PASS: 2}
+                failed_sm = (st.session_state.get('sitemap_report') or {}).get('failed') or []
+                if failed_sm:
+                    st.markdown("##### ملفات خريطة تعذّرت قراءتها")
+                    st.dataframe(pd.DataFrame(failed_sm), use_container_width=True,
+                                 hide_index=True)
+                    st.caption("افتح هذه الملفات في متصفحك واحفظها، ثم ارفعها من "
+                               "«خيارات خريطة الموقع» وأعد الفحص.")
                 for c in sorted(selfcheck['checks'], key=lambda x: order[x['level']]):
                     act = (f'<div class="a">الإجراء المقترح: {c["action"]}</div>'
                            if c['action'] else '')
@@ -723,7 +750,8 @@ if nav == "🔍 فحص متجر جديد":
             exp_summary = dict(summary)
             exp_summary['platform_label'] = (PLATFORM_LABEL if lang == 'ar'
                                              else PLATFORM_LABEL_EN).get(platform, '—')
-            exp_summary['broken_links'] = build_broken_links(df).to_dict('records')
+            exp_summary['broken_links'] = build_broken_links(df, platform).to_dict('records')
+            exp_summary['platform'] = platform
             netloc = urlparse(st.session_state.current_url).netloc or "store"
             try:
                 pdf_bytes = generate_client_pdf(st.session_state.current_url,
@@ -732,7 +760,7 @@ if nav == "🔍 فحص متجر جديد":
                 pdf_bytes = None
                 st.error(f"تعذر توليد الـ PDF: {e}")
             zip_bytes = build_zip(df, images_df, coverage, lang,
-                                  st.session_state.get('structured'))
+                                  st.session_state.get('structured'), platform)
 
             gate_ok = True
             if selfcheck and selfcheck['verdict'] == 'blocked':
@@ -761,8 +789,12 @@ if nav == "🔍 فحص متجر جديد":
                 p_alt = st.number_input("سعر وصف الصورة (ريال)",
                                         0.5, 100.0, DEFAULT_PRICES['image_alt'], 0.5)
             with pc4:
-                p_broken = st.number_input("سعر معالجة رابط لا يعمل (ريال)",
-                                           1.0, 200.0, DEFAULT_PRICES['broken_fix'], 1.0)
+                p_internal = st.number_input("سعر تصحيح رابط داخلي (ريال)",
+                                             1.0, 200.0, DEFAULT_PRICES['internal_link_fix'], 1.0)
+            p_redirect = DEFAULT_PRICES['redirect_fix']
+            if platform == 'zid':
+                p_redirect = st.number_input("سعر تحويل 301 لرابط معطل (ريال) — زد",
+                                             1.0, 200.0, DEFAULT_PRICES['redirect_fix'], 1.0)
             dc1, dc2 = st.columns([1, 3])
             with dc1:
                 use_disc = st.checkbox("إضافة خصم", value=False)
@@ -771,7 +803,8 @@ if nav == "🔍 فحص متجر جديد":
                                      disabled=not use_disc)
             quote = build_quote(summary,
                                 {'meta_title': p_title, 'meta_desc': p_desc,
-                                 'image_alt': p_alt, 'broken_fix': p_broken},
+                                 'image_alt': p_alt, 'redirect_fix': p_redirect,
+                                 'internal_link_fix': p_internal},
                                 discount_rate=(disc_pct / 100 if use_disc else 0.0))
             qc = st.columns(5)
             qc[0].metric("عناوين وروابط",
@@ -780,7 +813,9 @@ if nav == "🔍 فحص متجر جديد":
                          f"{summary.get('fix_descs', summary.get('bad_descs', 0))}")
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
-            qc[3].metric("روابط لا تعمل", f"{summary.get('broken_no_redirect', 0)}")
+            qc[3].metric("روابط تحتاج معالجة",
+                         f"{summary.get('redirect_qty', 0)} تحويل · "
+                         f"{summary.get('internal_fix_qty', 0)} تصحيح")
             qc[4].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
             if quote['discount']:
                 st.caption(f"شمل خصماً {int(quote['discount_rate'] * 100)}% "
@@ -822,7 +857,7 @@ if nav == "🔍 فحص متجر جديد":
             st.markdown("---")
             st.markdown("##### 🎯 تحميل ما يحتاج عملاً فقط" if lang == 'ar'
                         else "##### 🎯 Download only what needs work")
-            filtered = build_filtered_exports(df, images_df, lang)
+            filtered = build_filtered_exports(df, images_df, lang, platform)
             buttons = [
                 ('titles', "🏷️ عناوين وروابط تحتاج إصلاح", "🏷️ Titles & URLs to fix"),
                 ('descs', "📝 أوصاف ميتا تحتاج إصلاح", "📝 Meta descriptions to fix"),
@@ -830,14 +865,18 @@ if nav == "🔍 فحص متجر جديد":
                 ('alt_weak', "🖼️ صور وصفها غير وصفي أو مكرر", "🖼️ Weak or duplicate alt"),
                 ('broken', "🔗 روابط لا تعمل وبلا تحويل", "🔗 Broken links, no redirect"),
             ]
+            if platform == 'zid':
+                buttons.append(('zid_redirects', "↪️ ملف تحويلات زد (للاستيراد)",
+                                "↪️ Zid redirects (import file)"))
             fcols = st.columns(len(buttons))
             for col, (key, lbl_ar, lbl_en) in zip(fcols, buttons):
                 with col:
                     label = lbl_ar if lang == 'ar' else lbl_en
                     if key in filtered:
                         fname, table = filtered[key]
-                        st.download_button(f"{label} ({len(table)})", to_csv_bytes(table),
-                                           f"{netloc}_{fname}", "text/csv",
+                        data, mime = table_bytes(fname, table)
+                        st.download_button(f"{label} ({len(table)})", data,
+                                           f"{netloc}_{fname}", mime,
                                            use_container_width=True, key=f"dl_{key}_{lang}")
                     else:
                         st.button(f"{label} (0)", disabled=True, use_container_width=True,
@@ -854,6 +893,23 @@ if nav == "🔍 فحص متجر جديد":
                     f"{netloc}_{'ملفات_العمل' if lang == 'ar' else 'work_files'}.zip",
                     "application/zip", use_container_width=True, type="primary",
                     key=f"dl_bundle_{lang}")
+
+            if platform == 'zid' and 'zid_redirects' in filtered:
+                st.markdown("---")
+                st.markdown("##### ✅ التحقق من التحويلات بعد رفع الملف في زد")
+                st.caption("ارفع ملف التحويلات من لوحة زد (الإعدادات ← إعادة توجيه الروابط ← "
+                           "استيراد)، ثم اضغط الزر: تفتح الأداة كل رابط قديم وتتأكد أنه "
+                           "يحوّل بـ 301 إلى الوجهة الصحيحة.")
+                if st.button("تحقق من التحويلات الآن", key=f"verify_{lang}"):
+                    _, zid_table = filtered['zid_redirects']
+                    pairs = list(zip(zid_table['التوجيه من'], zid_table['التوجيه إلى']))
+                    with st.spinner(f"جارٍ فحص {len(pairs)} تحويل..."):
+                        vres = verify_redirects(st.session_state.current_url, pairs)
+                    ok_n = int(vres['ناجح'].sum())
+                    (st.success if ok_n == len(vres) else st.warning)(
+                        f"{ok_n} من {len(vres)} تحويل يعمل بشكل صحيح.")
+                    st.dataframe(vres.drop(columns=['ناجح']), use_container_width=True,
+                                 hide_index=True)
 
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
@@ -893,7 +949,9 @@ else:
                 st.session_state.images_df = rimg
                 st.session_state.coverage = rcov
                 st.session_state.platform = row[4] or 'unknown'
-                st.session_state.summary = compute_summary(rdf, rcov, rimg)
+                st.session_state.summary = compute_summary(rdf, rcov, rimg,
+                                                           platform=row[4] or 'unknown')
+                st.session_state.summary['platform'] = row[4] or 'unknown'
                 st.session_state.summary['platform_label'] = PLATFORM_LABEL.get(
                     row[4] or 'unknown', '—')
                 st.success("تم الاسترجاع. انتقل إلى (فحص متجر جديد) لعرض النتائج.")
