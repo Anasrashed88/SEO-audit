@@ -31,8 +31,8 @@ PDF_TXT = {
         'm_pages': 'صفحة معروضة', 'm_products': 'منتج', 'm_images': 'صورة',
         'm_issues': 'بند يحتاج معالجة', 'm_cats': 'قسم',
         'u_page': 'صفحة', 'u_product': 'منتج', 'u_cat': 'تصنيف', 'u_article': 'مقال',
-        'h_url': 'الرابط', 'h_where': 'أين يظهر', 'h_code': 'الكود',
-        'w_map': 'الخريطة', 'w_link': 'رابط داخلي', 'w_both': 'الخريطة + رابط داخلي',
+        'h_url': 'الرابط', 'h_where': 'الإجراء', 'h_code': 'الكود',
+        'w_redirect': 'تحويل 301', 'w_fix': 'تصحيح رابط داخلي', 'w_both': 'تحويل + تصحيح',
         'more_links': 'و{n} رابط آخر في ملف «روابط لا تعمل» ضمن حزمة البيانات.',
         'u_link': 'رابط', 'u_title': 'عنوان', 'u_desc': 'وصف', 'u_img': 'صورة',
         'na': 'غير متاح',
@@ -53,8 +53,8 @@ PDF_TXT = {
         'm_pages': 'visible pages', 'm_products': 'products', 'm_images': 'images',
         'm_issues': 'items to fix', 'm_cats': 'categories',
         'u_page': 'pages', 'u_product': 'products', 'u_cat': 'categories',
-        'h_url': 'URL', 'h_where': 'Found in', 'h_code': 'Code',
-        'w_map': 'Sitemap', 'w_link': 'Internal link', 'w_both': 'Sitemap + internal link',
+        'h_url': 'URL', 'h_where': 'Action', 'h_code': 'Code',
+        'w_redirect': '301 redirect', 'w_fix': 'Fix internal link', 'w_both': 'Redirect + fix',
         'more_links': 'Plus {n} more in the "Broken Links" file of the data package.',
         'u_article': 'articles', 'u_link': 'links', 'u_title': 'titles',
         'u_desc': 'descriptions', 'u_img': 'images', 'na': 'not available',
@@ -109,18 +109,23 @@ SECTION_TXT = {
                      'هذا القسم ما يراه الزائر فعلاً بما تعلنه الخريطة، في الاتجاهين.',
             'impact': 'المنتج المعروض وغير المدرج في الخريطة قد لا تعلم به محركات البحث '
                       'أصلاً. والصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط '
-                      'داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. '
-                      'والروابط المحوّلة داخل الخريطة تستهلك ميزانية الزحف بلا مقابل.',
+                      'داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات.',
         },
         'broken': {
-            'title': 'روابط لا تعمل وليس لها تحويل',
-            'intro': 'روابط داخل المتجر أو في خريطة الموقع ترد مباشرة بأن الصفحة غير '
-                     'موجودة (خطأ 404)، دون أي تحويل إلى صفحة بديلة. لا تشمل هذه القائمة '
-                     'الروابط المحوّلة، ولا الصفحات التي تعذّر الوصول إليها مؤقتاً أثناء الفحص.',
-            'impact': 'الزائر الذي يصل إلى صفحة غير موجودة يغادر غالباً دون شراء. ومحركات '
-                      'البحث تستهلك جزءاً من زحفها على هذه الروابط، وإذا كانت الصفحة قد '
-                      'اكتسبت روابط أو زيارات سابقاً فإن قيمتها تضيع بالكامل. تحويل 301 '
-                      'إلى أقرب صفحة بديلة يحفظ هذه القيمة ويعيد الزائر إلى مسار الشراء.',
+            'title': 'روابط لا تعمل: تحويلها وتصحيحها',
+            'intro': 'روابط ترد بأن الصفحة غير موجودة (خطأ 404). تعرض القائمة فقط الروابط '
+                     'التي سنعالجها: تحويل 301 لما له بديل قريب في المتجر، وتصحيح الروابط '
+                     'الداخلية التي تقود الزائر إليها.',
+            'impact': 'الزائر الذي يصل إلى صفحة غير موجودة يغادر غالباً دون شراء. تحويل 301 '
+                      'إلى أقرب صفحة بديلة يعيده إلى مسار الشراء ويحفظ قيمة الرابط في نتائج '
+                      'البحث، وتصحيح الرابط الداخلي يمنع وصوله إلى الخطأ من الأساس.',
+        },
+        'broken_internal': {
+            'title': 'روابط داخلية لا تعمل',
+            'intro': 'روابط داخل صفحات المتجر تقود الزائر إلى صفحة غير موجودة (خطأ 404). '
+                     'سنصحح كل رابط منها ليشير إلى الصفحة المناسبة.',
+            'impact': 'الزائر الذي يضغط رابطاً فيجد صفحة غير موجودة يفقد الثقة ويغادر '
+                      'غالباً دون شراء. تصحيح الرابط يعيده إلى مسار الشراء مباشرة.',
         },
         'diagnosis': {
             'title': 'التشخيص وخطة العمل',
@@ -181,18 +186,25 @@ SECTION_TXT = {
                      'declares, in both directions.',
             'impact': 'A visible product missing from the sitemap may be unknown to search '
                       'engines. A sitemap page with no internal link path stays worthless: '
-                      'it gains no authority and brings no traffic. Redirecting URLs inside '
-                      'the sitemap consume crawl budget for nothing.',
+                      'it gains no authority and brings no traffic.',
         },
         'broken': {
-            'title': 'Broken links with no redirect',
-            'intro': 'URLs inside the store or in the sitemap that return "not found" '
-                     '(404) directly, with no redirect to an alternative page. Redirected '
-                     'URLs and pages that were temporarily unreachable are not included.',
+            'title': 'Broken links: redirects and fixes',
+            'intro': 'URLs that return "not found" (404). Only the links we will handle are '
+                     'listed: a 301 redirect where a close alternative exists, and a fix for '
+                     'internal links that lead visitors to them.',
             'impact': 'A visitor who lands on a missing page usually leaves without buying. '
-                      'Search engines also spend crawl budget on these URLs, and any links '
-                      'or traffic the page earned are lost. A 301 redirect to the closest '
-                      'alternative keeps that value and returns the visitor to the purchase path.',
+                      'A 301 to the closest alternative returns them to the purchase path and '
+                      'keeps the URL\'s search value; fixing the internal link stops the error '
+                      'at its source.',
+        },
+        'broken_internal': {
+            'title': 'Broken internal links',
+            'intro': 'Links inside store pages that lead visitors to a missing page (404). '
+                     'We will point each one to the right page.',
+            'impact': 'A visitor who clicks a link and finds a missing page loses trust and '
+                      'usually leaves without buying. Fixing the link returns them straight '
+                      'to the purchase path.',
         },
         'diagnosis': {
             'title': 'Diagnosis and action plan',
@@ -310,9 +322,6 @@ def build_diagnosis(score, stats, lang):
         if stats.get('canon_missing'):
             points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
                           "ما يعرّض المتجر لتكرار المحتوى.")
-        if stats.get('dead_count'):
-            points.append(f"{stats['dead_count']} رابط محذوف ما زال معلناً في خريطة "
-                          "الموقع، فترسل محركات البحث زحفها إلى صفحات غير موجودة.")
         if stats.get('hidden_count'):
             points.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع لا يصل "
                           "إليها الزائر بأي رابط داخلي، فتفقد قيمتها.")
@@ -326,10 +335,12 @@ def build_diagnosis(score, stats, lang):
         if stats.get('not_indexed_count'):
             points.append(f"{stats['not_indexed_count']} منتجاً معروضاً في المتجر "
                           "لا يظهر في خريطة الموقع.")
-        if stats.get('broken_no_redirect'):
-            points.append(f"{stats['broken_no_redirect']} رابط لا يعمل وليس له تحويل (404)، "
-                          "فيصل الزائر ومحركات البحث إلى صفحة غير موجودة. الحل تحويل 301 "
-                          "لكل رابط إلى أقرب صفحة بديلة.")
+        if stats.get('redirect_qty'):
+            points.append(f"{stats['redirect_qty']} رابط لا يعمل (404) وله بديل قريب في المتجر، "
+                          "يحتاج تحويل 301 إلى هذا البديل.")
+        if stats.get('internal_fix_qty'):
+            points.append(f"{stats['internal_fix_qty']} رابط داخلي يقود الزائر إلى صفحة غير "
+                          "موجودة، يحتاج تصحيحاً ليشير إلى الصفحة المناسبة.")
         if stats.get('archive_pages', 0) > 20:
             points.append(f"{stats['archive_pages']} صفحة أرشيف (وسوم وقوائم) تعرض "
                           "محتوى مكرراً بعنوان واحد، وتستهلك ميزانية الزحف دون أن "
@@ -432,9 +443,10 @@ def build_diagnosis(score, stats, lang):
     if stats.get('not_indexed_count'):
         points.append(f"{stats['not_indexed_count']} visible products are absent "
                       "from the sitemap.")
-    if stats.get('broken_no_redirect'):
-        points.append(f"{stats['broken_no_redirect']} URLs return 404 with no redirect; "
-                      "each needs a 301 to the closest alternative page.")
+    if stats.get('redirect_qty'):
+        points.append(f"{stats['redirect_qty']} broken URLs have a close alternative and need a 301.")
+    if stats.get('internal_fix_qty'):
+        points.append(f"{stats['internal_fix_qty']} internal links lead to missing pages and need fixing.")
     if stats.get('archive_pages', 0) > 20:
         points.append(f"{stats['archive_pages']} archive pages (tags and lists) show "
                       "duplicated content under a single title and consume crawl "
@@ -643,10 +655,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
                     self.rect(M, y, W, 7, 'F')
                 # بلا شرطة في البداية: في الاتجاه العربي تنتقل الشرطة لآخر السطر فتربك القراءة
                 path = unquote(urlparse(str(r.get('الرابط', ''))).path).strip('/') or '/'
-                in_map = str(r.get('في الخريطة')) in ('نعم', 'True', 'Yes')
-                linked = str(r.get('مرتبط برابط')) in ('نعم', 'True', 'Yes')
-                where = T['w_both'] if (in_map and linked) else \
-                    T['w_link'] if linked else T['w_map']
+                act = str(r.get('الإجراء المقترح', ''))
+                where = T['w_both'] if ('تحويل' in act and 'تصحيح' in act) else \
+                    T['w_redirect'] if 'تحويل' in act else T['w_fix']
                 code = str(r.get('كود الاستجابة', '404')).replace('خطأ ', '')
                 cells = [(code, wc, 'C', C_BAD), (where, ww, 'C', C_MUTED),
                          (self.fit(path, wu - 3), wu, ALIGN, C_INK)]
@@ -819,9 +830,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
          'Deleted product URLs redirecting home',
          f"{stats.get('deleted_pages', 0)} {T['u_link']}",
          'bad' if stats.get('deleted_pages') else 'ok'),
-        ('روابط لا تعمل وليس لها تحويل (404)' if rtl else 'Broken links with no redirect (404)',
-         f"{stats.get('broken_no_redirect', 0)} {T['u_link']}",
-         'bad' if stats.get('broken_no_redirect') else 'ok'),
+        ('روابط لا تعمل تحتاج معالجة (404)' if rtl else 'Broken links to handle (404)',
+         f"{stats.get('broken_actionable', 0)} {T['u_link']}",
+         'bad' if stats.get('broken_actionable') else 'ok'),
         ('صفحات تعذّر الاتصال بها أثناء الفحص' if rtl else
          'Pages unreachable during the scan',
          f"{stats.get('unreachable_pages', 0)} {T['u_page']}",
@@ -948,10 +959,6 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
              f"{stats.get('sitemap_products', 0)} {T['u_link']}", 'neutral'),
             ('منها تعمل ويصل إليها الزائر' if rtl else 'Of those, live and reachable',
              f"{stats.get('sitemap_live', 0)} {T['u_link']}", 'neutral'),
-            ('روابط محذوفة ما زالت في الخريطة' if rtl else
-             'Deleted URLs still listed in the sitemap',
-             f"{stats.get('dead_count', 0)} {T['u_link']}",
-             'bad' if stats.get('dead_count') else 'ok'),
             ('صفحات في الخريطة لا يصل إليها الزائر' if rtl else
              'Sitemap pages with no internal link',
              f"{stats.get('hidden_count', 0)} {T['u_page']}",
@@ -972,17 +979,19 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         pdf.impact('sitemap')
 
     # ======================= روابط لا تعمل بلا تحويل =======================
-    if stats.get('broken_no_redirect'):
+    if stats.get('broken_actionable'):
         n += 1
         pdf.add_page()
-        pdf.section(n, 'broken')
-        rows = stats.get('broken_links') or []
+        key = 'broken' if stats.get('redirect_qty') else 'broken_internal'
+        pdf.section(n, key)
+        rows = [r for r in (stats.get('broken_links') or [])
+                if not str(r.get('الإجراء المقترح', '')).startswith('لا إجراء')]
         if rows:
             pdf.link_list(rows)
         else:
-            pdf.table([(('روابط لا تعمل وليس لها تحويل' if rtl else 'Broken links, no redirect'),
-                        f"{stats['broken_no_redirect']} {T['u_link']}", 'bad')])
-        pdf.impact('broken')
+            pdf.table([(('روابط لا تعمل تحتاج معالجة' if rtl else 'Broken links to handle'),
+                        f"{stats['broken_actionable']} {T['u_link']}", 'bad')])
+        pdf.impact(key)
 
     # ======================= التشخيص =======================
     n += 1
@@ -1041,7 +1050,8 @@ DEFAULT_PRICES = {
     'meta_title': 15.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
     'meta_desc': 10.0,    # وصف الميتا لكل صفحة
     'image_alt': 5.0,     # النص البديل لكل صورة
-    'broken_fix': 10.0,   # معالجة رابط لا يعمل: تحويل 301 لأقرب بديل + تنظيف الخريطة
+    'redirect_fix': 5.0,       # تحويل 301 لرابط معطل له بديل قريب (زد)
+    'internal_link_fix': 5.0,  # تصحيح رابط داخلي يقود لصفحة غير موجودة
 }
 PAYMENT = {
     'iban': 'SA87 1000 0026 5571 0000 0103',
@@ -1067,7 +1077,8 @@ def build_quote(summary, prices=None, discount_rate=0.0):
     titles = int(summary.get('fix_titles_urls', summary.get('bad_titles', 0)))
     descs = int(summary.get('fix_descs', summary.get('bad_descs', 0)))
     alts = int(summary.get('missing_alts', 0)) + int(summary.get('weak_alts', 0))
-    broken = int(summary.get('broken_no_redirect', 0))
+    redirects = int(summary.get('redirect_qty', 0))
+    internal = int(summary.get('internal_fix_qty', 0))
 
     items = []
     if titles:
@@ -1076,13 +1087,15 @@ def build_quote(summary, prices=None, discount_rate=0.0):
         items.append({'key': 'meta_desc', 'qty': descs, 'unit': pr['meta_desc']})
     if alts:
         items.append({'key': 'image_alt', 'qty': alts, 'unit': pr['image_alt']})
-    if broken:
-        items.append({'key': 'broken_fix', 'qty': broken, 'unit': pr['broken_fix']})
+    if redirects:
+        items.append({'key': 'redirect_fix', 'qty': redirects, 'unit': pr['redirect_fix']})
+    if internal:
+        items.append({'key': 'internal_link_fix', 'qty': internal, 'unit': pr['internal_link_fix']})
     for it in items:
         it['total'] = round(it['qty'] * it['unit'], 2)
 
     subtotal = round(sum(i['total'] for i in items), 2)
-    units = titles + descs + alts + broken
+    units = titles + descs + alts + redirects + internal
     rate = max(0.0, min(float(discount_rate or 0.0), 0.9))
     disc = round(subtotal * rate, 2)
     return {'items': items, 'subtotal': subtotal, 'units': units,
@@ -1105,9 +1118,12 @@ INVOICE_TXT = {
                        'من نتائج البحث',
         'image_alt': 'كتابة النصوص البديلة للصور',
         'image_alt_d': 'وصف دقيق لكل صورة يُظهرها في بحث صور جوجل',
-        'broken_fix': 'معالجة الروابط التي لا تعمل',
-        'broken_fix_d': 'تحويل 301 لكل رابط معطل إلى أقرب صفحة بديلة، '
-                        'وحذفه من خريطة الموقع وتصحيح الروابط الداخلية التي تشير إليه',
+        'redirect_fix': 'تحويل الروابط التي لا تعمل (301)',
+        'redirect_fix_d': 'تحويل 301 لكل رابط معطل إلى أقرب صفحة بديلة في المتجر، '
+                          'مع التحقق من عمل كل تحويل بعد تنفيذه',
+        'internal_link_fix': 'تصحيح الروابط الداخلية المعطلة',
+        'internal_link_fix_d': 'تعديل كل رابط داخل المتجر يقود إلى صفحة غير موجودة '
+                               'ليشير إلى الصفحة المناسبة',
         'unit_page': 'صفحة', 'unit_img': 'صورة', 'unit_link': 'رابط',
         'subtotal': 'المجموع', 'discount': 'خصم الكمية', 'total': 'الإجمالي المستحق',
         'novat': 'الأسعار غير شاملة ضريبة القيمة المضافة',
@@ -1130,9 +1146,12 @@ INVOICE_TXT = {
         'image_alt': 'Image alt texts',
         'image_alt_d': 'A precise description per image so it appears in '
                        'Google Image search',
-        'broken_fix': 'Broken link repair',
-        'broken_fix_d': 'A 301 redirect for each broken URL to the closest alternative '
-                        'page, removed from the sitemap with internal links corrected',
+        'redirect_fix': 'Broken link redirects (301)',
+        'redirect_fix_d': 'A 301 redirect for each broken URL to the closest alternative '
+                          'page in the store, verified after setup',
+        'internal_link_fix': 'Broken internal link fixes',
+        'internal_link_fix_d': 'Every link inside the store that leads to a missing page, '
+                               'pointed to the right page',
         'unit_page': 'pages', 'unit_img': 'images', 'unit_link': 'links',
         'subtotal': 'Subtotal', 'discount': 'Volume discount', 'total': 'Total due',
         'novat': 'Prices exclude VAT',
@@ -1257,7 +1276,8 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     for idx, it in enumerate(quote['items']):
         name = T[it['key']]
         unit_lbl = {'image_alt': T['unit_img'],
-                    'broken_fix': T['unit_link']}.get(it['key'], T['unit_page'])
+                    'redirect_fix': T['unit_link'],
+                    'internal_link_fix': T['unit_link']}.get(it['key'], T['unit_page'])
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
         for word in T[it['key'] + '_d'].split():
