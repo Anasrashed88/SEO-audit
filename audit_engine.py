@@ -155,6 +155,10 @@ COL_EN = {
     'الوجهة النهائية': 'Final Destination', 'سلسلة التحويل': 'Redirect Chain',
     'الرابط الأصلي': 'Original URL', 'الحالة': 'Status', 'نوع الرابط': 'URL Type',
     'الإجراء المقترح': 'Suggested Action',
+    'يظهر في': 'Found On', 'الوجهة المقترحة': 'Suggested Destination',
+    'ثقة الاقتراح': 'Suggestion Confidence',
+    'اسم إعادة التوجيه': 'Redirect Name', 'التوجيه من': 'Redirect From',
+    'التوجيه إلى': 'Redirect To',
     'جودة العنوان': 'Title Quality', 'جودة الوصف': 'Description Quality',
     'جودة الرابط': 'URL Quality', 'المسار': 'Slug', 'محتوى مكرر': 'Duplicate Content',
     'اسم المنتج المعروض': 'Displayed Product Name', 'صيغة الصورة': 'Image Format',
@@ -216,20 +220,50 @@ def _session():
     return sess
 
 
-_THROTTLE = {'fails': 0, 'delay': 0.0}
+_THROTTLE = {'fails': 0, 'delay': 0.0, 'streak': 0}
 _THROTTLE_LOCK = threading.Lock()
+MAX_DELAY = 2.0          # أقصى تمهّل بين الطلبات (ثانية)
+DELAY_STEP_UP = 0.3      # كم نتمهّل عند كل رفض
+DELAY_STEP_DOWN = 0.2    # كم نسرع بعد سلسلة نجاح
+SUCCESS_STREAK = 12      # عدد النجاحات المتتالية قبل أن نسرع خطوة
 
 
 def note_failure():
+    """المتجر رفض أو تعثّر: نتمهّل خطوة."""
     with _THROTTLE_LOCK:
         _THROTTLE['fails'] += 1
-        if _THROTTLE['fails'] in (5, 15, 40, 80):
-            _THROTTLE['delay'] = min(_THROTTLE['delay'] + 0.25, 1.5)
+        _THROTTLE['streak'] = 0
+        _THROTTLE['delay'] = min(_THROTTLE['delay'] + DELAY_STEP_UP, MAX_DELAY)
+
+
+def note_success():
+    """سلسلة نجاح: نرجع نسرع تدريجياً بدل البقاء بطيئين لنهاية الفحص."""
+    if _THROTTLE['delay'] <= 0:
+        return
+    with _THROTTLE_LOCK:
+        _THROTTLE['streak'] += 1
+        if _THROTTLE['streak'] >= SUCCESS_STREAK:
+            _THROTTLE['delay'] = max(0.0, _THROTTLE['delay'] - DELAY_STEP_DOWN)
+            _THROTTLE['streak'] = 0
 
 
 def reset_throttle():
     _THROTTLE['fails'] = 0
     _THROTTLE['delay'] = 0.0
+    _THROTTLE['streak'] = 0
+
+
+def is_challenge(res):
+    """صفحة تحقق من الحماية (Cloudflare) بدل المحتوى المطلوب."""
+    if res is None:
+        return False
+    if str(res.headers.get('cf-mitigated', '')).lower() == 'challenge':
+        return True
+    if res.status_code in (403, 503):
+        head = (res.text or '')[:3000].lower()
+        return ('just a moment' in head or 'cf-chl' in head
+                or 'challenge-platform' in head or 'attention required' in head)
+    return False
 
 
 def safe_get(url, timeout=14, retries=2, headers=None):
@@ -249,7 +283,7 @@ def safe_get(url, timeout=14, retries=2, headers=None):
             if attempt < retries:
                 time.sleep(1 + attempt)
             continue
-        if res.status_code == 429 or res.status_code >= 500:
+        if res.status_code == 429 or res.status_code >= 500 or is_challenge(res):
             note_failure()
             last = res
             if attempt < retries:
@@ -257,6 +291,7 @@ def safe_get(url, timeout=14, retries=2, headers=None):
                 wait = float(ra) if ra.isdigit() else 2.0 * (attempt + 1)
                 time.sleep(min(wait, 10))
             continue
+        note_success()
         return res
     return last
 
@@ -1940,12 +1975,11 @@ def discover_sitemaps_from_robots(base_url):
 LOC_RE = re.compile(r'<loc>\s*(.*?)\s*</loc>', re.I | re.S)
 
 
-def fetch_sitemap_locs(url, quick=False):
-    res = safe_get(url, timeout=(8 if quick else 30), retries=(0 if quick else 2))
-    if not is_ok(res):
-        return None
-    content = res.content
-    if url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
+def parse_sitemap_text(content, name=''):
+    """يستخرج الروابط من محتوى ملف خريطة (نص أو gz). يعيد قائمة أو None إن لم يكن خريطة."""
+    if isinstance(content, str):
+        content = content.encode('utf-8', 'ignore')
+    if str(name).lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
         try:
             content = gzip.decompress(content)
         except Exception:
@@ -1954,7 +1988,14 @@ def fetch_sitemap_locs(url, quick=False):
     low = text.lower()
     if '<loc' not in low and '<sitemapindex' not in low and '<urlset' not in low:
         return None
-    locs = [m.strip().replace('&amp;', '&') for m in LOC_RE.findall(text) if m.strip()]
+    locs = []
+    for m in LOC_RE.findall(text):
+        v = m.strip()
+        # بعض المنصات تغلّف الرابط: <loc><![CDATA[https://...]]></loc>
+        v = re.sub(r'^<!\[CDATA\[(.*)\]\]>$', r'\1', v, flags=re.S).strip()
+        v = v.replace('&amp;', '&')
+        if v:
+            locs.append(v)
     if locs:
         return locs
     try:
@@ -1966,92 +2007,192 @@ def fetch_sitemap_locs(url, quick=False):
         return None
 
 
+def sitemap_fail_reason(res):
+    if res is None:
+        return 'انقطع الاتصال أو انتهت المهلة'
+    if is_challenge(res):
+        return 'الحماية منعت الطلب'
+    code = res.status_code
+    if code == 429:
+        return 'المتجر طلب التمهّل (429)'
+    if code == 403:
+        return 'الحماية منعت الطلب (403)'
+    if code in (404, 410):
+        return f'الملف غير موجود ({code})'
+    if code >= 500:
+        return f'خطأ في خادم المتجر ({code})'
+    if code != 200:
+        return f'رد غير متوقع ({code})'
+    return 'الملف ليس بصيغة خريطة موقع'
+
+
+def fetch_sitemap_locs(url, quick=False, with_reason=False):
+    res = safe_get(url, timeout=(8 if quick else 30), retries=(0 if quick else 2),
+                   headers={'Accept': 'application/xml,text/xml;q=0.9,*/*;q=0.8',
+                            'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'no-cors'})
+    locs = parse_sitemap_text(res.content, url) if is_ok(res) else None
+    if with_reason:
+        return locs, (None if locs is not None else sitemap_fail_reason(res))
+    return locs
+
+
 def _is_sitemap_loc(loc):
     p = loc.lower().split('?')[0]
     return p.endswith(('.xml', '.xml.gz')) or bool(re.search(r'/sitemap[^/]*$', p))
 
 
-def collect_sitemap_urls(base_url, max_depth=4):
-    """يقرأ كل خرائط المتجر: المعلنة في robots.txt أولاً ثم فهارسها المتداخلة،
-    ولا يخمّن أسماء الملفات إلا إذا لم يجد خريطة واحدة تعمل."""
-    base_url = normalize_url(base_url)
-    base_netloc = urlparse(base_url).netloc
-    found = {}
-    visited = set()
-    report = {'files_ok': 0, 'files_failed': 0, 'failed_urls': [], 'files': [], 'source': ''}
+SITEMAP_PAUSE = 0.3   # مهلة قصيرة بين ملفات الخريطة فقط (لا بين الصفحات)
 
-    def add(u):
+
+class SitemapCollector:
+    """يجمع روابط كل خرائط المتجر من ثلاثة مصادر:
+    ملفات يرفعها المستخدم (تتجاوز الحماية تماماً)، وروابط خرائط يلصقها،
+    وما يعلنه المتجر في robots.txt. ويحفظ سبب فشل كل ملف لم يُقرأ."""
+
+    def __init__(self, base_url, max_depth=4):
+        self.base_url = normalize_url(base_url)
+        self.base_netloc = urlparse(self.base_url).netloc
+        self.max_depth = max_depth
+        self.found = {}
+        self.visited = set()
+        self.uploaded_names = set()
+        self.failed = {}          # رابط الملف ← السبب
+        self.report = {'files_ok': 0, 'files': [], 'source': '', 'uploaded': 0}
+
+    # ---------- أدوات ----------
+    def add(self, u):
         u = clean_url(u)
-        if not u or norm_host(urlparse(u).netloc) != norm_host(base_netloc) or is_tag_url(u):
+        if not u or norm_host(urlparse(u).netloc) != norm_host(self.base_netloc) or is_tag_url(u):
             return
         k = url_key(u)
-        found[k] = prefer_url(found[k], u) if k in found else u
+        self.found[k] = prefer_url(self.found[k], u) if k in self.found else u
 
-    def walk(sm_url, depth, declared=True):
-        if depth > max_depth:
+    @staticmethod
+    def _basename(u):
+        return unquote(urlparse(str(u)).path).rstrip('/').rsplit('/', 1)[-1].lower()
+
+    def _consume(self, locs, depth):
+        for loc in locs:
+            if _is_sitemap_loc(loc):
+                # ملف فرعي رفعه المستخدم؟ لا داعي لتحميله
+                if self._basename(loc) in self.uploaded_names:
+                    self.visited.add(loc)
+                    continue
+                self.walk(loc, depth + 1, declared=True)
+            else:
+                self.add(loc)
+
+    def walk(self, sm_url, depth, declared=True):
+        if depth > self.max_depth:
             return False
-        if sm_url in visited:
+        if sm_url in self.visited:
             return True
-        visited.add(sm_url)
+        self.visited.add(sm_url)
         tries = 3 if declared else 1
-        locs = None
+        locs, reason = None, None
         for attempt in range(tries):
-            locs = fetch_sitemap_locs(sm_url, quick=not declared)
+            if attempt == 0 and self.report['files_ok']:
+                time.sleep(SITEMAP_PAUSE)
+            locs, reason = fetch_sitemap_locs(sm_url, quick=not declared, with_reason=True)
             if locs is not None:
                 break
             if attempt + 1 < tries:
                 time.sleep(1.5 * (attempt + 1))
         if locs is None:
             if declared:
-                report['files_failed'] += 1
-                report['failed_urls'].append(sm_url)
+                self.failed[sm_url] = reason
             return False
-        report['files_ok'] += 1
-        report['files'].append(sm_url)
-        for loc in locs:
-            if _is_sitemap_loc(loc):
-                walk(loc, depth + 1, declared=True)
-            else:
-                add(loc)
+        self.failed.pop(sm_url, None)
+        self.report['files_ok'] += 1
+        self.report['files'].append(sm_url)
+        self._consume(locs, depth)
         return True
 
-    # 1) ما يعلنه المتجر في robots.txt
-    for c in discover_sitemaps_from_robots(base_url):
-        walk(c, 0, declared=True)
-    if found:
-        report['source'] = 'robots.txt'
+    # ---------- المصادر ----------
+    def add_uploaded(self, files):
+        """files: قائمة (اسم الملف، المحتوى bytes)."""
+        for name, content in files or []:
+            locs = parse_sitemap_text(content, name)
+            if locs is None:
+                self.failed[f'ملف مرفوع: {name}'] = 'الملف ليس بصيغة خريطة موقع'
+                continue
+            self.uploaded_names.add(str(name).lower())
+            self.report['uploaded'] += 1
+            self.report['files_ok'] += 1
+            self.report['files'].append(f'ملف مرفوع: {name}')
+            self._consume(locs, 0)
 
-    # 2) رأي ثانٍ من مكتبة USP إذا لم نجد شيئاً أو فشل جزء من القراءة
-    if not found or report['files_failed']:
-        via = sitemap_urls_via_usp(base_url, base_netloc)
-        if via:
-            for u in via:
-                add(u)
-            report['source'] = report['source'] or 'usp'
+    def run(self, uploaded=None, urls=None):
+        self.add_uploaded(uploaded)
+        for u in urls or []:
+            u = str(u).strip()
+            if u:
+                self.walk(u if u.startswith('http') else urljoin(self.base_url + '/', u), 0, True)
 
-    # 3) المسارات القياسية
-    if not found:
-        for c in [f"{base_url}/sitemap.xml", f"{base_url}/sitemap_index.xml",
-                  f"{base_url}/sitemap-index.xml", f"{base_url}/sitemap.xml.gz",
-                  f"{base_url}/sitemap/sitemap.xml", f"{base_url}/sitemaps.xml",
-                  f"{base_url}/wp-sitemap.xml"]:
-            walk(c, 0, declared=False)
-        if found:
-            report['source'] = 'standard'
+        # ما يعلنه المتجر في robots.txt — والملفات التي رفعها المستخدم لا تُحمَّل مرة أخرى
+        user_given = bool(self.found)
+        for c in discover_sitemaps_from_robots(self.base_url):
+            if self._basename(c) in self.uploaded_names:
+                continue
+            self.walk(c, 0, declared=True)
+        if self.found:
+            self.report['source'] = 'user + robots.txt' if user_given else 'robots.txt'
 
-    # 4) التخمين: فقط إذا لم تعمل أي خريطة
-    if not found:
-        for prefix in ['sitemap-', 'sitemap_', 'sitemap_products_', 'sitemap_categories_',
-                       'sitemap_pages_', 'sitemap_blogs_']:
-            for i in range(1, 30):
-                if not walk(f"{base_url}/{prefix}{i}.xml", 0, declared=False):
-                    break
-        if found:
-            report['source'] = 'guessed'
+        if not self.found:
+            via = sitemap_urls_via_usp(self.base_url, self.base_netloc)
+            if via:
+                for u in via:
+                    self.add(u)
+                self.report['source'] = 'usp'
 
-    report['partial'] = report['files_failed'] > 0
-    report['total_urls'] = len(found)
-    return set(found.values()), report
+        if not self.found:
+            for c in [f"{self.base_url}/sitemap.xml", f"{self.base_url}/sitemap_index.xml",
+                      f"{self.base_url}/sitemap-index.xml", f"{self.base_url}/sitemap.xml.gz",
+                      f"{self.base_url}/sitemap/sitemap.xml", f"{self.base_url}/sitemaps.xml",
+                      f"{self.base_url}/wp-sitemap.xml"]:
+                self.walk(c, 0, declared=False)
+            if self.found:
+                self.report['source'] = 'standard'
+
+        if not self.found:
+            for prefix in ['sitemap-', 'sitemap_', 'sitemap_products_', 'sitemap_categories_',
+                           'sitemap_pages_', 'sitemap_blogs_']:
+                for i in range(1, 30):
+                    if not self.walk(f"{self.base_url}/{prefix}{i}.xml", 0, declared=False):
+                        break
+            if self.found:
+                self.report['source'] = 'guessed'
+        return self
+
+    def retry_failed(self):
+        """جولة ثانية هادئة للملفات التي فشلت، بعد انتهاء الزحف."""
+        before = set(self.found)
+        for sm_url in list(self.failed):
+            if sm_url.startswith('ملف مرفوع'):
+                continue
+            self.visited.discard(sm_url)
+            time.sleep(2)
+            self.walk(sm_url, 0, declared=True)
+        return [self.found[k] for k in set(self.found) - before]
+
+    # ---------- النتيجة ----------
+    def urls(self):
+        return set(self.found.values())
+
+    def final_report(self):
+        rep = dict(self.report)
+        rep['failed'] = [{'الملف': u, 'السبب': r} for u, r in self.failed.items()]
+        rep['failed_urls'] = list(self.failed)
+        rep['files_failed'] = len(self.failed)
+        rep['partial'] = bool(self.failed)
+        rep['total_urls'] = len(self.found)
+        return rep
+
+
+def collect_sitemap_urls(base_url, max_depth=4, uploaded=None, urls=None):
+    """واجهة متوافقة مع الإصدار السابق."""
+    col = SitemapCollector(base_url, max_depth).run(uploaded, urls)
+    return col.urls(), col.final_report()
 
 
 # ==============================================================
@@ -2114,7 +2255,7 @@ def _code_series(df):
     return df['كود الاستجابة'].astype(str)
 
 
-def compute_summary(df, coverage=None, images_df=None, redirects=None):
+def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     codes = _code_series(df)
     not_found = codes.str.contains(r'خطأ 4(?:04|10)\b', na=False)
@@ -2210,6 +2351,7 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None):
             'indexed_pct': coverage.get('indexed_pct', 100.0),
         })
     s.update(redirect_stats(redirects))
+    s.update(broken_work_counts(df, platform or 'unknown'))
     return s
 
 
@@ -2242,7 +2384,11 @@ def localize_df(df, lang):
         if 'الحالة' in out.columns:
             out['الحالة'] = out['الحالة'].map(lambda v: REDIRECT_STATUS_EN.get(v, v))
         if 'الإجراء المقترح' in out.columns:
-            out['الإجراء المقترح'] = out['الإجراء المقترح'].map(lambda v: REDIRECT_ACTION_EN.get(v, v))
+            out['الإجراء المقترح'] = out['الإجراء المقترح'].map(
+                lambda v: REDIRECT_ACTION_EN.get(v, BROKEN_ACTION_EN.get(v, v)))
+        if 'ثقة الاقتراح' in out.columns:
+            out['ثقة الاقتراح'] = out['ثقة الاقتراح'].map(
+                lambda v: {CONF_HIGH: 'High', CONF_MED: 'Medium'}.get(v, v))
         if 'مصدر الاكتشاف' in out.columns:
             out['مصدر الاكتشاف'] = out['مصدر الاكتشاف'].map(lambda v: SOURCE_EN.get(v, v))
         for col in ('في الخريطة', 'مرتبط برابط'):
@@ -2409,7 +2555,23 @@ def build_redirect_report(pages):
 
 
 BROKEN_COLUMNS = ['الرابط', 'نوع الرابط', 'كود الاستجابة', 'في الخريطة',
-                  'مرتبط برابط', 'مصدر الاكتشاف', 'الإجراء المقترح']
+                  'مرتبط برابط', 'يظهر في', 'الوجهة المقترحة', 'ثقة الاقتراح',
+                  'الإجراء المقترح', 'مصدر الاكتشاف']
+
+CONF_HIGH, CONF_MED = 'عالية', 'متوسطة'
+ACT_REDIRECT = 'تحويل 301 إلى الوجهة المقترحة'
+ACT_REDIRECT_FIX = 'تحويل 301 إلى الوجهة المقترحة، وتصحيح الرابط الداخلي ليشير إليها مباشرة'
+ACT_FIX_TO = 'تصحيح الرابط الداخلي ليشير إلى الوجهة المقترحة'
+ACT_FIX_REMOVE = 'حذف الرابط الداخلي أو تغييره لصفحة مناسبة'
+ACT_NONE = 'لا إجراء — الرد 404/410 صحيح لصفحة محذوفة بلا بديل'
+REDIRECT_PLATFORMS = ('zid',)
+BROKEN_ACTION_EN = {
+    ACT_REDIRECT: '301 redirect to the suggested destination',
+    ACT_REDIRECT_FIX: '301 redirect to the suggestion, and point the internal link straight to it',
+    ACT_FIX_TO: 'Point the internal link to the suggested destination',
+    ACT_FIX_REMOVE: 'Remove the internal link or point it to a relevant page',
+    ACT_NONE: 'No action — 404/410 is correct for a deleted page with no alternative',
+}   # المنصات التي نملك فيها طريقة مؤكدة لإنشاء التحويلات
 
 
 def broken_no_redirect_mask(df):
@@ -2425,35 +2587,244 @@ def broken_no_redirect_mask(df):
     return (~avail) & codes.str.contains(r'خطأ 4(?:04|10)\b', na=False) & (chain.str.strip() == '')
 
 
-def build_broken_links(df):
-    """جدول الروابط التي لا تعمل وليس لها إعادة توجيه، مع مكان ظهورها والإجراء المقترح."""
+def _truthy(v):
+    return bool(v) and str(v) not in ('False', 'لا', 'nan', 'None', '0')
+
+
+def where_label(key, referrers, ref_counts, total_pages):
+    n = int(ref_counts.get(key, 0))
+    if not n:
+        return ''
+    if n >= max(10, total_pages * 0.5):
+        return f'القائمة أو التذييل (يظهر في {n} صفحة)'
+    paths = [unquote(urlparse(u).path) or '/' for u in referrers.get(key, [])]
+    more = f' (+{n - len(paths)})' if n > len(paths) else ''
+    return ' | '.join(paths) + more
+
+
+def _page_tokens(url, name='', title=''):
+    toks = set(t for t in slug_tokens(slug_of(url)) if not t.isdigit())
+    toks |= set(t for t in slug_tokens(name) if not t.isdigit())
+    return toks
+
+
+def suggest_alternatives(df):
+    """لكل رابط معطل: أقرب صفحة حية بنفس الموضوع، أو لا شيء.
+    لا نقترح الرئيسية ولا وجهة عامة: إن لم نجد تطابقاً حقيقياً نترك الخانة فارغة."""
+    out = {}
+    if df is None or df.empty:
+        return out
+    avail = df['متاحة'].fillna(False).astype(bool)
+    live = df[avail & df['نوع الصفحة'].isin([T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO])]
+    if 'الوجهة النهائية' in live.columns:
+        live = live[live['الوجهة النهائية'].fillna('').astype(str).str.strip() == '']
+    if 'قابلة للأرشفة' in live.columns:
+        live = live[live['قابلة للأرشفة'].fillna(True).astype(bool)]
+    if live.empty:
+        return out
+
+    cands = []
+    for _, r in live.iterrows():
+        cands.append((r['الرابط'], r['نوع الصفحة'],
+                      _page_tokens(r['الرابط'], r.get('اسم المنتج المعروض', ''))))
+    # كلمات تتكرر في أكثر من ثلث الصفحات (اسم المتجر، «عباية» في متجر عبايات) لا تميّز شيئاً
+    from collections import Counter
+    df_count = Counter(t for _, _, toks in cands for t in toks)
+    common = {t for t, c in df_count.items() if c > max(3, len(cands) * 0.33)}
+
+    type_pref = {T_PRODUCT: (T_PRODUCT, T_CATEGORY), T_CATEGORY: (T_CATEGORY, T_PRODUCT),
+                 T_BLOG: (T_BLOG,), T_INFO: (T_INFO,)}
+
+    for idx, r in df[broken_no_redirect_mask(df)].iterrows():
+        btype = r.get('نوع الرابط') or _detect_type_by_url(clean_url(str(r['الرابط'])), '')
+        want = (_page_tokens(r['الرابط']) - common)
+        if not want:
+            continue
+        allowed = type_pref.get(btype, (T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO))
+        best = None
+        for url, ctype, toks in cands:
+            if ctype not in allowed:
+                continue
+            hit = len(want & (toks - common))
+            if not hit:
+                continue
+            score = hit / len(want)
+            rank = (score, hit, -allowed.index(ctype))
+            if best is None or rank > best[0]:
+                best = (rank, url, hit, score, ctype)
+        if not best:
+            continue
+        _, url, hit, score, ctype = best
+        if hit >= 2 and score >= 0.75:
+            conf = CONF_HIGH
+        elif (hit >= 2 and score >= 0.5) or (len(want) == 1 and hit == 1 and ctype == T_CATEGORY):
+            conf = CONF_MED
+        else:
+            continue
+        out[idx] = (url, conf)
+    return out
+
+
+def annotate_broken_links(df, meta):
+    """يضيف لصفوف الروابط المعطلة: أين تظهر، والوجهة المقترحة، ودرجة الثقة."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    for col in ('يظهر في', 'الوجهة المقترحة', 'ثقة الاقتراح'):
+        if col not in df.columns:
+            df[col] = ''
+    mask = broken_no_redirect_mask(df)
+    if not mask.any():
+        return df
+    refs = (meta or {}).get('referrers', {})
+    counts = (meta or {}).get('ref_counts', {})
+    total = int((meta or {}).get('pages_scanned', len(df)))
+    for idx in df[mask].index:
+        k = url_key(str(df.at[idx, '_req_url'] if '_req_url' in df.columns and
+                        str(df.at[idx, '_req_url']) not in ('', 'nan', 'None')
+                        else df.at[idx, 'الرابط']))
+        df.at[idx, 'يظهر في'] = where_label(k, refs, counts, total)
+    for idx, (url, conf) in suggest_alternatives(df).items():
+        df.at[idx, 'الوجهة المقترحة'] = url
+        df.at[idx, 'ثقة الاقتراح'] = conf
+    return df
+
+
+def broken_action(row, platform):
+    has_alt = bool(str(row.get('الوجهة المقترحة') or '').strip())
+    linked = _truthy(row.get('مرتبط برابط'))
+    can_redirect = platform in REDIRECT_PLATFORMS
+    if can_redirect and has_alt:
+        return ACT_REDIRECT_FIX if linked else ACT_REDIRECT
+    if linked:
+        return ACT_FIX_TO if has_alt else ACT_FIX_REMOVE
+    return ACT_NONE
+
+
+def broken_work_counts(df, platform):
+    """الكميات التي تدخل عرض السعر: ما يحتاج عملاً فعلاً فقط."""
+    if df is None or df.empty:
+        return {'redirect_qty': 0, 'internal_fix_qty': 0, 'broken_actionable': 0}
+    sub = df[broken_no_redirect_mask(df)]
+    redirect_qty = internal_qty = actionable = 0
+    for _, r in sub.iterrows():
+        act = broken_action(r, platform)
+        if act in (ACT_REDIRECT, ACT_REDIRECT_FIX):
+            redirect_qty += 1
+        if _truthy(r.get('مرتبط برابط')):
+            internal_qty += 1
+        if act != ACT_NONE:
+            actionable += 1
+    return {'redirect_qty': redirect_qty, 'internal_fix_qty': internal_qty,
+            'broken_actionable': actionable}
+
+
+def build_broken_links(df, platform='unknown', actionable_only=False):
+    """جدول الروابط التي لا تعمل وليس لها إعادة توجيه، مع مكانها والوجهة المقترحة والإجراء."""
     if df is None or df.empty:
         return pd.DataFrame(columns=BROKEN_COLUMNS)
     sub = df[broken_no_redirect_mask(df)].copy()
     if sub.empty:
         return pd.DataFrame(columns=BROKEN_COLUMNS)
 
-    def yes_no(col):
-        if col not in sub.columns:
-            return pd.Series('لا', index=sub.index)
-        return sub[col].map(lambda v: 'نعم' if bool(v) and str(v) not in ('False', 'لا', 'nan') else 'لا')
+    def col(name, default=''):
+        return sub[name] if name in sub.columns else pd.Series(default, index=sub.index)
 
     out = pd.DataFrame({
         'الرابط': sub['الرابط'].astype(str),
-        'نوع الرابط': sub['نوع الرابط'] if 'نوع الرابط' in sub.columns
-        else sub['الرابط'].map(lambda u: _detect_type_by_url(clean_url(str(u)), '')),
+        'نوع الرابط': col('نوع الرابط').where(col('نوع الرابط').astype(str).str.strip() != '',
+                                              sub['الرابط'].map(lambda u: _detect_type_by_url(clean_url(str(u)), ''))),
         'كود الاستجابة': sub['كود الاستجابة'].astype(str).str.replace('خطأ ', '', regex=False),
-        'في الخريطة': yes_no('في الخريطة'),
-        'مرتبط برابط': yes_no('مرتبط برابط'),
-        'مصدر الاكتشاف': sub['مصدر الاكتشاف'] if 'مصدر الاكتشاف' in sub.columns else '',
-        'الإجراء المقترح': A_404,
+        'في الخريطة': col('في الخريطة', False).map(lambda v: 'نعم' if _truthy(v) else 'لا'),
+        'مرتبط برابط': col('مرتبط برابط', False).map(lambda v: 'نعم' if _truthy(v) else 'لا'),
+        'يظهر في': col('يظهر في').fillna('').astype(str),
+        'الوجهة المقترحة': col('الوجهة المقترحة').fillna('').astype(str),
+        'ثقة الاقتراح': col('ثقة الاقتراح').fillna('').astype(str),
+        'الإجراء المقترح': [broken_action(r, platform) for _, r in sub.iterrows()],
+        'مصدر الاكتشاف': col('مصدر الاكتشاف'),
     })
-    # الأهم أولاً: ما يصل إليه الزائر برابط داخلي، ثم ما تعلنه الخريطة
-    out = out.assign(_l=out['مرتبط برابط'].map({'نعم': 0, 'لا': 1}),
-                     _m=out['في الخريطة'].map({'نعم': 0, 'لا': 1})) \
-             .sort_values(['_l', '_m', 'الرابط']).drop(columns=['_l', '_m']) \
-             .reset_index(drop=True)
+    for c in ('يظهر في', 'الوجهة المقترحة', 'ثقة الاقتراح'):
+        out[c] = out[c].replace({'nan': '', 'None': ''})
+    if actionable_only:
+        out = out[out['الإجراء المقترح'] != ACT_NONE]
+    order = {ACT_REDIRECT_FIX: 0, ACT_REDIRECT: 1, ACT_FIX_TO: 2, ACT_FIX_REMOVE: 3, ACT_NONE: 4}
+    out = out.assign(_o=out['الإجراء المقترح'].map(order)) \
+             .sort_values(['_o', 'الرابط']).drop(columns=['_o']).reset_index(drop=True)
     return out[BROKEN_COLUMNS]
+
+
+# ---------------- ملف التحويلات لزد ----------------
+ZID_REDIRECT_COLUMNS = ['اسم إعادة التوجيه', 'التوجيه من', 'التوجيه إلى']
+
+
+def _path_only(u):
+    """المسار فقط، بلا https ولا اسم المتجر، كما تطلب زد."""
+    p = unquote(urlparse(str(u)).path) or '/'
+    return p if p.startswith('/') else '/' + p
+
+
+def build_zid_redirects(df):
+    """ملف تحويلات جاهز للاستيراد في زد، بعد تطبيق القواعد الصارمة:
+    1) الرابط القديم يرد 404/410 فعلاً  2) الوجهة صفحة حية تفتح مباشرة
+    3) لا سلاسل ولا دوائر  4) لا تكرار  5) مسارات بلا نطاق.
+    يعيد (الجدول، قائمة بالمستبعد وسببه)."""
+    empty = pd.DataFrame(columns=ZID_REDIRECT_COLUMNS)
+    if df is None or df.empty:
+        return empty, []
+    live_keys = set()
+    avail = df['متاحة'].fillna(False).astype(bool)
+    for _, r in df[avail].iterrows():
+        if not str(r.get('الوجهة النهائية') or '').strip():
+            live_keys.add(url_key(r['الرابط']))
+    rows, skipped, seen_from = [], [], set()
+    sub = df[broken_no_redirect_mask(df)]
+    from_paths = {_path_only(u) for u in sub['الرابط']}
+    for _, r in sub.iterrows():
+        dest = str(r.get('الوجهة المقترحة') or '').strip()
+        if not dest or dest in ('nan', 'None'):
+            continue
+        src_p, dst_p = _path_only(r['الرابط']), _path_only(dest)
+        if url_key(dest) not in live_keys:
+            skipped.append((r['الرابط'], 'الوجهة المقترحة لا تفتح مباشرة'))
+            continue
+        if src_p == dst_p or dst_p in from_paths:
+            skipped.append((r['الرابط'], 'تحويل دائري أو سلسلة تحويلات'))
+            continue
+        if src_p in seen_from:
+            skipped.append((r['الرابط'], 'مكرر'))
+            continue
+        seen_from.add(src_p)
+        rows.append({'اسم إعادة التوجيه': f'seo-{len(rows) + 1}',
+                     'التوجيه من': src_p, 'التوجيه إلى': dst_p})
+    return (pd.DataFrame(rows, columns=ZID_REDIRECT_COLUMNS) if rows else empty), skipped
+
+
+def verify_redirects(base_url, pairs, workers=3):
+    """بعد رفع الملف في زد: يفتح كل رابط قديم ويتأكد أنه يحوّل بـ 301 للوجهة الصحيحة."""
+    base_url = normalize_url(base_url)
+
+    def one(pair):
+        src, dst = pair
+        res = safe_get(base_url + src, timeout=15, retries=1)
+        if res is None:
+            return src, dst, 'تعذّر الاتصال', False
+        chain = [h.status_code for h in res.history]
+        if not chain:
+            return src, dst, (f'لا يحوّل — الرابط يرد {res.status_code}'
+                              if res.status_code != 200 else 'لا يحوّل — الرابط ما زال يفتح صفحة'), False
+        if url_key(clean_url(res.url)) != url_key(base_url + dst):
+            return src, dst, 'يحوّل لوجهة مختلفة', False
+        if res.status_code != 200:
+            return src, dst, f'الوجهة لا تعمل ({res.status_code})', False
+        if chain[0] != 301:
+            return src, dst, f'التحويل من نوع {chain[0]} وليس 301', False
+        if len(chain) > 1:
+            return src, dst, 'يمر بأكثر من تحويل قبل الوصول', False
+        return src, dst, 'يعمل (301)', True
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        results = list(ex.map(one, list(pairs)))
+    return pd.DataFrame(results, columns=['التوجيه من', 'التوجيه إلى', 'النتيجة', 'ناجح'])
 
 
 def redirect_stats(rep):
@@ -2510,14 +2881,27 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
     if sm:
         if sm.get('total_urls', 0) == 0:
             add(CHECK_WARN, "خريطة الموقع", "لم يُعثر على خريطة موقع صالحة.",
-                "تأكد من رابط الخريطة في robots.txt.")
+                "افتح خريطة الموقع في متصفحك واحفظها، ثم ارفعها في خيارات خريطة الموقع وأعد الفحص.")
         elif sm.get('partial'):
+            reasons = {}
+            for f in sm.get('failed', []):
+                reasons[f['السبب']] = reasons.get(f['السبب'], 0) + 1
+            why = '، '.join(f"{n} بسبب: {r}" for r, n in reasons.items())
             add(CHECK_WARN, "خريطة الموقع",
-                f"قُرئ {sm.get('files_ok', 0)} ملف خريطة وتعذّر {sm.get('files_failed', 0)}.",
-                "أعد الفحص لاحقاً — المقارنة بالخريطة ناقصة.")
+                f"قُرئ {sm.get('files_ok', 0)} ملف خريطة وتعذّر {sm.get('files_failed', 0)} ({why}).",
+                "افتح الملفات المذكورة في متصفحك واحفظها، ثم ارفعها في خيارات خريطة الموقع وأعد الفحص.")
         else:
+            up = f" منها {sm['uploaded']} مرفوعة يدوياً" if sm.get('uploaded') else ''
             add(CHECK_PASS, "خريطة الموقع",
-                f"قُرئت {sm.get('files_ok', 0)} ملفات خريطة ({sm.get('total_urls', 0)} رابط).")
+                f"قُرئت كل ملفات الخريطة ({sm.get('files_ok', 0)} ملف{up}، {sm.get('total_urls', 0)} رابط).")
+
+    if crawl_meta and 'pagination_reason' in crawl_meta:
+        if crawl_meta.get('pagination_ran'):
+            add(CHECK_PASS, "متابعة الترقيم والتمرير",
+                f"شُغّلت لأن {crawl_meta['pagination_reason']}.")
+        else:
+            add(CHECK_PASS, "متابعة الترقيم والتمرير",
+                f"لم تُشغَّل لأن {crawl_meta['pagination_reason']} — وهذا وفّر وقت الفحص.")
 
     if n_ok == 0:
         add(CHECK_FAIL, "حجم الزحف", "لم تُفحص أي صفحة بنجاح.",
@@ -2597,7 +2981,8 @@ def _retryable(code):
             or bool(re.search(r'خطأ 5\d\d', code)))
 
 
-def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progress=None):
+def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progress=None,
+                       sitemap_uploads=None, sitemap_inputs=None):
     base_url = normalize_url(base_url)
     if progress:
         progress('sitemap_read')
@@ -2608,8 +2993,9 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
     if is_ok(home_res):
         platform = detect_platform(home_res.text, dict(home_res.headers), base_url)
 
-    # 2. قراءة كل خرائط الموقع
-    sitemap_urls, sm_report = collect_sitemap_urls(base_url)
+    # 2. قراءة كل خرائط الموقع (مع الملفات والروابط التي أعطاها المستخدم)
+    collector = SitemapCollector(base_url).run(sitemap_uploads, sitemap_inputs)
+    sitemap_urls, sm_report = collector.urls(), collector.final_report()
     sitemap_keys = {url_key(u) for u in sitemap_urls}
 
     # 3. الروابط المبدئية
@@ -2635,6 +3021,8 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
             queue.append(cu)
 
     linked = set()
+    referrers = {}          # مفتاح الرابط ← الصفحات التي يظهر فيها (عيّنة)
+    ref_counts = {}         # مفتاح الرابط ← عدد الصفحات التي يظهر فيها
     cat_links = {}
     next_hints = {}
     scroll_roots = set()
@@ -2675,9 +3063,14 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
                 # الوجهة الجديدة لرابط محوّل تُعتبر مكتشفة
                 seen.add(url_key(raw))
 
+                src_page = row['الرابط']
                 for link in res.get('links', ()):
                     k = url_key(link)
                     linked.add(k)
+                    ref_counts[k] = ref_counts.get(k, 0) + 1
+                    lst = referrers.setdefault(k, [])
+                    if len(lst) < 3 and src_page not in lst:
+                        lst.append(src_page)
                     if k not in seen:
                         seen.add(k)
                         queue.append(link)
@@ -2709,6 +3102,10 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
         'sitemap_urls': sitemap_urls,
         'sitemap_report': sm_report,
         'linked_keys': linked,
+        'referrers': referrers,
+        'ref_counts': ref_counts,
+        'pages_scanned': len(pages),
+        'collector': collector,
         'listing_urls': [r.get('_raw_url', r['الرابط']) for r in pages
                          if r['نوع الصفحة'] in (T_CATEGORY, T_HOME, T_BLOG, T_ARCHIVE)],
     }
@@ -2774,8 +3171,36 @@ def build_sitemap_report(df, base_url, sm_report=None):
 # ==============================================================
 #  نقطة الدخول الرئيسية للفحص الكامل
 # ==============================================================
+def pagination_needed(pages, sm_report):
+    """الخطوة البطيئة (الترقيم والتمرير) لا تعمل إلا إذا كانت الخريطة ناقصة.
+    يعيد (هل نحتاجها، السبب)."""
+    rep = sm_report or {}
+    if not rep.get('total_urls'):
+        return True, 'لم تُقرأ أي خريطة موقع'
+    if rep.get('partial'):
+        return True, f"تعذّرت قراءة {rep.get('files_failed', 0)} ملف من الخريطة"
+    known_products = {url_key(r.get('_raw_url') or r['الرابط']) for r in pages
+                      if r.get('متاحة') and r.get('نوع الصفحة') == T_PRODUCT}
+    declared = []
+    for r in pages:
+        if r.get('نوع الصفحة') in (T_CATEGORY, T_HOME):
+            try:
+                v = int(r.get('عدد معلن') or 0)
+            except (TypeError, ValueError):
+                v = 0
+            if v:
+                declared.append(v)
+    if declared and max(declared) > len(known_products):
+        return True, (f"قسم يعلن {max(declared)} منتجاً والأداة تعرف "
+                      f"{len(known_products)} فقط")
+    if not known_products:
+        return True, 'الخريطة لا تحتوي صفحات منتجات'
+    return False, 'الخريطة مكتملة وتحتوي كل المنتجات'
+
+
 def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
-                  do_pagination=True, do_sitemap_check=True, progress=None):
+                  do_pagination=True, do_sitemap_check=True, progress=None,
+                  sitemap_uploads=None, sitemap_inputs=None):
     def say(stage, **kw):
         if progress:
             try:
@@ -2788,13 +3213,50 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     say('discover_start')
     pages, imgs, crawl_meta, platform = discover_and_audit(
-        target, max_pages, workers, (lambda st, **k: say(st, **k)))
+        target, max_pages, workers, (lambda st, **k: say(st, **k)),
+        sitemap_uploads=sitemap_uploads, sitemap_inputs=sitemap_inputs)
     cat_products = crawl_meta.setdefault('cat_products', {})
     sitemap_keys = crawl_meta.get('sitemap_keys', set())
     linked_keys = crawl_meta.get('linked_keys', set())
+    collector = crawl_meta.get('collector')
+
+    # جولة ثانية هادئة لملفات الخريطة التي فشلت، بعد أن هدأ المتجر
+    if collector is not None and collector.failed:
+        say('sitemap_retry', count=len(collector.failed))
+        new_urls = collector.retry_failed()
+        crawl_meta['sitemap_report'] = collector.final_report()
+        if new_urls:
+            sitemap_keys |= {url_key(u) for u in new_urls}
+            crawl_meta['sitemap_count'] = len(sitemap_keys)
+            known = set()
+            for r in pages:
+                known.add(url_key(r.get('_raw_url') or r['الرابط']))
+                known.add(url_key(r.get('_req_url') or r['الرابط']))
+            fresh = [u for u in new_urls if url_key(u) not in known][:max(0, max_pages - len(pages))]
+            if fresh:
+                p3, i3 = audit_urls(fresh, target, 'خريطة الموقع', workers, None)
+                for r in p3:
+                    r['مرتبط برابط'] = url_key(r.get('_raw_url') or r['الرابط']) in linked_keys
+                    r['_req_linked'] = url_key(r.get('_req_url') or r['الرابط']) in linked_keys
+                pages += p3
+                imgs += i3
+            for r in pages:
+                k_req = url_key(r.get('_req_url') or r.get('_raw_url') or r['الرابط'])
+                k_fin = url_key(r.get('_raw_url') or r['الرابط'])
+                r['_req_in_map'] = k_req in sitemap_keys
+                r['في الخريطة'] = k_req in sitemap_keys or k_fin in sitemap_keys
+
+    # الخطوة البطيئة (الترقيم والتمرير) فقط عندما تكون الخريطة ناقصة
+    need_paging, paging_reason = pagination_needed(pages, crawl_meta.get('sitemap_report'))
+    crawl_meta['pagination_ran'] = bool(do_pagination and need_paging)
+    crawl_meta['pagination_reason'] = paging_reason
+    if need_paging and not do_pagination:
+        crawl_meta['pagination_reason'] = 'الخيار موقوف من إعدادات الفحص'
+    if not need_paging:
+        say('pagination_skipped', reason=paging_reason)
 
     # الترقيم والتمرير اللانهائي
-    if do_pagination:
+    if do_pagination and need_paging:
         say('pagination_start')
         seen_keys = set()
         for r in pages:
@@ -2860,6 +3322,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     df = analyze_url_quality(df, brand)
     df, dup_groups = detect_duplicate_content(df)
     df = score_pages(df, images_df)
+    df = annotate_broken_links(df, crawl_meta)
 
     coverage = (build_sitemap_report(df, target, crawl_meta.get('sitemap_report'))
                 if do_sitemap_check else None)
@@ -2876,7 +3339,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
             continue
     structured = build_structured_report(df, declared, cat_products)
 
-    summary = compute_summary(df, coverage, images_df, redirects)
+    summary = compute_summary(df, coverage, images_df, redirects, platform)
     summary['structured'] = structured
     summary['platform'] = platform
     summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
@@ -2884,7 +3347,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     say('done')
 
     # حذف البيانات الثقيلة غير القابلة للحفظ من سجل الزحف
-    for k in ('sitemap_keys', 'linked_keys'):
+    for k in ('sitemap_keys', 'linked_keys', 'collector', 'referrers', 'ref_counts'):
         crawl_meta.pop(k, None)
 
     return {'df': df, 'images_df': images_df, 'summary': summary,
