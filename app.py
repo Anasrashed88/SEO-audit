@@ -157,15 +157,31 @@ with st.sidebar:
                                      "لتوفير وقت الفحص.")
     do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True,
                                    help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
+    conn_modes = [eng.CONN_BROWSER, eng.CONN_PLAIN] + ([eng.CONN_REAL] if eng.HAS_PLAYWRIGHT else [])
+    conn_names = {eng.CONN_BROWSER: "بصمة متصفح كروم (موصى به)",
+                  eng.CONN_PLAIN: "الاتصال العادي",
+                  eng.CONN_REAL: "متصفح حقيقي (للمتاجر المحمية — أبطأ)"}
     conn_choice = st.radio(
-        "طريقة الاتصال بالمتجر",
-        [eng.CONN_BROWSER, eng.CONN_PLAIN],
-        format_func=lambda m: ("بصمة متصفح كروم (موصى به)" if m == eng.CONN_BROWSER
-                               else "الاتصال العادي"),
+        "طريقة الاتصال بالمتجر", conn_modes, format_func=lambda m: conn_names[m],
         index=0 if eng.HAS_CFFI else 1,
-        help="بصمة المتصفح تقلل رفض حماية المتاجر للأداة. استخدم «اختبار الاتصال» "
-             "لتعرف أي طريقة يقبلها متجرك.")
+        help="إذا رفض المتجر الأداة، اختر «متصفح حقيقي»: يفتح الصفحات بكروم مخفي "
+             "كما تفتحها أنت. يعمل على جهازك فقط.")
+    if conn_choice == eng.CONN_REAL:
+        if st.session_state.get('real_ok') is None:
+            with st.spinner("تشغيل المتصفح الحقيقي..."):
+                ok, msg = eng.real_browser_available()
+            st.session_state.real_ok, st.session_state.real_msg = ok, msg
+        if not st.session_state.real_ok:
+            st.error(st.session_state.real_msg)
+            conn_choice = eng.CONN_BROWSER if eng.HAS_CFFI else eng.CONN_PLAIN
+        else:
+            st.caption("🐢 صفحة واحدة في كل مرة — فحص 350 صفحة يأخذ تقريباً 10 إلى 15 دقيقة.")
     eng.set_connection_mode(conn_choice)
+    gentle = st.checkbox("الوضع الهادئ", value=False,
+                         disabled=(conn_choice == eng.CONN_REAL),
+                         help="صفحة واحدة في كل مرة مع مهلة ثابتة، واحترام كامل لطلب المتجر "
+                              "التمهّل. أبطأ، لكنه يقلل رفض المتاجر التي تقيّد كثرة الطلبات.")
+    eng.set_gentle(gentle or conn_choice == eng.CONN_REAL)
     if not eng.HAS_CFFI:
         st.caption("⚠️ بصمة المتصفح غير متاحة: مكتبة curl_cffi غير مثبتة.")
     st.markdown("---")
