@@ -157,6 +157,17 @@ with st.sidebar:
                                      "لتوفير وقت الفحص.")
     do_sitemap_check = st.checkbox("مقارنة مع خريطة الموقع", value=True,
                                    help="تشخيصية فقط — لا تؤثر على أرقام الفحص.")
+    conn_choice = st.radio(
+        "طريقة الاتصال بالمتجر",
+        [eng.CONN_BROWSER, eng.CONN_PLAIN],
+        format_func=lambda m: ("بصمة متصفح كروم (موصى به)" if m == eng.CONN_BROWSER
+                               else "الاتصال العادي"),
+        index=0 if eng.HAS_CFFI else 1,
+        help="بصمة المتصفح تقلل رفض حماية المتاجر للأداة. استخدم «اختبار الاتصال» "
+             "لتعرف أي طريقة يقبلها متجرك.")
+    eng.set_connection_mode(conn_choice)
+    if not eng.HAS_CFFI:
+        st.caption("⚠️ بصمة المتصفح غير متاحة: مكتبة curl_cffi غير مثبتة.")
     st.markdown("---")
     st.caption("الأداة معايرة على منصات سلة وزد وشوبيفاي.")
 
@@ -179,6 +190,27 @@ if nav == "🔍 فحص متجر جديد":
                                placeholder="https://example.store/sitemap.xml")
         sm_files = st.file_uploader("رفع ملفات الخريطة", type=['xml', 'gz', 'txt'],
                                     accept_multiple_files=True)
+
+    with st.expander("🔌 اختبار الاتصال بالمتجر — هل يسمح المتجر للأداة بالفحص؟"):
+        st.caption("يجرّب صفحة واحدة من المتجر بالطريقتين، ويخبرك أيهما يقبلها المتجر. "
+                   "اختر بعدها الطريقة الناجحة من القائمة الجانبية.")
+        if st.button("اختبر الاتصال الآن", key="conn_test"):
+            test_url = normalize_url(input_url) if (input_url or '').strip() else \
+                infer_store_url(sm_text, sm_files)
+            if not test_url:
+                st.error("اكتب رابط المتجر أولاً.")
+            else:
+                with st.spinner("جارٍ الاختبار..."):
+                    rows = eng.test_connection(test_url)
+                st.dataframe(pd.DataFrame(rows).drop(columns=['ok']),
+                             use_container_width=True, hide_index=True)
+                ok = [r['الطريقة'] for r in rows if r['ok']]
+                if not ok:
+                    st.warning("المتجر رفض الطريقتين من هذا الجهاز. الفحص سيكون ناقصاً.")
+                elif len(ok) == 1:
+                    st.success(f"المتجر يقبل: {ok[0]} فقط — اخترها من القائمة الجانبية.")
+                else:
+                    st.success("المتجر يقبل الطريقتين.")
 
     if st.session_state.audit_df is not None:
         if st.sidebar.button("🔄 تفريغ الشاشة", use_container_width=True):
