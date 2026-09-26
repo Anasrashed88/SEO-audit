@@ -7,7 +7,7 @@ import pandas as pd
 from audit_engine import (
     PAGE_TYPE_ORDER, PAGE_TYPE_LABEL, STATUS_LABEL, QUALITY_LABEL, URL_LABEL,
     COL_EN, ALT_WEAK_STATES, localize_df, unique_images, build_broken_links,
-    title_url_fix_mask, desc_fix_mask,
+    title_url_fix_mask, desc_fix_mask, build_zid_redirects,
     T_HOME, T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO, T_ARCHIVE, T_UNKNOWN,
     T_BROKEN,
 )
@@ -28,6 +28,7 @@ ZIP_NAMES = {
            'alt_missing': "00_صور_بلا_وصف.csv",
            'alt_weak': "00_صور_وصفها_غير_وصفي_أو_مكرر.csv",
            'broken': "8_روابط_لا_تعمل_بلا_تحويل.csv",
+           'zid_redirects': "8_ملف_تحويلات_زد_للاستيراد.xlsx",
            'titles': "00_عناوين_وروابط_تحتاج_إصلاح.csv",
            'descs': "00_أوصاف_ميتا_تحتاج_إصلاح.csv",
            'bundle': "ملفات_العمل.zip",
@@ -49,6 +50,7 @@ ZIP_NAMES = {
            'alt_missing': "00_images_missing_alt.csv",
            'alt_weak': "00_images_weak_or_duplicate_alt.csv",
            'broken': "8_broken_links_no_redirect.csv",
+           'zid_redirects': "8_zid_redirects_import.xlsx",
            'titles': "00_titles_and_urls_to_fix.csv",
            'descs': "00_meta_descriptions_to_fix.csv",
            'bundle': "work_files.zip",
@@ -230,16 +232,24 @@ def build_descs_list(df, lang='ar'):
     return localize_df(_priority_sorted(rows), lang)
 
 
-def build_broken_list(df, lang='ar'):
-    """الروابط التي لا تعمل وليس لها إعادة توجيه، جاهزة للتصدير."""
-    out = build_broken_links(df)
+def build_broken_list(df, lang='ar', platform='unknown'):
+    """الروابط التي لا تعمل وليس لها إعادة توجيه: مكانها، والوجهة المقترحة، والإجراء."""
+    out = build_broken_links(df, platform)
     if out.empty:
         return pd.DataFrame()
     out.insert(0, 'م', range(1, len(out) + 1))
     return localize_df(out, lang)
 
 
-def build_filtered_exports(df, images_df, lang='ar'):
+def build_zid_redirect_table(df, platform='unknown'):
+    """ملف التحويلات لزد — يُبنى لمتاجر زد فقط (الأعمدة كما في صفحة مساعدة زد)."""
+    if platform != 'zid':
+        return pd.DataFrame()
+    table, _ = build_zid_redirects(df)
+    return table
+
+
+def build_filtered_exports(df, images_df, lang='ar', platform='unknown'):
     """الملفات التي يمكن تحميلها منفصلة من الواجهة:
     يعيد {المفتاح: (اسم الملف، جدول)} للجداول غير الفارغة فقط."""
     names = ZIP_NAMES[lang]
@@ -248,7 +258,8 @@ def build_filtered_exports(df, images_df, lang='ar'):
         'descs': build_descs_list(df, lang),
         'alt_missing': build_image_list(images_df, ALT_MISSING_STATES, lang),
         'alt_weak': build_image_list(images_df, ALT_WEAK_EXPORT, lang),
-        'broken': build_broken_list(df, lang),
+        'broken': build_broken_list(df, lang, platform),
+        'zid_redirects': build_zid_redirect_table(df, platform),
     }
     return {k: (names[k], t) for k, t in tables.items() if t is not None and not t.empty}
 
@@ -257,16 +268,31 @@ def to_csv_bytes(table):
     return table.to_csv(index=False).encode('utf-8-sig')
 
 
+def to_xlsx_bytes(table, sheet='Sheet1'):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as w:
+        table.to_excel(w, index=False, sheet_name=sheet)
+    return buf.getvalue()
+
+
+def table_bytes(fname, table):
+    """(المحتوى، نوع الملف) حسب امتداد اسم الملف."""
+    if str(fname).lower().endswith('.xlsx'):
+        return (to_xlsx_bytes(table),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    return to_csv_bytes(table), 'text/csv'
+
+
 def build_filtered_zip(filtered):
     """كل ملفات العمل في ملف مضغوط واحد."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for fname, table in filtered.values():
-            z.writestr(fname, to_csv_bytes(table))
+            z.writestr(fname, table_bytes(fname, table)[0])
     return buf.getvalue()
 
 
-def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
+def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform='unknown'):
     names = ZIP_NAMES[lang]
     ldf = localize_df(df, lang)
     limg = localize_df(unique_images(images_df), lang)
@@ -288,7 +314,6 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
         if coverage:
             for key, data in [('notidx', coverage.get('unlisted_pages')),
                               ('orphan', coverage.get('orphan_pages')),
-                              ('redirect', coverage.get('dead_pages')),
                               ('scroll', coverage.get('scroll_only_products'))]:
                 if data:
                     z.writestr(names[key],
@@ -308,7 +333,10 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None):
         descs = build_descs_list(df, lang)
         alt_missing = build_image_list(images_df, ALT_MISSING_STATES, lang)
         alt_weak = build_image_list(images_df, ALT_WEAK_EXPORT, lang)
-        broken = build_broken_list(df, lang)
+        broken = build_broken_list(df, lang, platform)
+        zid_red = build_zid_redirect_table(df, platform)
+        if zid_red is not None and not zid_red.empty:
+            z.writestr(names['zid_redirects'], to_xlsx_bytes(zid_red))
         for key, table in (('titles', titles), ('descs', descs),
                            ('alt_missing', alt_missing), ('alt_weak', alt_weak),
                            ('broken', broken)):
