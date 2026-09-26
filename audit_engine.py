@@ -686,7 +686,7 @@ def norm_host(netloc):
 # بادئات اللغة: /ar و /en وغيرها — الصفحة نفسها بلغة أخرى لا تُحسب صفحة جديدة
 LANG_CODES = {'ar', 'en', 'fr', 'ur', 'tr', 'es', 'de', 'it', 'id', 'fa', 'hi', 'bn', 'ru', 'zh'}
 
-PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product)-?(\d{4,})$', re.I)
+PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product|brand)-?(\d{4,})$', re.I)
 
 
 def url_segments(url):
@@ -1071,6 +1071,8 @@ ARCHIVE_PARENT_SEGMENTS = ('tag', 'tags', 'author', 'authors', 'archive', 'وس�
 PRODUCT_ID_RE = re.compile(r'^p-?\d{3,}$', re.I)
 CATEGORY_ID_RE = re.compile(r'^c-?\d{3,}$', re.I)
 INFO_ID_RE = re.compile(r'^page-?\d+$', re.I)
+BRAND_ID_RE = re.compile(r'^brand-?\d+$', re.I)       # سلة: /اسم-الماركة/brand-123
+ARTICLE_ID_RE = re.compile(r'^a-?\d{4,}$', re.I)      # سلة: /blog/عنوان-المقال/a-123
 ARCHIVE_LAST_RE = re.compile(r'^(tag|author|category|archive)-?\d*$', re.I)
 
 _POLICY_NORM = None
@@ -1199,7 +1201,9 @@ def detect_page_type(url, base_url, soup=None):
             return T_INFO
         return T_BLOG
 
-    # 4) التصنيفات والقوائم
+    # 4) التصنيفات والقوائم (وصفحات الماركات: قوائم منتجات لكل ماركة)
+    if BRAND_ID_RE.match(last):
+        return T_CATEGORY
     if (CATEGORY_ID_RE.match(last) or path_clean in CATALOG_ROOTS
             or any(s in CATEGORY_SEGMENTS for s in segs)):
         return T_CATEGORY
@@ -2083,15 +2087,39 @@ QUALITY_LABEL = {
 # العروض والأسعار تتغير وتجعل العنوان لا يطابق ما يكتبه الزبون في جوجل.
 _AR_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789')
 PROMO_PATTERNS = [
+    r'\d+\s*\S+\s*ب\s*ـ?\s*\d+',                          # 3 عبايات بـ 199
     r'\d+\s*(?:ريال|ر\.?\s?س|sar|﷼)',                    # سعر: 199 ريال
     r'\d+\s*[٪%]',                                         # نسبة خصم
-    r'\d+\s*\S+\s*ب\s*ـ?\s*\d+',                          # 3 عبايات بـ 199
     r'(?:^|\s)(?:خصم|خصومات|تخفيض|تخفيضات|عرض|عروض|اوفر|أوفر|حصري|حصريا|حصرياً|مجان[اًيه]?|'
     r'لفتره محدوده|لفترة محدودة|سارع|سارعي|اطلب الان|اطلبي الان|اطلب الآن|اطلبي الآن|'
     r'تسوق الان|تسوقي الان|تسوق الآن|تسوقي الآن|وفر|وفري)(?:\s|$)',
     r'\b(?:sale|offer|off|discount|free shipping|buy \d+)\b',
     r'[\U0001F300-\U0001FAFF\u2600-\u27BF]',                 # رموز تعبيرية
 ]
+
+
+def promo_phrase(text):
+    """العبارة الترويجية كما وردت في العنوان (مثل «كوبون خصم»)، أو نص فارغ."""
+    raw = str(text or '')
+    t = raw.translate(_AR_DIGITS).lower()
+    t = re.sub(r'عرض\s*\S*\s*\d+(?:[.,]\d+)?\s*(?:سم|cm|متر|م|mm|ملم)(?:\s|$)', ' ', t)
+    for p in PROMO_PATTERNS:
+        m = re.search(p, t)
+        if m:
+            a, b = m.span()
+            while a < b and t[a].isspace():
+                a += 1
+            while b > a and t[b - 1].isspace():
+                b -= 1
+            # نوسّع للكلمة المجاورة إن كانت جزءاً من العبارة (كوبون خصم، عروض و تخفيضات)
+            left = re.search(r'(\S+\s+)$', t[:a])
+            right = re.match(r'^(\s*و?\s*\S+)', t[b:])
+            if left and left.group(1).strip() in ('كوبون', 'كود', 'اقوى', 'أقوى', 'افضل', 'أفضل'):
+                a -= len(left.group(1))
+            if right and re.search(r'تخفيض|خصم|عروض|حصري|خاص|ريال|ر\.?\s?س', right.group(1)):
+                b += len(right.group(1))
+            return raw[a:b].strip(' -|،,')
+    return ''
 
 
 def is_promotional(text):
@@ -2234,6 +2262,7 @@ def slug_of(url):
         return ''
     last = segs[-1]
     if (PRODUCT_ID_RE.match(last) or CATEGORY_ID_RE.match(last) or INFO_ID_RE.match(last)
+            or BRAND_ID_RE.match(last) or ARTICLE_ID_RE.match(last)
             or re.fullmatch(r'\d+', last)) and len(segs) >= 2:
         return segs[-2]
     return last
