@@ -11,3 +11,4 @@ uharfbuzz
 ultimate-sitemap-parser
 curl_cffi
 playwright
+rapidfuzz
