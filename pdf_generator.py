@@ -258,6 +258,9 @@ def build_diagnosis(score, stats, lang):
         if stats.get('title_brand_only'):
             points.append(f"{stats['title_brand_only']} عنوان لا يحمل سوى اسم المتجر "
                           "بلا أي وصف للمنتج، فلا يطابق أي بحث للزبون.")
+        if stats.get('title_promo'):
+            points.append(f"{stats['title_promo']} عنوان بصياغة ترويجية (سعر أو عرض) بدل كلمات "
+                          "يبحث بها الزبون، فلا يظهر حين يبحث عن المنتج نفسه.")
         if stats.get('title_dup'):
             points.append(f"{stats['title_dup']} صفحة تتشارك نفس عنوان الميتا، "
                           "فلا تميّز محركات البحث بينها.")
