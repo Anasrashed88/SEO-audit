@@ -83,6 +83,21 @@ div[data-testid="stDataFrame"] { direction:ltr; }
 """, unsafe_allow_html=True)
 
 
+def infer_store_url(sm_text, sm_files):
+    """رابط المتجر من الخرائط نفسها: من رابط خريطة ملصوق، أو من أول رابط داخل ملف مرفوع."""
+    for ln in (sm_text or '').splitlines():
+        ln = ln.strip()
+        if ln.startswith('http'):
+            p = urlparse(ln)
+            return f"{p.scheme}://{p.netloc}"
+    for f in sm_files or []:
+        for loc in (eng.parse_sitemap_text(f.getvalue(), f.name) or []):
+            if str(loc).startswith('http'):
+                p = urlparse(loc)
+                return f"{p.scheme}://{p.netloc}"
+    return ''
+
+
 def logo_data_uri():
     try:
         import base64
@@ -148,7 +163,7 @@ with st.sidebar:
 if nav == "🔍 فحص متجر جديد":
     c1, c2 = st.columns([5, 1])
     with c1:
-        input_url = st.text_input("رابط المتجر الإلكتروني",
+        input_url = st.text_input("رابط المتجر الإلكتروني (أو اتركه فارغاً وارفع خرائط الموقع)",
                                   value=st.session_state.current_url,
                                   placeholder="https://example.store")
     with c2:
@@ -172,6 +187,13 @@ if nav == "🔍 فحص متجر جديد":
                 st.session_state[k] = None
             st.session_state.current_url = ""
             st.rerun()
+
+    if start_btn and not (input_url or '').strip():
+        input_url = infer_store_url(sm_text, sm_files)
+        if input_url:
+            st.info(f"رابط المتجر من خريطة الموقع: {input_url}")
+        else:
+            st.error("اكتب رابط المتجر، أو ارفع ملف خريطة موقع صالحاً.")
 
     if start_btn and input_url:
         target = normalize_url(input_url)
