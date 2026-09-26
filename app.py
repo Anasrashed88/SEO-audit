@@ -177,6 +177,10 @@ with st.sidebar:
         else:
             st.caption("🐢 صفحة واحدة في كل مرة — فحص 350 صفحة يأخذ تقريباً 10 إلى 15 دقيقة.")
     eng.set_connection_mode(conn_choice)
+    use_cache = st.checkbox(
+        "استكمال من الفحص السابق (آخر 24 ساعة)", value=True,
+        help="كل صفحة تُفحص تُحفظ فوراً. عند إعادة فحص نفس المتجر تؤخذ الصفحات الناجحة "
+             "من الحفظ دون طلبها من المتجر، ولا يُفحص إلا ما فشل أو لم يُفحص بعد.")
     gentle = st.checkbox("الوضع الهادئ", value=False,
                          disabled=(conn_choice == eng.CONN_REAL),
                          help="صفحة واحدة في كل مرة مع مهلة ثابتة، واحترام كامل لطلب المتجر "
@@ -236,6 +240,11 @@ if nav == "🔍 فحص متجر جديد":
             st.session_state.current_url = ""
             st.rerun()
 
+    resume_now = st.session_state.pop('resume_now', False)
+    if resume_now:
+        start_btn = True
+        input_url = input_url or st.session_state.current_url
+
     if start_btn and not (input_url or '').strip():
         input_url = infer_store_url(sm_text, sm_files)
         if input_url:
@@ -278,6 +287,9 @@ if nav == "🔍 فحص متجر جديد":
                     note.caption(f"إعادة قراءة هادئة لـ {kw.get('count')} ملف خريطة تعذّر تحميله...")
                 elif stage == 'pagination_skipped':
                     note.caption(f"تخطّي متابعة الترقيم: {kw.get('reason')}")
+                elif stage == 'retry_aborted':
+                    note.caption("المتجر رفض أغلب عيّنة إعادة المحاولة — توقفت الأداة حتى لا تنتظر بلا فائدة. "
+                                 "استخدم «أكمل الفحص» لاحقاً.")
                 elif stage == 'retry_start':
                     head.write(f"**إعادة محاولة** — {kw.get('count')} صفحة "
                                "تعذّر الاتصال بها")
@@ -290,7 +302,8 @@ if nav == "🔍 فحص متجر جديد":
             result = run_full_scan(target, max_pages, workers, do_pagination,
                                    do_sitemap_check, progress,
                                    sitemap_uploads=uploads or None,
-                                   sitemap_inputs=inputs or None)
+                                   sitemap_inputs=inputs or None,
+                                   use_cache=use_cache)
             status.update(label="اكتمل الفحص", state="complete", expanded=False)
 
         df = result['df']
@@ -331,6 +344,25 @@ if nav == "🔍 فحص متجر جديد":
         summary = st.session_state.summary
         coverage = st.session_state.coverage
         platform = st.session_state.platform
+
+        n_fail = int(summary.get('unreachable_pages', 0) or 0)
+        if n_fail:
+            cc1, cc2 = st.columns([3, 1])
+            with cc1:
+                st.warning(f"تعذّر فحص {n_fail} صفحة، فالنتائج ناقصة. «أكمل الفحص» يعيد فحص "
+                           "هذه الصفحات فقط، ويأخذ الباقي من الفحص الحالي دون إزعاج المتجر.")
+            with cc2:
+                st.write("")
+                if st.button(f"🔁 أكمل الفحص ({n_fail} صفحة)", use_container_width=True,
+                             key="resume_btn"):
+                    st.session_state.resume_now = True
+                    st.rerun()
+            cached_n = eng.cache_count(st.session_state.current_url)
+            if cached_n:
+                if st.button("🗑️ مسح النتائج المحفوظة لهذا المتجر وبدء فحص جديد كلياً",
+                             key="clear_cache_btn"):
+                    eng.cache_clear(st.session_state.current_url)
+                    st.success("مُسحت النتائج المحفوظة. الفحص القادم سيبدأ من الصفر.")
 
         sc = summary['score']
         sc_color = COLOR['bad'] if sc < 60 else COLOR['warn'] if sc < 80 else COLOR['ok']
