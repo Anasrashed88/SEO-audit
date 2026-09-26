@@ -266,11 +266,22 @@ if nav == "🔍 فحص متجر جديد":
                     head.write("**المرحلة 1** — قراءة خريطة الموقع وفحص الصفحات")
                 elif stage == 'sitemap_read':
                     note.caption("جارٍ قراءة خريطة الموقع...")
+                elif stage == 'cache_loaded':
+                    n = kw.get('count', 0)
+                    if not kw.get('enabled'):
+                        st.caption("الاستكمال موقوف من الإعدادات — فحص كامل من البداية.")
+                    elif n:
+                        st.info(f"♻️ وُجدت {n} صفحة محفوظة من فحص سابق لهذا المتجر. "
+                                "لن تُطلب من المتجر مرة أخرى — يُفحص الباقي فقط.")
+                    else:
+                        st.caption("لا توجد نتائج محفوظة لهذا المتجر — فحص كامل من البداية.")
                 elif stage == 'audit':
                     done, pend = kw.get('done', 0), kw.get('pending', 0)
+                    cached = kw.get('cached', 0)
                     bar.progress(min(done / max(done + pend, 1), 1.0))
-                    note.caption(f"الجولة {kw.get('round')} · فُحصت {done} صفحة · "
-                                 f"{pend} رابط في الانتظار")
+                    fresh = done - cached
+                    note.caption(f"فُحصت {fresh} صفحة من المتجر · {cached} من الحفظ دون طلب · "
+                                 f"{pend} في الانتظار")
                 elif stage == 'pagination_start':
                     head.write("**المرحلة 2** — متابعة ترقيم القوائم")
                     bar.progress(0)
