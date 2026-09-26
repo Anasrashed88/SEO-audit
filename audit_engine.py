@@ -232,14 +232,28 @@ except Exception:
     _cffi = None
     HAS_CFFI = False
 
-CONN_BROWSER, CONN_PLAIN = 'browser', 'plain'
-CONN_LABEL = {CONN_BROWSER: 'بصمة متصفح كروم', CONN_PLAIN: 'الاتصال العادي'}
-_CONN = {'mode': CONN_BROWSER if HAS_CFFI else CONN_PLAIN}
+CONN_BROWSER, CONN_PLAIN, CONN_REAL = 'browser', 'plain', 'real'
+CONN_LABEL = {CONN_BROWSER: 'بصمة متصفح كروم', CONN_PLAIN: 'الاتصال العادي',
+              CONN_REAL: 'متصفح حقيقي'}
+_CONN = {'mode': CONN_BROWSER if HAS_CFFI else CONN_PLAIN, 'gentle': False}
 
 
 def set_connection_mode(mode):
-    _CONN['mode'] = mode if (mode == CONN_PLAIN or HAS_CFFI) else CONN_PLAIN
+    if mode == CONN_REAL and not HAS_PLAYWRIGHT:
+        mode = CONN_BROWSER
+    if mode == CONN_BROWSER and not HAS_CFFI:
+        mode = CONN_PLAIN
+    _CONN['mode'] = mode
     return _CONN['mode']
+
+
+def set_gentle(on):
+    """الوضع الهادئ: طلب واحد في كل مرة، مع مهلة ثابتة واحترام كامل لطلب المتجر التمهّل."""
+    _CONN['gentle'] = bool(on)
+
+
+def is_gentle():
+    return _CONN['gentle'] or _CONN['mode'] == CONN_REAL
 
 
 def connection_mode():
@@ -296,7 +310,163 @@ def _browser_get(url, timeout, extra_headers=None, max_hops=10):
     return _Resp(raw, current, history)
 
 
+# ==============================================================
+#  المتصفح الحقيقي (Playwright): للمتاجر التي لا تسمح إلا بمتصفح فعلي
+#  متصفح كروم مخفي واحد، يعمل في خيط مستقل، ويفتح الصفحات واحدة تلو الأخرى
+#  ويشغّل الجافاسكربت ويحل اختبارات الحماية كما يفعل متصفحك.
+# ==============================================================
+import queue as _queue
+from concurrent.futures import Future as _Future
+
+CHALLENGE_MARKERS = ('just a moment', 'cf-chl', 'challenge-platform', 'attention required',
+                     'checking your browser', 'verify you are human')
+
+
+class _SimpleResp:
+    def __init__(self, status, url, headers, content, history):
+        self.status_code = status
+        self.url = url
+        self.headers = requests.structures.CaseInsensitiveDict(headers or {})
+        self.content = content or b''
+        self.history = history
+        self.text = self.content.decode('utf-8', 'ignore')
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class RealBrowser:
+    PAUSE = 0.8          # مهلة بين الصفحات
+    CHALLENGE_WAIT = 20  # أقصى انتظار لاختبار الحماية (ثانية)
+
+    def __init__(self):
+        self.q = _queue.Queue()
+        self.thread = None
+        self.error = None
+        self.ready = threading.Event()
+        self.lock = threading.Lock()
+
+    def _ensure(self):
+        with self.lock:
+            if self.thread is None or not self.thread.is_alive():
+                self.ready.clear()
+                self.error = None
+                self.thread = threading.Thread(target=self._run, daemon=True)
+                self.thread.start()
+        self.ready.wait(90)
+        if self.error:
+            raise RuntimeError(self.error)
+
+    def _launch(self, p):
+        # نفضّل كروم المثبت على الجهاز (بصمة حقيقية ولا يحتاج تحميل متصفح إضافي)
+        for kw in ({'channel': 'chrome'}, {}):
+            try:
+                return p.chromium.launch(headless=True, args=[
+                    '--disable-blink-features=AutomationControlled'], **kw)
+            except Exception as e:
+                last = e
+        raise last
+
+    def _run(self):
+        try:
+            with sync_playwright() as p:
+                browser = self._launch(p)
+                ver = browser.version
+                ua = (f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      f"(KHTML, like Gecko) Chrome/{ver} Safari/537.36")
+                ctx = browser.new_context(user_agent=ua, locale='ar-SA',
+                                          viewport={'width': 1366, 'height': 900})
+                ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                ctx.route("**/*", lambda route: route.abort()
+                          if route.request.resource_type in ('image', 'media', 'font')
+                          else route.continue_())
+                page = ctx.new_page()
+                self.ready.set()
+                while True:
+                    item = self.q.get()
+                    if item is None:
+                        break
+                    url, timeout, fut = item
+                    try:
+                        fut.set_result(self._fetch(page, url, timeout))
+                    except Exception as e:
+                        fut.set_exception(e)
+                    time.sleep(self.PAUSE)
+                browser.close()
+        except Exception as e:
+            self.error = f'تعذّر تشغيل المتصفح الحقيقي: {type(e).__name__}: {str(e)[:200]}'
+            self.ready.set()
+
+    @staticmethod
+    def _looks_challenged(resp, body):
+        if resp is None:
+            return True
+        if resp.status in (403, 429, 503):
+            return True
+        low = body[:4000].decode('utf-8', 'ignore').lower() if body else ''
+        return any(m in low for m in CHALLENGE_MARKERS)
+
+    def _goto(self, page, url, timeout):
+        resp = page.goto(url, wait_until='domcontentloaded', timeout=int(timeout * 1000))
+        try:
+            body = resp.body() if resp else b''
+        except Exception:
+            body = b''
+        return resp, body
+
+    def _fetch(self, page, url, timeout):
+        resp, body = self._goto(page, url, timeout)
+        if self._looks_challenged(resp, body):
+            # نترك الصفحة تشغّل اختبار الحماية ثم نعيد الطلب ببطاقة الزائر الجديدة
+            try:
+                page.wait_for_function(
+                    "() => !/just a moment|checking your browser|attention required/i.test(document.title)",
+                    timeout=self.CHALLENGE_WAIT * 1000)
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
+            resp, body = self._goto(page, url, timeout)
+        if resp is None:
+            raise RuntimeError('لم يرجع المتصفح أي رد')
+        hops, r = [], resp.request.redirected_from
+        while r is not None:
+            rr = r.response()
+            hops.append(_Hop(rr.status if rr else 301, r.url))
+            r = r.redirected_from
+        return _SimpleResp(resp.status, resp.url, resp.headers, body, list(reversed(hops)))
+
+    def get(self, url, timeout=30):
+        self._ensure()
+        fut = _Future()
+        self.q.put((url, timeout, fut))
+        return fut.result(timeout=timeout * 2 + self.CHALLENGE_WAIT + 30)
+
+    def stop(self):
+        if self.thread is not None and self.thread.is_alive():
+            self.q.put(None)
+
+
+_REAL = RealBrowser()
+
+
+def real_browser_available():
+    """يشغّل المتصفح الحقيقي مرة للتأكد أنه يعمل على هذا الجهاز. يعيد (نجح، رسالة)."""
+    if not HAS_PLAYWRIGHT:
+        return False, 'مكتبة Playwright غير مثبتة.'
+    try:
+        _REAL._ensure()
+        return True, ''
+    except Exception as e:
+        msg = str(e)
+        if 'Executable' in msg or 'executable' in msg:
+            msg = ('لم يُعثر على متصفح كروم. هذا الوضع يعمل على جهازك فقط، '
+                   'ويحتاج متصفح Google Chrome مثبتاً.')
+        return False, msg
+
+
 def _http_get(url, timeout, headers=None):
+    if _CONN['mode'] == CONN_REAL and HAS_PLAYWRIGHT:
+        return _REAL.get(url, max(timeout, 30))
     if _CONN['mode'] == CONN_BROWSER and HAS_CFFI:
         return _browser_get(url, timeout, headers)
     h = dict(HEADERS)
@@ -308,7 +478,8 @@ def _http_get(url, timeout, headers=None):
 def test_connection(url, timeout=15):
     """يجرّب نفس الصفحة بالطريقتين ويقول أيهما يسمح به المتجر."""
     rows = []
-    modes = [CONN_PLAIN] + ([CONN_BROWSER] if HAS_CFFI else [])
+    modes = [CONN_PLAIN] + ([CONN_BROWSER] if HAS_CFFI else []) + \
+            ([CONN_REAL] if HAS_PLAYWRIGHT else [])
     saved = _CONN['mode']
     for m in modes:
         _CONN['mode'] = m
@@ -384,10 +555,21 @@ def is_challenge(res):
     return False
 
 
+GENTLE_DELAY = 1.5        # مهلة ثابتة بين الطلبات في الوضع الهادئ
+GENTLE_MAX_WAIT = 60      # أقصى انتظار يطلبه المتجر (Retry-After)
+GENTLE_COOLDOWN = 60      # استراحة جماعية بعد رفض متتالٍ
+_GENTLE = {'strikes': 0}
+_GENTLE_LOCK = threading.Lock()
+
+
 def safe_get(url, timeout=14, retries=2, headers=None):
     """يعيد الاستجابة كما هي (حتى 404 و429 و5xx) حتى يُسجَّل سبب الفشل الحقيقي،
     و None فقط عند انقطاع الاتصال فعلاً."""
-    if _THROTTLE['delay'] > 0:
+    gentle = is_gentle()
+    if gentle and _CONN['mode'] != CONN_REAL:
+        with _GENTLE_LOCK:          # طلب واحد في كل لحظة
+            time.sleep(GENTLE_DELAY)
+    elif _THROTTLE['delay'] > 0:
         time.sleep(_THROTTLE['delay'])
     last = None
     for attempt in range(retries + 1):
@@ -404,9 +586,19 @@ def safe_get(url, timeout=14, retries=2, headers=None):
             if attempt < retries:
                 ra = str(res.headers.get('Retry-After', '')).strip()
                 wait = float(ra) if ra.isdigit() else 2.0 * (attempt + 1)
-                time.sleep(min(wait, 10))
+                if gentle:
+                    with _GENTLE_LOCK:
+                        _GENTLE['strikes'] += 1
+                        strikes = _GENTLE['strikes']
+                    # رفض متكرر: استراحة جماعية بدل زيادة التقييد
+                    time.sleep(GENTLE_COOLDOWN if strikes >= 5 else min(max(wait, 5), GENTLE_MAX_WAIT))
+                    if strikes >= 5:
+                        _GENTLE['strikes'] = 0
+                else:
+                    time.sleep(min(wait, 10))
             continue
         note_success()
+        _GENTLE['strikes'] = 0
         return res
     return last
 
@@ -1370,9 +1562,12 @@ def harvest_infinite_scroll_playwright(url, base_url, max_scrolls=30):
 # ==============================================================
 #  فحص الصفحة الواحدة
 # ==============================================================
+_PW_BROKEN = {'v': False}
+
+
 def fetch_page_with_playwright_fallback(url):
     """جلب المحتوى بالمتصفح الخفي إذا كانت الصفحة فارغة بدون JavaScript"""
-    if not HAS_PLAYWRIGHT:
+    if not HAS_PLAYWRIGHT or _PW_BROKEN['v'] or _CONN['mode'] == CONN_REAL:
         return None
     try:
         with sync_playwright() as p:
@@ -1383,7 +1578,9 @@ def fetch_page_with_playwright_fallback(url):
             content = page.content()
             browser.close()
             return content
-    except Exception:
+    except Exception as e:
+        if 'Executable' in str(e) or 'executable' in str(e):
+            _PW_BROKEN['v'] = True     # لا متصفح على هذا الخادم: لا نكرر المحاولة لكل صفحة
         return None
 
 
@@ -3328,6 +3525,8 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     target = normalize_url(target)
     reset_throttle()
+    if is_gentle():
+        workers = 1
 
     say('discover_start')
     pages, imgs, crawl_meta, platform = discover_and_audit(
