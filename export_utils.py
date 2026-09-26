@@ -185,6 +185,13 @@ def _title_issues(r, lang, dup_counts=None):
         n = (dup_counts or {}).get(str(r.get('عنوان الميتا') or '').strip(), 0)
         need.append((f'العنوان مكرر في {n} صفحات' if n else QL['q_duplicate']) if ar
                     else (f'Title duplicated on {n} pages' if n else QL['q_duplicate']))
+    elif q == 'q_promo':
+        from audit_engine import promo_phrase
+        ph = promo_phrase(r.get('عنوان الميتا'))
+        need.append((f'العنوان فيه عبارة ترويجية «{ph}» بدل كلمات يبحث بها الزبون' if ph
+                     else 'العنوان: ' + QL['q_promo']) if ar else
+                    (f'Title contains promotional wording "{ph}" instead of search terms' if ph
+                     else 'Title: ' + QL['q_promo']))
     elif q not in ('q_ok', 'q_na', None) and not isinstance(q, float):
         need.append(('العنوان: ' if ar else 'Title: ') + QL.get(q, str(q)))
     u = r.get('جودة الرابط')
