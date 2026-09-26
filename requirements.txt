@@ -10,3 +10,4 @@ fpdf2
 uharfbuzz
 ultimate-sitemap-parser
 curl_cffi
+playwright
