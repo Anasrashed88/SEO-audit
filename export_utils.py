@@ -156,35 +156,73 @@ def build_image_list(images_df, states, lang='ar'):
 COL_EN.setdefault('اسم المنتج المعروض', 'Displayed Name')
 
 
-def _title_issues(r, lang):
-    L, QL, UL = STATUS_LABEL[lang], QUALITY_LABEL[lang], URL_LABEL[lang]
+def _n(v):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _title_issues(r, lang, dup_counts=None):
+    """سبب دقيق لكل عنوان: الطول بالأرقام، أو التكرار وعدد الصفحات، أو الصياغة الترويجية."""
+    QL, UL = QUALITY_LABEL[lang], URL_LABEL[lang]
+    ar = lang == 'ar'
     need = []
-    st = r.get('حالة العنوان')
-    if st in ('missing', 'very_short', 'long'):
-        need.append(('العنوان' if lang == 'ar' else 'Title') + f" ({L[st]})")
+    st, ln = r.get('حالة العنوان'), _n(r.get('طول العنوان'))
+    if st == 'missing':
+        need.append('العنوان مفقود' if ar else 'Title missing')
+    elif st == 'very_short':
+        need.append(f'العنوان قصير جداً ({ln} حرفاً — المثالي 50–60)' if ar
+                    else f'Title too short ({ln} chars — ideal 50–60)')
     elif st == 'acceptable':
-        need.append('العنوان أقصر من المثالي' if lang == 'ar' else 'Title below ideal length')
+        need.append(f'العنوان أقصر من المثالي ({ln} حرفاً — المثالي 50–60)' if ar
+                    else f'Title below ideal ({ln} chars — ideal 50–60)')
+    elif st == 'long':
+        need.append(f'العنوان طويل ({ln} حرفاً — الحد 60) فيُقتطع في نتائج البحث' if ar
+                    else f'Title too long ({ln} chars — max 60), truncated in results')
     q = r.get('جودة العنوان')
-    if q not in ('q_ok', 'q_na', None) and not (isinstance(q, float)):
-        need.append(('العنوان: ' if lang == 'ar' else 'Title: ') + QL.get(q, str(q)))
+    if q == 'q_duplicate':
+        n = (dup_counts or {}).get(str(r.get('عنوان الميتا') or '').strip(), 0)
+        need.append((f'العنوان مكرر في {n} صفحات' if n else QL['q_duplicate']) if ar
+                    else (f'Title duplicated on {n} pages' if n else QL['q_duplicate']))
+    elif q not in ('q_ok', 'q_na', None) and not isinstance(q, float):
+        need.append(('العنوان: ' if ar else 'Title: ') + QL.get(q, str(q)))
     u = r.get('جودة الرابط')
-    if u not in ('u_ok', 'u_na', None) and not (isinstance(u, float)):
-        need.append(('الرابط: ' if lang == 'ar' else 'URL: ') + UL.get(u, str(u)))
+    if u not in ('u_ok', 'u_na', None) and not isinstance(u, float):
+        need.append(('الرابط: ' if ar else 'URL: ') + UL.get(u, str(u)))
     return ' · '.join(need)
 
 
-def _desc_issues(r, lang):
-    L, QL = STATUS_LABEL[lang], QUALITY_LABEL[lang]
+def _desc_issues(r, lang, dup_counts=None):
+    QL = QUALITY_LABEL[lang]
+    ar = lang == 'ar'
     need = []
-    st = r.get('حالة الوصف')
-    if st in ('missing', 'very_short', 'long'):
-        need.append(('الوصف' if lang == 'ar' else 'Description') + f" ({L[st]})")
+    st, ln = r.get('حالة الوصف'), _n(r.get('طول الوصف'))
+    if st == 'missing':
+        need.append('الوصف مفقود' if ar else 'Description missing')
+    elif st == 'very_short':
+        need.append(f'الوصف قصير جداً ({ln} حرفاً — المثالي 120–150)' if ar
+                    else f'Description too short ({ln} chars — ideal 120–150)')
     elif st == 'acceptable':
-        need.append('الوصف أقصر من المثالي' if lang == 'ar' else 'Description below ideal length')
+        need.append(f'الوصف أقصر من المثالي ({ln} حرفاً — المثالي 120–150)' if ar
+                    else f'Description below ideal ({ln} chars — ideal 120–150)')
+    elif st == 'long':
+        need.append(f'الوصف طويل ({ln} حرفاً — الحد 150) فيُقتطع في نتائج البحث' if ar
+                    else f'Description too long ({ln} chars — max 150), truncated')
     q = r.get('جودة الوصف')
-    if q not in ('q_ok', 'q_na', None) and not (isinstance(q, float)):
-        need.append(('الوصف: ' if lang == 'ar' else 'Description: ') + QL.get(q, str(q)))
+    if q == 'q_duplicate':
+        n = (dup_counts or {}).get(str(r.get('وصف الميتا') or '').strip(), 0)
+        need.append((f'الوصف مكرر في {n} صفحات' if n else QL['q_duplicate']) if ar
+                    else (f'Description duplicated on {n} pages' if n else QL['q_duplicate']))
+    elif q not in ('q_ok', 'q_na', None) and not isinstance(q, float):
+        need.append(('الوصف: ' if ar else 'Description: ') + QL.get(q, str(q)))
     return ' · '.join(need)
+
+
+def _dup_counts(df, col):
+    live = df[df['متاحة'] == True] if 'متاحة' in df.columns else df  # noqa: E712
+    vals = live[col].map(lambda x: str(x or '').strip())
+    return vals[vals != ''].value_counts().to_dict()
 
 
 def _priority_sorted(rows):
@@ -201,11 +239,12 @@ def build_titles_urls_list(df, lang='ar'):
     if df is None or df.empty:
         return pd.DataFrame()
     rows = []
+    counts = _dup_counts(df, 'عنوان الميتا')
     for _, r in df[title_url_fix_mask(df)].iterrows():
         rows.append({
             'نوع الصفحة': r['نوع الصفحة'], 'الرابط': r['الرابط'],
             'درجة السيو': r.get('درجة السيو'),
-            'ما يحتاج إصلاحاً': _title_issues(r, lang),
+            'ما يحتاج إصلاحاً': _title_issues(r, lang, counts),
             'عنوان الميتا الحالي': r.get('عنوان الميتا', ''),
             'طول العنوان': r.get('طول العنوان', 0),
             'اسم المنتج المعروض': r.get('اسم المنتج المعروض', ''),
@@ -219,11 +258,12 @@ def build_descs_list(df, lang='ar'):
     if df is None or df.empty:
         return pd.DataFrame()
     rows = []
+    counts = _dup_counts(df, 'وصف الميتا')
     for _, r in df[desc_fix_mask(df)].iterrows():
         rows.append({
             'نوع الصفحة': r['نوع الصفحة'], 'الرابط': r['الرابط'],
             'درجة السيو': r.get('درجة السيو'),
-            'ما يحتاج إصلاحاً': _desc_issues(r, lang),
+            'ما يحتاج إصلاحاً': _desc_issues(r, lang, counts),
             'وصف الميتا الحالي': r.get('وصف الميتا', ''),
             'طول الوصف': r.get('طول الوصف', 0),
             'عنوان الميتا الحالي': r.get('عنوان الميتا', ''),
