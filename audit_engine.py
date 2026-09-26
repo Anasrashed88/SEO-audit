@@ -115,6 +115,7 @@ STATUS_LABEL = {
         'alt_missing': 'مفقود', 'alt_generic': 'غير وصفي', 'alt_stuffed': 'حشو كلمات',
         'alt_long': 'يتجاوز 125 حرفاً', 'alt_duplicate': 'مكرر على عدة صور',
         'alt_ok': 'سليم', 'alt_empty': 'لا يوجد (فارغ)',
+        'alt_wrong_product': 'يصف منتجاً آخر', 'alt_page_dup': 'مكرر على صور الصفحة نفسها',
         'canon_same': 'مطابق', 'canon_diff': 'مختلف عن رابط الصفحة', 'canon_missing': 'مفقود',
         'match_ok': 'مطابق', 'match_diff': 'مختلف عن عنوان الصفحة', 'match_na': '—',
     },
@@ -125,6 +126,8 @@ STATUS_LABEL = {
         'alt_missing': 'Missing', 'alt_generic': 'Not descriptive',
         'alt_stuffed': 'Keyword stuffed', 'alt_long': 'Over 125 characters',
         'alt_duplicate': 'Duplicated across images', 'alt_ok': 'Good',
+        'alt_wrong_product': 'Names a different product',
+        'alt_page_dup': 'Repeated on images of the same page',
         'alt_empty': '(empty)',
         'canon_same': 'Self-referencing', 'canon_diff': 'Differs from page URL',
         'canon_missing': 'Missing',
@@ -336,7 +339,7 @@ class _SimpleResp:
 
 
 class RealBrowser:
-    PAUSE = 0.8          # مهلة بين الصفحات
+    PAUSE = 0.8          # (للتوافق) — الإيقاع الفعلي في pace_wait
     CHALLENGE_WAIT = 20  # أقصى انتظار لاختبار الحماية (ثانية)
 
     def __init__(self):
@@ -391,7 +394,7 @@ class RealBrowser:
                         fut.set_result(self._fetch(page, url, timeout))
                     except Exception as e:
                         fut.set_exception(e)
-                    time.sleep(self.PAUSE)
+                    pace_wait()
                 browser.close()
         except Exception as e:
             self.error = f'تعذّر تشغيل المتصفح الحقيقي: {type(e).__name__}: {str(e)[:200]}'
@@ -555,7 +558,28 @@ def is_challenge(res):
     return False
 
 
-GENTLE_DELAY = 1.5        # مهلة ثابتة بين الطلبات في الوضع الهادئ
+GENTLE_DELAY = 1.5        # (للتوافق) — الإيقاع الفعلي في _PACE
+import random as _random
+# إيقاع الوضع الهادئ: 2.5 إلى 3.5 ثانية بين الصفحات، ويزيد ثانية مع كل رفض (حتى 8 ثوانٍ)
+# ثم ينخفض تدريجياً بعد سلسلة نجاح. هدفه ألا يلاحظ المتجر الفحص أصلاً.
+_PACE = {'base': 2.5, 'streak': 0}
+PACE_MIN, PACE_MAX = 2.5, 8.0
+
+
+def pace_wait():
+    time.sleep(_PACE['base'] + _random.uniform(0, 1.0))
+
+
+def pace_slower():
+    _PACE['base'] = min(_PACE['base'] + 1.0, PACE_MAX)
+    _PACE['streak'] = 0
+
+
+def pace_success():
+    _PACE['streak'] += 1
+    if _PACE['streak'] >= 15 and _PACE['base'] > PACE_MIN:
+        _PACE['base'] = max(PACE_MIN, _PACE['base'] - 0.5)
+        _PACE['streak'] = 0
 GENTLE_MAX_WAIT = 60      # أقصى انتظار يطلبه المتجر (Retry-After)
 GENTLE_COOLDOWN = 60      # استراحة جماعية بعد رفض متتالٍ
 _GENTLE = {'strikes': 0}
@@ -568,7 +592,7 @@ def safe_get(url, timeout=14, retries=2, headers=None):
     gentle = is_gentle()
     if gentle and _CONN['mode'] != CONN_REAL:
         with _GENTLE_LOCK:          # طلب واحد في كل لحظة
-            time.sleep(GENTLE_DELAY)
+            pace_wait()
     elif _THROTTLE['delay'] > 0:
         time.sleep(_THROTTLE['delay'])
     last = None
@@ -587,6 +611,7 @@ def safe_get(url, timeout=14, retries=2, headers=None):
                 ra = str(res.headers.get('Retry-After', '')).strip()
                 wait = float(ra) if ra.isdigit() else 2.0 * (attempt + 1)
                 if gentle:
+                    pace_slower()
                     with _GENTLE_LOCK:
                         _GENTLE['strikes'] += 1
                         strikes = _GENTLE['strikes']
@@ -599,6 +624,8 @@ def safe_get(url, timeout=14, retries=2, headers=None):
             continue
         note_success()
         _GENTLE['strikes'] = 0
+        if gentle:
+            pace_success()
         return res
     return last
 
@@ -796,7 +823,7 @@ GENERIC_ALT = {
     'image', 'images', 'img', 'photo', 'photos', 'picture', 'pic', 'icon', 'logo',
     'product', 'item', 'untitled', 'default', 'thumbnail', 'thumb', 'banner',
     'slide', 'slider', 'cover', 'hero', 'main', 'mobile', 'desktop', 'tablet',
-    'new', 'sale', 'view', 'gallery', 'preview',
+    'new', 'sale', 'view', 'gallery', 'preview', 'link', 'links', 'button', 'click',
     'صورة', 'صوره', 'صور', 'منتج', 'شعار', 'غلاف', 'رئيسية', 'جديد',
 }
 
@@ -840,23 +867,140 @@ def grade_alt(alt_text):
 
 
 ALT_CREDIT = {'alt_ok': 1.0, 'alt_duplicate': 0.4, 'alt_long': 0.6,
+              'alt_wrong_product': 0.2, 'alt_page_dup': 0.4,
               'alt_stuffed': 0.3, 'alt_generic': 0.0, 'alt_missing': 0.0}
-ALT_WEAK_STATES = ('alt_generic', 'alt_stuffed', 'alt_long', 'alt_duplicate')
+ALT_WEAK_STATES = ('alt_generic', 'alt_stuffed', 'alt_long', 'alt_duplicate',
+                   'alt_page_dup', 'alt_wrong_product')
+
+
+TEMPLATE_IMAGE_SHARE = 0.3   # صورة تظهر في 30% من الصفحات أو أكثر = جزء من القالب
+
+
+def drop_template_images(images_df, df):
+    """صور القالب (الشعار، شارات الدفع والرقم الضريبي، بنرات الرأس والتذييل) تظهر في أغلب
+    الصفحات. ليست صور محتوى، فتُستبعد من تدقيق النص البديل ومن عرض السعر.
+    يعيد (الجدول بعد الاستبعاد، عدد الصور المستبعدة)."""
+    if images_df is None or images_df.empty:
+        return images_df, 0
+    n_pages = int((df['متاحة'] == True).sum()) if df is not None and not df.empty else 0  # noqa: E712
+    if n_pages < 5:
+        return images_df, 0
+    per_img = images_df.groupby('رابط الصورة')['رابط الصفحة'].nunique()
+    limit = max(5, n_pages * TEMPLATE_IMAGE_SHARE)
+    template = set(per_img[per_img >= limit].index)
+    if not template:
+        return images_df, 0
+    out = images_df[~images_df['رابط الصورة'].isin(template)].reset_index(drop=True)
+    return out, len(template)
 
 
 def apply_duplicate_alt(images_df):
+    """متى يكون تكرار الوصف مشكلة؟
+    - نفس الوصف على صور صفحات مختلفة (منتجات مختلفة بنفس الوصف): تكرار.
+    - صور صفحة المنتج الواحد تحمل اسم المنتج: طبيعي، لأنها كلها للمنتج نفسه.
+    - صور صفحة تعريفية أو مقالة بنفس الوصف: تكرار، لأن كل صورة فيها تعرض شيئاً مختلفاً."""
     if images_df is None or images_df.empty:
         return images_df
     df = images_df.copy()
+    alt_col, st_col = 'النص البديل الحالي (Alt)', 'حالة النص البديل'
     uniq = df.drop_duplicates(subset=['رابط الصورة'])
-    ok = uniq[uniq['حالة النص البديل'] == 'alt_ok']
-    counts = ok['النص البديل الحالي (Alt)'].value_counts()
-    dupes = set(counts[counts >= ALT_DUP_THRESHOLD].index)
+    ok = uniq[uniq[st_col] == 'alt_ok']
+    pages_per_alt = ok.groupby(alt_col)['رابط الصفحة'].nunique()
+    dupes = set(pages_per_alt[pages_per_alt >= ALT_DUP_THRESHOLD].index)
     if dupes:
-        mask = (df['حالة النص البديل'] == 'alt_ok') & \
-               df['النص البديل الحالي (Alt)'].isin(dupes)
-        df.loc[mask, 'حالة النص البديل'] = 'alt_duplicate'
+        mask = (df[st_col] == 'alt_ok') & df[alt_col].isin(dupes)
+        df.loc[mask, st_col] = 'alt_duplicate'
+
+    if 'نوع الصفحة' in df.columns:
+        non_prod = df[(df['نوع الصفحة'] != T_PRODUCT) & (df[st_col] == 'alt_ok')]
+        if not non_prod.empty:
+            per_page = non_prod.drop_duplicates(subset=['رابط الصفحة', 'رابط الصورة']) \
+                .groupby(['رابط الصفحة', alt_col])['رابط الصورة'].nunique()
+            repeated = {(pg, a) for (pg, a), n in per_page.items() if n >= 2}
+            if repeated:
+                keys = list(zip(df['رابط الصفحة'], df[alt_col]))
+                mask = (df[st_col] == 'alt_ok') & \
+                    pd.Series([k in repeated for k in keys], index=df.index)
+                df.loc[mask, st_col] = 'alt_page_dup'
     return df
+
+
+STORE_WORDS = {'متجر', 'شعار', 'لوقو', 'لوجو', 'logo', 'store', 'shop', 'brand', 'براند',
+               'official', 'رسمي', 'الرسمي'}
+
+
+def _store_tokens(df, brand=''):
+    names = []
+    if brand:
+        names.append(brand)
+    if df is not None and not df.empty and 'اسم المنتج المعروض' in df.columns:
+        names += [str(v) for v in df.loc[df['نوع الصفحة'] == T_HOME, 'اسم المنتج المعروض']
+                  if str(v).strip() and str(v) != 'nan']
+    toks = set()
+    for n in names:
+        toks |= set(slug_tokens(n))
+    return toks
+
+
+def mark_store_name_alts(images_df, df, brand=''):
+    """وصف مكوّن من اسم المتجر فقط، ولو أضيفت له كلمة عامة أو رقم
+    («شعار متجر لفتة»، «متجر لفتة 2»)، لا يصف الصورة: يُعتبر غير وصفي."""
+    if images_df is None or images_df.empty:
+        return images_df
+    store = _store_tokens(df, brand)
+    if not store:
+        return images_df
+    generic = _generic_alt_norm() | {normalize_ar_token(w) for w in STORE_WORDS} | STORE_WORDS
+    out = images_df.copy()
+    st_col = 'حالة النص البديل'
+
+    def store_only(alt):
+        toks = [t for t in slug_tokens(alt) if not t.isdigit()]
+        if not toks:
+            return False
+        rest = [t for t in toks if t not in store and t not in generic]
+        return not rest and any(t in store for t in toks)
+
+    mask = out[st_col].isin(['alt_ok', 'alt_duplicate', 'alt_page_dup']) & \
+        out['النص البديل الحالي (Alt)'].map(store_only)
+    out.loc[mask, st_col] = 'alt_generic'
+    return out
+
+
+def mark_wrong_product_alts(images_df, df, brand=''):
+    """صورة في صفحة منتج، وصفها هو اسم منتج آخر من المتجر (يحدث عند نسخ منتج وتغيير اسمه).
+    لا نُعلّم إلا إذا طابق الوصف منتجاً آخر فعلاً ولم يطابق منتج الصفحة، حتى لا نخطئ
+    في وصف يذكر زاوية أو تفصيلاً مثل «منظر خلفي للتطريز»."""
+    if images_df is None or images_df.empty or df is None or df.empty:
+        return images_df
+    prods = df[(df['نوع الصفحة'] == T_PRODUCT) & (df['متاحة'] == True)]  # noqa: E712
+    if len(prods) < 2:
+        return images_df
+
+    def pname(r):
+        return str(r.get('اسم منظم') or '').strip() or str(r.get('اسم المنتج المعروض') or '').strip()
+
+    names = {r['الرابط']: pname(r) for _, r in prods.iterrows() if pname(r)}
+    common = build_generic_vocab(list(names.values())) | _store_tokens(df, brand) | _generic_alt_norm()
+
+    def distinct(text):
+        return {t for t in slug_tokens(text) if not t.isdigit() and t not in common}
+
+    name_toks = {u: distinct(n) for u, n in names.items()}
+    out = images_df.copy()
+    st_col = 'حالة النص البديل'
+    for idx, r in out.iterrows():
+        if r.get('نوع الصفحة') != T_PRODUCT or r[st_col] not in ('alt_ok', 'alt_duplicate'):
+            continue
+        own = name_toks.get(r['رابط الصفحة'])
+        alt_t = distinct(r['النص البديل الحالي (Alt)'])
+        if own is None or not own or len(alt_t) < 2 or (alt_t & own):
+            continue
+        for u, toks in name_toks.items():
+            if u != r['رابط الصفحة'] and toks and len(alt_t & toks) / len(alt_t) >= 0.6:
+                out.at[idx, st_col] = 'alt_wrong_product'
+                break
+    return out
 
 
 def unique_images(images_df):
@@ -910,6 +1054,7 @@ POLICY_KEYWORDS = [
     'about', 'about-us', 'contact', 'contact-us', 'faq', 'faqs', 'help',
     'shipping', 'delivery', 'complaint', 'complaints', 'returns', 'return',
     'refund', 'refunds', 'warranty', 'support', 'legal',
+    'testimonials', 'testimonial', 'reviews', 'آراء', 'اراء', 'تقييمات',
 ]
 CATALOG_ROOTS = {'products', 'product', 'all-products', 'latest-products', 'catalog',
                  'catalogue', 'collections/all', 'collections', 'shop', 'store',
@@ -1622,12 +1767,109 @@ def broken_page_row(url, reason, source, base_url='', final='', chain=''):
     }
 
 
+# ==============================================================
+#  حفظ النتائج أثناء الفحص (للاستكمال)
+#  كل صفحة تُفحص بنجاح تُحفظ فوراً في ملف. إذا أُغلق الفحص أو فشلت صفحات،
+#  يعيد «أكمل الفحص» فحص ما لم يكتمل فقط، ويأخذ الباقي من الملف دون أي طلب للمتجر.
+# ==============================================================
+CACHE_DIR = BASE_DIR / 'scan_cache'
+CACHE_MAX_AGE = 24 * 3600
+_CACHE = {'enabled': False, 'path': None, 'data': {}, 'hits': 0, 'lock': threading.Lock()}
+
+
+def _cache_file(base_url):
+    host = norm_host(urlparse(normalize_url(base_url)).netloc) or 'store'
+    return CACHE_DIR / (re.sub(r'[^a-z0-9.\-]', '_', host) + '.jsonl')
+
+
+def cache_open(base_url, enabled=True):
+    _CACHE.update({'enabled': enabled, 'path': _cache_file(base_url), 'data': {}, 'hits': 0})
+    if not enabled:
+        return 0
+    path = _CACHE['path']
+    if path.exists():
+        now = time.time()
+        with open(path, encoding='utf-8') as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if now - rec.get('t', 0) <= CACHE_MAX_AGE:
+                    _CACHE['data'][rec['k']] = rec['r']
+    return len(_CACHE['data'])
+
+
+def cache_count(base_url):
+    path = _cache_file(base_url)
+    if not path.exists():
+        return 0
+    now, keys = time.time(), set()
+    with open(path, encoding='utf-8') as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if now - rec.get('t', 0) <= CACHE_MAX_AGE:
+                keys.add(rec['k'])
+    return len(keys)
+
+
+def cache_clear(base_url):
+    path = _cache_file(base_url)
+    if path.exists():
+        path.unlink()
+
+
+def _cacheable(res):
+    pd_ = res['page_data']
+    if pd_.get('متاحة'):
+        return True
+    code = str(pd_.get('كود الاستجابة'))
+    return bool(re.search(r'خطأ 4(?:04|10)\b', code)) or DELETED_HOME in code
+
+
+def _serialize(res):
+    out = {}
+    for k, v in res.items():
+        out[k] = sorted(v) if isinstance(v, set) else v
+    return out
+
+
+def _deserialize(rec):
+    res = dict(rec)
+    for k in ('links', 'product_links', 'next_pages'):
+        res[k] = set(res.get(k) or [])
+    res['page_data'] = dict(res['page_data'])
+    res.setdefault('images_data', [])
+    return res
+
+
 def fetch_and_audit(task):
     url, base_url, source = task
+    key = url_key(clean_url(url))
+    if _CACHE['enabled'] and key in _CACHE['data']:
+        _CACHE['hits'] += 1
+        res = _deserialize(_CACHE['data'][key])
+        res['page_data']['مصدر الاكتشاف'] = source
+        return res
     try:
-        return _fetch_and_audit(url, base_url, source)
+        res = _fetch_and_audit(url, base_url, source)
     except Exception as e:
         return broken_page_row(clean_url(url), f'خطأ فني: {type(e).__name__}', source, base_url)
+    if _CACHE['enabled'] and _cacheable(res):
+        rec = _serialize(res)
+        with _CACHE['lock']:
+            _CACHE['data'][key] = rec
+            try:
+                CACHE_DIR.mkdir(exist_ok=True)
+                with open(_CACHE['path'], 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps({'k': key, 't': time.time(), 'r': rec},
+                                        ensure_ascii=False, default=str) + '\n')
+            except Exception:
+                pass
+    return res
 
 
 DELETED_HOME = 'محذوف — تحويل للرئيسية'
@@ -1828,14 +2070,37 @@ QUALITY_LABEL = {
     'ar': {'q_ok': 'سليم', 'q_symbols': 'رموز بلا نص', 'q_placeholder': 'قيمة قالب افتراضية',
            'q_brand_only': 'اسم المتجر فقط', 'q_duplicate': 'مكرر على عدة صفحات',
            'q_one_word': 'كلمة واحدة بلا وصف', 'q_same_as_title': 'نسخة من العنوان',
+           'q_promo': 'صياغة ترويجية غير بحثية (سعر أو عرض)',
            'q_na': '—'},
     'en': {'q_ok': 'Sound', 'q_symbols': 'Symbols only', 'q_placeholder': 'Template placeholder',
            'q_brand_only': 'Store name only', 'q_duplicate': 'Duplicated across pages',
            'q_one_word': 'Single word, no description', 'q_same_as_title': 'Copy of the title',
+           'q_promo': 'Promotional wording, not search-friendly (price or offer)',
            'q_na': '—'},
 }
+
+# صياغة ترويجية: الناس يبحثون عن «عباية سوداء كلوش» لا عن «3 عبايات بـ 199 ريال».
+# العروض والأسعار تتغير وتجعل العنوان لا يطابق ما يكتبه الزبون في جوجل.
+_AR_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789')
+PROMO_PATTERNS = [
+    r'\d+\s*(?:ريال|ر\.?\s?س|sar|﷼)',                    # سعر: 199 ريال
+    r'\d+\s*[٪%]',                                         # نسبة خصم
+    r'\d+\s*\S+\s*ب\s*ـ?\s*\d+',                          # 3 عبايات بـ 199
+    r'(?:^|\s)(?:خصم|خصومات|تخفيض|تخفيضات|عرض|عروض|اوفر|أوفر|حصري|حصريا|حصرياً|مجان[اًيه]?|'
+    r'لفتره محدوده|لفترة محدودة|سارع|سارعي|اطلب الان|اطلبي الان|اطلب الآن|اطلبي الآن|'
+    r'تسوق الان|تسوقي الان|تسوق الآن|تسوقي الآن|وفر|وفري)(?:\s|$)',
+    r'\b(?:sale|offer|off|discount|free shipping|buy \d+)\b',
+    r'[\U0001F300-\U0001FAFF\u2600-\u27BF]',                 # رموز تعبيرية
+]
+
+
+def is_promotional(text):
+    t = str(text or '').translate(_AR_DIGITS).lower()
+    # «عرض» بمعنى المقاس (عرض الشال 50 سم) ليس عرضاً ترويجياً
+    t = re.sub(r'عرض\s*\S*\s*\d+(?:[.,]\d+)?\s*(?:سم|cm|متر|م|mm|ملم)(?:\s|$)', ' ', t)
+    return any(re.search(p, t) for p in PROMO_PATTERNS)
 QUALITY_FATAL = ('q_symbols', 'q_placeholder')
-QUALITY_CREDIT = {'q_ok': 1.0, 'q_duplicate': 0.3, 'q_brand_only': 0.2,
+QUALITY_CREDIT = {'q_ok': 1.0, 'q_duplicate': 0.3, 'q_brand_only': 0.2, 'q_promo': 0.5,
                   'q_one_word': 0.3, 'q_same_as_title': 0.4,
                   'q_symbols': 0.0, 'q_placeholder': 0.0, 'q_na': 1.0}
 TEXT_DUP_THRESHOLD = 3
@@ -1877,6 +2142,8 @@ def analyze_text_quality(df):
             return 'q_brand_only'
         if t in dup_titles:
             return 'q_duplicate'
+        if is_promotional(strip_brand(t)):
+            return 'q_promo'
         if len(meaningful_text(strip_brand(t)).strip()) and \
                 len(strip_brand(t).split()) < 2:
             return 'q_one_word'
@@ -2610,6 +2877,8 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=
         if 'جودة العنوان' in ok.columns else 0,
         'title_brand_only': int((ok['جودة العنوان'] == 'q_brand_only').sum())
         if 'جودة العنوان' in ok.columns else 0,
+        'title_promo': int((ok['جودة العنوان'] == 'q_promo').sum())
+        if 'جودة العنوان' in ok.columns else 0,
         'title_dup': int((ok['جودة العنوان'] == 'q_duplicate').sum())
         if 'جودة العنوان' in ok.columns else 0,
         'desc_dup': int((ok['جودة الوصف'] == 'q_duplicate').sum())
@@ -2920,6 +3189,17 @@ def _page_tokens(url, name='', title=''):
     return toks
 
 
+try:
+    from rapidfuzz import fuzz as _fuzz      # مكتبة مفتوحة المصدر (MIT) للمطابقة التقريبية
+    HAS_FUZZ = True
+except Exception:
+    HAS_FUZZ = False
+
+
+def _norm_phrase(text):
+    return ' '.join(t for t in slug_tokens(text) if not t.isdigit())
+
+
 def suggest_alternatives(df):
     """لكل رابط معطل: أقرب صفحة حية بنفس الموضوع، أو لا شيء.
     لا نقترح الرئيسية ولا وجهة عامة: إن لم نجد تطابقاً حقيقياً نترك الخانة فارغة."""
@@ -2964,6 +3244,19 @@ def suggest_alternatives(df):
             rank = (score, hit, -allowed.index(ctype))
             if best is None or rank > best[0]:
                 best = (rank, url, hit, score, ctype)
+        if not best and HAS_FUZZ:
+            # مطابقة تقريبية: تلتقط اختلافات الكتابة (عبايه/عباية، كلوش/كلوشة، ترتيب الكلمات)
+            phrase = _norm_phrase(slug_of(str(r['الرابط'])))
+            fz_best = None
+            for url, ctype, toks in cands:
+                if ctype not in allowed or not phrase:
+                    continue
+                sc = _fuzz.token_set_ratio(phrase, ' '.join(sorted(toks)))
+                if fz_best is None or sc > fz_best[0]:
+                    fz_best = (sc, url, ctype)
+            if fz_best and fz_best[0] >= 88 and len(phrase.split()) >= 2:
+                out[idx] = (fz_best[1], CONF_MED)
+            continue
         if not best:
             continue
         _, url, hit, score, ctype = best
@@ -3169,6 +3462,31 @@ def redirect_report_csv(rep, lang='ar'):
 CHECK_FAIL, CHECK_WARN, CHECK_PASS = 'fail', 'warn', 'pass'
 
 
+def unreachable_reasons(df):
+    """أسباب تعذّر فحص الصفحات، بلغة واضحة: {السبب: العدد}."""
+    if df is None or df.empty:
+        return {}
+    sub = df[df['متاحة'] == False]  # noqa: E712
+    codes = sub['كود الاستجابة'].astype(str)
+    sub = sub[~codes.str.contains(r'خطأ 4(?:04|10)\b|محذوف', na=False)]
+    out = {}
+    for c in sub['كود الاستجابة'].astype(str):
+        if '429' in c:
+            r = 'بسبب تقييد كثرة الطلبات (429)'
+        elif '403' in c:
+            r = 'بسبب رفض الحماية (403)'
+        elif re.search(r'خطأ 5\d\d', c):
+            r = 'بسبب خطأ في خادم المتجر'
+        elif 'فشل اتصال' in c:
+            r = 'بسبب انقطاع الاتصال أو انتهاء المهلة'
+        elif 'خطأ فني' in c:
+            r = 'بسبب خطأ فني في الأداة'
+        else:
+            r = f'برد غير متوقع ({c})'
+        out[r] = out.get(r, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
 def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
                     structured=None):
     checks = []
@@ -3228,15 +3546,31 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
 
     unreach = summary.get('unreachable_pages', 0)
     total_try = n_ok + unreach
+    reasons = unreachable_reasons(df)
+    why = '، '.join(f"{n} {r}" for r, n in reasons.items())
+    fix_hint = ("اضغط «أكمل الفحص» لإعادة فحص الصفحات الفاشلة فقط. وإن كان المتجر يرفض "
+                "كثرة الطلبات، فعّل «الوضع الهادئ» أو «متصفح حقيقي» قبل ذلك.")
     if total_try:
         pct = round(n_ok / total_try * 100, 1)
         if pct < 85:
-            add(CHECK_FAIL, "اكتمال الفحص", f"نجح فحص {pct}% فقط من الصفحات ({unreach} تعذّر الوصول لها).",
-                "خفّض عدد المسارات المتوازية وأعد الفحص.")
+            add(CHECK_FAIL, "اكتمال الفحص",
+                f"نجح فحص {pct}% فقط من الصفحات. تعذّر {unreach}: {why}.", fix_hint)
         elif pct < 97:
-            add(CHECK_WARN, "اكتمال الفحص", f"نجح فحص {pct}% من الصفحات ({unreach} تعذّر الوصول لها).")
+            add(CHECK_WARN, "اكتمال الفحص",
+                f"نجح فحص {pct}% من الصفحات. تعذّر {unreach}: {why}.", fix_hint)
         else:
             add(CHECK_PASS, "اكتمال الفحص", f"نجح فحص {pct}% من الصفحات.")
+    if crawl_meta and crawl_meta.get('retry_aborted'):
+        add(CHECK_WARN, "إعادة المحاولة",
+            "أوقفت الأداة إعادة المحاولة مبكراً لأن المتجر رفض أغلب عيّنة الاختبار، "
+            "حتى لا تنتظر بلا فائدة.", fix_hint)
+    if crawl_meta and crawl_meta.get('cache_hits'):
+        add(CHECK_PASS, "استكمال الفحص",
+            f"{crawl_meta['cache_hits']} صفحة أُخذت من الفحص السابق دون طلبها من المتجر مرة أخرى.")
+    if crawl_meta and crawl_meta.get('template_images'):
+        add(CHECK_PASS, "صور القالب",
+            f"استُبعدت {crawl_meta['template_images']} صورة تتكرر في أغلب الصفحات (شعار، شارات، بنرات) "
+            "لأنها جزء من قالب المتجر وليست صور محتوى.")
 
     n_prod = summary.get('products', 0)
     if n_ok >= 2 and n_prod == 0:
@@ -3515,7 +3849,7 @@ def pagination_needed(pages, sm_report):
 
 def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
                   do_pagination=True, do_sitemap_check=True, progress=None,
-                  sitemap_uploads=None, sitemap_inputs=None):
+                  sitemap_uploads=None, sitemap_inputs=None, use_cache=True):
     def say(stage, **kw):
         if progress:
             try:
@@ -3525,8 +3859,10 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     target = normalize_url(target)
     reset_throttle()
+    _PACE.update({'base': PACE_MIN, 'streak': 0})
     if is_gentle():
         workers = 1
+    cached_before = cache_open(target, use_cache)
 
     say('discover_start')
     pages, imgs, crawl_meta, platform = discover_and_audit(
@@ -3604,10 +3940,24 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     # إعادة هادئة للصفحات التي رفضها المتجر مؤقتاً (429 / 5xx / انقطاع)
     retry = [r.get('_req_url') or r['_raw_url'] for r in pages
              if not r['متاحة'] and _retryable(r['كود الاستجابة'])]
+    crawl_meta['retry_aborted'] = False
     if retry:
         say('retry_start', count=len(retry))
         time.sleep(3)
-        fixed, fixed_imgs = audit_urls(retry[:300], target, 'إعادة محاولة', 2, None)
+        rworkers = 1 if is_gentle() else 2
+        # عيّنة أولاً: إن رفض المتجر أغلبها، لا نضيع وقتك على الباقي
+        sample = retry[:10]
+        fixed, fixed_imgs = audit_urls(sample, target, 'إعادة محاولة', rworkers, None)
+        ok_ratio = sum(1 for r in fixed if r['متاحة']) / max(len(sample), 1)
+        if len(retry) > len(sample):
+            if ok_ratio >= 0.3:
+                more, more_imgs = audit_urls(retry[len(sample):300], target, 'إعادة محاولة',
+                                             rworkers, None)
+                fixed += more
+                fixed_imgs += more_imgs
+            else:
+                crawl_meta['retry_aborted'] = True
+                say('retry_aborted', count=len(retry))
         good = {r['_req_url']: r for r in fixed if r['متاحة'] or not _retryable(r['كود الاستجابة'])}
         if good:
             merged = []
@@ -3634,8 +3984,12 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     images_df = pd.DataFrame(imgs)
     if not images_df.empty:
         images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])].copy().reset_index(drop=True)
+        images_df, n_template = drop_template_images(images_df, df)
+        crawl_meta['template_images'] = n_template
         images_df = apply_duplicate_alt(images_df)
     df, brand = analyze_text_quality(df)
+    images_df = mark_store_name_alts(images_df, df, brand)
+    images_df = mark_wrong_product_alts(images_df, df, brand)
     df = analyze_url_quality(df, brand)
     df, dup_groups = detect_duplicate_content(df)
     df = score_pages(df, images_df)
@@ -3661,6 +4015,8 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     summary['platform'] = platform
     summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
     crawl_meta['connection'] = CONN_LABEL[connection_mode()]
+    crawl_meta['cache_hits'] = _CACHE['hits']
+    crawl_meta['cache_enabled'] = bool(use_cache)
     selfcheck = run_self_checks(df, images_df, coverage, platform, summary, crawl_meta, structured)
     say('done')
 
