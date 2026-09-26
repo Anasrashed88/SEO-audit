@@ -1053,8 +1053,9 @@ DEFAULT_PRICES = {
     'meta_title': 15.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
     'meta_desc': 10.0,    # وصف الميتا لكل صفحة
     'image_alt': 5.0,     # النص البديل لكل صورة
-    'redirect_fix': 5.0,       # تحويل 301 لرابط معطل له بديل قريب (زد)
-    'internal_link_fix': 5.0,  # تصحيح رابط داخلي يقود لصفحة غير موجودة
+    'broken_link_fix': 5.0,    # معالجة رابط معطل: تحويل 301 و/أو تصحيح الرابط الداخلي، حسب حاجته
+    'redirect_fix': 5.0,       # (للتوافق مع الإصدارات السابقة)
+    'internal_link_fix': 5.0,  # (للتوافق مع الإصدارات السابقة)
 }
 PAYMENT = {
     'iban': 'SA87 1000 0026 5571 0000 0103',
@@ -1080,8 +1081,9 @@ def build_quote(summary, prices=None, discount_rate=0.0):
     titles = int(summary.get('fix_titles_urls', summary.get('bad_titles', 0)))
     descs = int(summary.get('fix_descs', summary.get('bad_descs', 0)))
     alts = int(summary.get('missing_alts', 0)) + int(summary.get('weak_alts', 0))
-    redirects = int(summary.get('redirect_qty', 0))
-    internal = int(summary.get('internal_fix_qty', 0))
+    # بند واحد لكل رابط معطل يحتاج عملاً (تحويل، أو تصحيح، أو الاثنان معاً)
+    broken = int(summary.get('broken_actionable', 0))
+    zid = summary.get('platform') == 'zid'
 
     items = []
     if titles:
@@ -1090,15 +1092,14 @@ def build_quote(summary, prices=None, discount_rate=0.0):
         items.append({'key': 'meta_desc', 'qty': descs, 'unit': pr['meta_desc']})
     if alts:
         items.append({'key': 'image_alt', 'qty': alts, 'unit': pr['image_alt']})
-    if redirects:
-        items.append({'key': 'redirect_fix', 'qty': redirects, 'unit': pr['redirect_fix']})
-    if internal:
-        items.append({'key': 'internal_link_fix', 'qty': internal, 'unit': pr['internal_link_fix']})
+    if broken:
+        items.append({'key': 'broken_link_fix', 'qty': broken, 'unit': pr['broken_link_fix'],
+                      'desc_key': 'broken_link_fix_d_zid' if zid else 'broken_link_fix_d'})
     for it in items:
         it['total'] = round(it['qty'] * it['unit'], 2)
 
     subtotal = round(sum(i['total'] for i in items), 2)
-    units = titles + descs + alts + redirects + internal
+    units = titles + descs + alts + broken
     rate = max(0.0, min(float(discount_rate or 0.0), 0.9))
     disc = round(subtotal * rate, 2)
     return {'items': items, 'subtotal': subtotal, 'units': units,
@@ -1121,6 +1122,11 @@ INVOICE_TXT = {
                        'من نتائج البحث',
         'image_alt': 'كتابة النصوص البديلة للصور',
         'image_alt_d': 'وصف دقيق لكل صورة يُظهرها في بحث صور جوجل',
+        'broken_link_fix': 'معالجة الروابط التي لا تعمل',
+        'broken_link_fix_d_zid': 'لكل رابط معطل: تحويل 301 إلى أقرب صفحة بديلة، وتصحيح الروابط '
+                                 'الداخلية التي تقود إليه، مع التحقق من عمل كل تحويل',
+        'broken_link_fix_d': 'تصحيح كل رابط داخل المتجر يقود إلى صفحة غير موجودة ليشير '
+                             'إلى الصفحة المناسبة',
         'redirect_fix': 'تحويل الروابط التي لا تعمل (301)',
         'redirect_fix_d': 'تحويل 301 لكل رابط معطل إلى أقرب صفحة بديلة في المتجر، '
                           'مع التحقق من عمل كل تحويل بعد تنفيذه',
@@ -1149,6 +1155,11 @@ INVOICE_TXT = {
         'image_alt': 'Image alt texts',
         'image_alt_d': 'A precise description per image so it appears in '
                        'Google Image search',
+        'broken_link_fix': 'Broken link repair',
+        'broken_link_fix_d_zid': 'For each broken URL: a 301 to the closest alternative page, '
+                                 'internal links pointing to it corrected, and every redirect verified',
+        'broken_link_fix_d': 'Every link inside the store that leads to a missing page, '
+                             'pointed to the right page',
         'redirect_fix': 'Broken link redirects (301)',
         'redirect_fix_d': 'A 301 redirect for each broken URL to the closest alternative '
                           'page in the store, verified after setup',
@@ -1279,11 +1290,11 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     for idx, it in enumerate(quote['items']):
         name = T[it['key']]
         unit_lbl = {'image_alt': T['unit_img'],
-                    'redirect_fix': T['unit_link'],
+                    'redirect_fix': T['unit_link'], 'broken_link_fix': T['unit_link'],
                     'internal_link_fix': T['unit_link']}.get(it['key'], T['unit_page'])
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
-        for word in T[it['key'] + '_d'].split():
+        for word in T.get(it.get('desc_key') or '', T[it['key'] + '_d']).split():
             trial = (cur + " " + word).strip()
             if pdf.get_string_width(fmt(trial)) <= wn - 4:
                 cur = trial
