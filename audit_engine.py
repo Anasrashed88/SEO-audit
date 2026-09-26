@@ -220,6 +220,124 @@ def _session():
     return sess
 
 
+# ==============================================================
+#  بصمة متصفح حقيقي (curl_cffi)
+#  أنظمة الحماية تعرف برامج بايثون من «بصمة» اتصالها حتى لو قالت إنها كروم.
+#  curl_cffi يتصل ببصمة متصفح كروم الحقيقية. إن لم تكن المكتبة مثبتة نرجع للطريقة العادية.
+# ==============================================================
+try:
+    from curl_cffi import requests as _cffi
+    HAS_CFFI = True
+except Exception:
+    _cffi = None
+    HAS_CFFI = False
+
+CONN_BROWSER, CONN_PLAIN = 'browser', 'plain'
+CONN_LABEL = {CONN_BROWSER: 'بصمة متصفح كروم', CONN_PLAIN: 'الاتصال العادي'}
+_CONN = {'mode': CONN_BROWSER if HAS_CFFI else CONN_PLAIN}
+
+
+def set_connection_mode(mode):
+    _CONN['mode'] = mode if (mode == CONN_PLAIN or HAS_CFFI) else CONN_PLAIN
+    return _CONN['mode']
+
+
+def connection_mode():
+    return _CONN['mode']
+
+
+def _cffi_session():
+    sess = getattr(_TL, 'cffi', None)
+    if sess is None:
+        sess = _cffi.Session(impersonate="chrome")
+        _TL.cffi = sess
+    return sess
+
+
+class _Hop:
+    def __init__(self, status_code, url):
+        self.status_code, self.url = status_code, url
+
+
+class _Resp:
+    """رد موحّد بنفس شكل مكتبة requests، حتى يعمل باقي الكود كما هو."""
+
+    def __init__(self, raw, url, history):
+        self.status_code = raw.status_code
+        self.url = url
+        self.headers = requests.structures.CaseInsensitiveDict(dict(raw.headers.items()))
+        self.content = raw.content
+        self.history = history
+        try:
+            self.text = raw.text
+        except Exception:
+            self.text = self.content.decode('utf-8', 'ignore')
+
+    def json(self):
+        return json.loads(self.text)
+
+
+def _browser_get(url, timeout, extra_headers=None, max_hops=10):
+    """طلب ببصمة كروم، مع تتبع التحويلات يدوياً حتى نعرف سلسلة التحويل (301 → 200)."""
+    sess = _cffi_session()
+    h = {'Accept-Language': HEADERS['Accept-Language']}
+    if extra_headers:
+        h.update({k: v for k, v in extra_headers.items()
+                  if not k.lower().startswith(('sec-', 'user-agent'))})
+    history, current = [], url
+    for _ in range(max_hops):
+        raw = sess.get(current, timeout=timeout, allow_redirects=False, headers=h)
+        loc = raw.headers.get('location')
+        if raw.status_code in (301, 302, 303, 307, 308) and loc:
+            history.append(_Hop(raw.status_code, current))
+            current = urljoin(current, loc)
+            continue
+        return _Resp(raw, current, history)
+    return _Resp(raw, current, history)
+
+
+def _http_get(url, timeout, headers=None):
+    if _CONN['mode'] == CONN_BROWSER and HAS_CFFI:
+        return _browser_get(url, timeout, headers)
+    h = dict(HEADERS)
+    if headers:
+        h.update(headers)
+    return _session().get(url, timeout=timeout, allow_redirects=True, headers=h)
+
+
+def test_connection(url, timeout=15):
+    """يجرّب نفس الصفحة بالطريقتين ويقول أيهما يسمح به المتجر."""
+    rows = []
+    modes = [CONN_PLAIN] + ([CONN_BROWSER] if HAS_CFFI else [])
+    saved = _CONN['mode']
+    for m in modes:
+        _CONN['mode'] = m
+        t0 = time.time()
+        try:
+            res = _http_get(url, timeout)
+            took = round(time.time() - t0, 1)
+            if is_challenge(res):
+                verdict = 'مرفوض — صفحة تحقق من الحماية'
+            elif res.status_code == 200:
+                verdict = 'يعمل ✓'
+            elif res.status_code in (403, 429):
+                verdict = f'مرفوض ({res.status_code})'
+            else:
+                verdict = f'رد {res.status_code}'
+            rows.append({'الطريقة': CONN_LABEL[m], 'النتيجة': verdict,
+                         'الكود': res.status_code, 'الوقت (ثانية)': took,
+                         'ok': res.status_code == 200 and not is_challenge(res)})
+        except Exception as e:
+            rows.append({'الطريقة': CONN_LABEL[m], 'النتيجة': f'تعذّر الاتصال ({type(e).__name__})',
+                         'الكود': '—', 'الوقت (ثانية)': round(time.time() - t0, 1), 'ok': False})
+    _CONN['mode'] = saved
+    if not HAS_CFFI:
+        rows.append({'الطريقة': CONN_LABEL[CONN_BROWSER],
+                     'النتيجة': 'غير متاحة — مكتبة curl_cffi غير مثبتة',
+                     'الكود': '—', 'الوقت (ثانية)': '—', 'ok': False})
+    return rows
+
+
 _THROTTLE = {'fails': 0, 'delay': 0.0, 'streak': 0}
 _THROTTLE_LOCK = threading.Lock()
 MAX_DELAY = 2.0          # أقصى تمهّل بين الطلبات (ثانية)
@@ -271,13 +389,10 @@ def safe_get(url, timeout=14, retries=2, headers=None):
     و None فقط عند انقطاع الاتصال فعلاً."""
     if _THROTTLE['delay'] > 0:
         time.sleep(_THROTTLE['delay'])
-    h = dict(HEADERS)
-    if headers:
-        h.update(headers)
     last = None
     for attempt in range(retries + 1):
         try:
-            res = _session().get(url, timeout=timeout, allow_redirects=True, headers=h)
+            res = _http_get(url, timeout, headers)
         except Exception:
             note_failure()
             if attempt < retries:
@@ -2895,6 +3010,9 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
             add(CHECK_PASS, "خريطة الموقع",
                 f"قُرئت كل ملفات الخريطة ({sm.get('files_ok', 0)} ملف{up}، {sm.get('total_urls', 0)} رابط).")
 
+    if crawl_meta and crawl_meta.get('connection'):
+        add(CHECK_PASS, "طريقة الاتصال", f"فُحص المتجر بـ: {crawl_meta['connection']}.")
+
     if crawl_meta and 'pagination_reason' in crawl_meta:
         if crawl_meta.get('pagination_ran'):
             add(CHECK_PASS, "متابعة الترقيم والتمرير",
@@ -3343,6 +3461,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     summary['structured'] = structured
     summary['platform'] = platform
     summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+    crawl_meta['connection'] = CONN_LABEL[connection_mode()]
     selfcheck = run_self_checks(df, images_df, coverage, platform, summary, crawl_meta, structured)
     say('done')
 
