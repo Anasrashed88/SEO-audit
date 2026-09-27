@@ -2131,7 +2131,7 @@ QUALITY_FATAL = ('q_symbols', 'q_placeholder')
 QUALITY_CREDIT = {'q_ok': 1.0, 'q_duplicate': 0.3, 'q_brand_only': 0.2, 'q_promo': 0.5,
                   'q_one_word': 0.3, 'q_same_as_title': 0.4,
                   'q_symbols': 0.0, 'q_placeholder': 0.0, 'q_na': 1.0}
-TEXT_DUP_THRESHOLD = 3
+TEXT_DUP_THRESHOLD = 2
 
 
 def analyze_text_quality(df):
@@ -2170,11 +2170,6 @@ def analyze_text_quality(df):
             return 'q_brand_only'
         if t in dup_titles:
             return 'q_duplicate'
-        if is_promotional(strip_brand(t)):
-            return 'q_promo'
-        if len(meaningful_text(strip_brand(t)).strip()) and \
-                len(strip_brand(t).split()) < 2:
-            return 'q_one_word'
         return 'q_ok'
 
     def qd(row):
@@ -2311,14 +2306,10 @@ def analyze_url_quality(df, brand=''):
             return 'u_underscore'
         if re.search(r'[A-Z]', slug):
             return 'u_uppercase'
-        if len(unquote(urlparse(clean_url(row['الرابط'])).path)) > URL_MAX_PATH:
-            return 'u_long'
         norm = [normalize_ar_token(w.lower()) if re.search(r'[\u0600-\u06FF]', w)
                 else w.lower() for w in words]
         if len(norm) != len(set(norm)) and len(norm) > 2:
             return 'u_repeat'
-        if len(words) > URL_MAX_WORDS:
-            return 'u_wordy'
 
         name = (str(row.get('اسم منظم') or '').strip()
                 or str(row.get('اسم المنتج المعروض') or '').strip())
@@ -2919,8 +2910,11 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=
         'url_wrongname': int((ok['جودة الرابط'] == 'u_wrongname').sum())
         if 'جودة الرابط' in ok.columns else 0,
         'url_style': int(ok['جودة الرابط'].isin(
-            ['u_underscore', 'u_uppercase', 'u_long', 'u_repeat', 'u_wordy']).sum())
+            ['u_underscore', 'u_uppercase', 'u_repeat']).sum())
         if 'جودة الرابط' in ok.columns else 0,
+        'url_style_breakdown': {k: int((ok['جودة الرابط'] == k).sum())
+                                for k in ('u_underscore', 'u_uppercase', 'u_repeat')
+                                if 'جودة الرابط' in ok.columns and (ok['جودة الرابط'] == k).any()},
         'url_malformed': int((ok['جودة الرابط'] == 'u_malformed').sum())
         if 'جودة الرابط' in ok.columns else 0,
         'url_generic': int((ok['جودة الرابط'] == 'u_generic').sum())
