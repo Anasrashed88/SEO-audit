@@ -356,7 +356,8 @@ if nav == "🔍 فحص متجر جديد":
         coverage = st.session_state.coverage
         platform = st.session_state.platform
 
-        n_fail = int(summary.get('unreachable_pages', 0) or 0)
+        n_fail = int(summary.get('unreachable_pages', 0) or 0) + \
+            int(summary.get('suspicious_home', 0) or 0)
         if n_fail:
             cc1, cc2 = st.columns([3, 1])
             with cc1:
