@@ -154,6 +154,7 @@ def build_image_list(images_df, states, lang='ar'):
 
 
 COL_EN.setdefault('اسم المنتج المعروض', 'Displayed Name')
+COL_EN.setdefault('الرابط بعد تعديل العنوان', 'URL After Title Update')
 
 
 def _n(v):
@@ -203,10 +204,20 @@ def _title_issues(r, lang, dup_counts=None):
         pass
     elif q not in ('q_ok', 'q_na', None) and not isinstance(q, float):
         need.append(('العنوان: ' if ar else 'Title: ') + QL.get(q, str(q)))
-    u = r.get('جودة الرابط')
-    if u not in ('u_ok', 'u_na', None) and not isinstance(u, float):
-        need.append(('الرابط: ' if ar else 'URL: ') + UL.get(u, str(u)))
     return ' · '.join(need)
+
+
+URL_NOTE = {
+    'salla': ('يُحدَّث الرابط ليطابق العنوان الجديد، وسلة تحوّل الرابط القديم تلقائياً',
+              'URL updated to match the new title; Salla redirects the old URL automatically'),
+    'other': ('يُحدَّث الرابط ليطابق العنوان الجديد، مع تحويل 301 من الرابط القديم حتى لا ينكسر',
+              'URL updated to match the new title, with a 301 from the old URL so it does not break'),
+}
+
+
+def url_note(platform, lang='ar'):
+    ar_t, en_t = URL_NOTE['salla' if platform == 'salla' else 'other']
+    return ar_t if lang == 'ar' else en_t
 
 
 def _desc_issues(r, lang, dup_counts=None):
@@ -254,7 +265,7 @@ def _priority_sorted(rows):
     return out
 
 
-def build_titles_urls_list(df, lang='ar'):
+def build_titles_urls_list(df, lang='ar', platform='unknown'):
     """الصفحات التي يحتاج عنوانها أو رابطها إصلاحاً فقط — ومعها ما يلزم لكتابة العنوان الجديد."""
     if df is None or df.empty:
         return pd.DataFrame()
@@ -268,7 +279,7 @@ def build_titles_urls_list(df, lang='ar'):
             'عنوان الميتا الحالي': r.get('عنوان الميتا', ''),
             'طول العنوان': r.get('طول العنوان', 0),
             'اسم المنتج المعروض': r.get('اسم المنتج المعروض', ''),
-            'المسار': r.get('المسار', ''),
+            'الرابط بعد تعديل العنوان': url_note(platform, lang),
         })
     return localize_df(_priority_sorted(rows), lang)
 
@@ -314,7 +325,7 @@ def build_filtered_exports(df, images_df, lang='ar', platform='unknown'):
     يعيد {المفتاح: (اسم الملف، جدول)} للجداول غير الفارغة فقط."""
     names = ZIP_NAMES[lang]
     tables = {
-        'titles': build_titles_urls_list(df, lang),
+        'titles': build_titles_urls_list(df, lang, platform),
         'descs': build_descs_list(df, lang),
         'alt_missing': build_image_list(images_df, ALT_MISSING_STATES, lang),
         'alt_weak': build_image_list(images_df, ALT_WEAK_EXPORT, lang),
@@ -389,7 +400,7 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
                                localize_df(pd.DataFrame(data), lang)
                                .to_csv(index=False, encoding='utf-8-sig'))
 
-        titles = build_titles_urls_list(df, lang)
+        titles = build_titles_urls_list(df, lang, platform)
         descs = build_descs_list(df, lang)
         alt_missing = build_image_list(images_df, ALT_MISSING_STATES, lang)
         alt_weak = build_image_list(images_df, ALT_WEAK_EXPORT, lang)
