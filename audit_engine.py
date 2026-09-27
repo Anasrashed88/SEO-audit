@@ -1612,7 +1612,7 @@ def harvest_zid_catalog(base_url):
     return found
 
 
-def harvest_infinite_scroll_many(urls, base_url, max_scrolls=30):
+def harvest_infinite_scroll_many(urls, base_url, max_scrolls=30, kinds=(T_PRODUCT,)):
     """التمرير اللانهائي بمتصفح خفي واحد لكل الأقسام (بدل متصفح جديد لكل قسم).
     يعيد {رابط القسم: مجموعة روابط المنتجات}."""
     results = {}
@@ -1642,7 +1642,7 @@ def harvest_infinite_scroll_many(urls, base_url, max_scrolls=30):
 
     def keep(u, found):
         full = clean_url(urljoin(base_url, str(u).strip()))
-        if is_crawlable(full, base_netloc) and _detect_type_by_url(full, base_url) == T_PRODUCT:
+        if is_crawlable(full, base_netloc) and _detect_type_by_url(full, base_url) in kinds:
             found.add(full)
 
     try:
@@ -1680,8 +1680,11 @@ def harvest_infinite_scroll_many(urls, base_url, max_scrolls=30):
                                 page.wait_for_timeout(800)
                         except Exception:
                             pass
+                        # نرفع قليلاً ثم ننزل للنهاية: بعض القوالب لا تحمّل المزيد إلا مع حركة تمرير فعلية
+                        page.evaluate("window.scrollBy(0, -700)")
+                        page.wait_for_timeout(250)
                         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_timeout(1000)
+                        page.wait_for_timeout(1200)
                         if len(found) == last_total:
                             stagnant += 1
                             if stagnant >= 4:
@@ -2425,7 +2428,8 @@ def _paged_url(root, pat, n):
 
 def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=None,
                                max_depth=MAX_PAGINATION_DEPTH, cat_products=None,
-                               listing_urls=None, next_hints=None, scroll_roots=None):
+                               listing_urls=None, next_hints=None, scroll_roots=None,
+                               include_default_roots=True, force_probe=False):
     """يجمع المنتجات المخفية خلف الترقيم والتمرير اللانهائي بثلاث طرق مرتبة:
     1) رابط «الصفحة التالية» الذي يعلنه القالب نفسه.
     2) نمط ترقيم واحد يُكتشف مرة للمتجر كله ثم يُعاد استخدامه (بدل تجربة 5 أنماط لكل قسم).
@@ -2437,7 +2441,7 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
     scroll_roots = set(scroll_roots or [])
     roots = list(dict.fromkeys(
         list(category_urls) + list(listing_urls or []) +
-        [f"{base_url}/{r}" for r in LISTING_ROOTS]))
+        ([f"{base_url}/{r}" for r in LISTING_ROOTS] if include_default_roots else [])))
 
     new_urls, fetched = [], 0
     learned = None            # نمط الترقيم الذي يعمل في هذا المتجر
@@ -2460,6 +2464,11 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
 
     for idx, root in enumerate(roots):
         seen_here = set(cat_products.get(root, set()))
+        if force_probe and not seen_here:
+            res0 = safe_get(root, retries=1)
+            fetched += 1
+            if is_ok(res0):
+                register(root, listing_product_links(listing_text(res0), base_url, root), seen_here)
         first_page_items = len(seen_here)
         got_more = False
 
@@ -2482,7 +2491,8 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
                          if u not in visited)
 
         # 2) نمط الترقيم
-        if not got_more and learned != 'none' and (learned or first_page_items >= MIN_PROBE_ITEMS):
+        if not got_more and learned != 'none' and \
+                (learned or force_probe or first_page_items >= MIN_PROBE_ITEMS):
             patterns = [learned] if learned else PAGING_PATTERNS
             for n in range(2, max_depth + 1):
                 added = 0
@@ -2505,15 +2515,16 @@ def harvest_paginated_products(base_url, category_urls, seen_keys, progress_cb=N
                 got_more = True
 
         # 3) مرشح للمتصفح الخفي
-        if not got_more and root in scroll_roots:
+        if not got_more and (root in scroll_roots or force_probe):
             need_browser.append(root)
 
         if progress_cb:
             progress_cb(idx + 1, len(roots), len(new_urls), fetched)
 
     if need_browser and HAS_PLAYWRIGHT:
+        kinds = (T_PRODUCT, T_BLOG) if force_probe else (T_PRODUCT,)
         for root, found in harvest_infinite_scroll_many(need_browser[:MAX_BROWSER_ROOTS],
-                                                        base_url).items():
+                                                        base_url, kinds=kinds).items():
             register(root, found, set(cat_products.get(root, set())))
 
     return new_urls
@@ -2835,8 +2846,12 @@ def title_url_fix_mask(df):
     m = df['حالة العنوان'] != 'optimal'
     if 'جودة العنوان' in df.columns:
         m |= ~df['جودة العنوان'].fillna('q_na').isin(['q_ok', 'q_na'])
-    if 'جودة الرابط' in df.columns:
-        m |= ~df['جودة الرابط'].fillna('u_na').isin(['u_ok', 'u_na'])
+    if 'عنوان الميتا' in df.columns:
+        live = df[_avail_series(df)]
+        vals = live['عنوان الميتا'].map(lambda x: str(x or '').strip())
+        counts = vals[vals != ''].value_counts()
+        shared = set(counts[counts >= 2].index)
+        m |= df['عنوان الميتا'].map(lambda x: str(x or '').strip() in shared)
     return _avail_series(df) & m
 
 
@@ -3987,6 +4002,42 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
                 r['مرتبط برابط'] = True
             pages += p2
             imgs += i2
+
+    # المدونة: سلة لا تضع المقالات في خريطة الموقع، فالطريق الوحيد إليها صفحة المدونة
+    # وترقيمها أو تمريرها. لذلك نتابع صفحات المدونة دائماً، مهما كانت حالة الخريطة.
+    if do_pagination:
+        blog_roots = []
+        for r in pages:
+            u = r.get('_raw_url') or r['الرابط']
+            segs = [x.lower() for x in url_segments(u)]
+            if r.get('متاحة') and r.get('نوع الصفحة') == T_ARCHIVE and \
+                    any(x in BLOG_SEGMENTS for x in segs):
+                blog_roots.append(u)
+        # صفحة المدونة الرئيسية أولاً (أقصر مسار)، ثم تصنيفاتها
+        blog_roots = sorted(dict.fromkeys(blog_roots), key=lambda u: len(url_segments(u)))[:30]
+        if blog_roots:
+            say('blog_pagination', count=len(blog_roots))
+            seen_b = set()
+            for r in pages:
+                seen_b.add(url_key(r.get('_raw_url', r['الرابط'])))
+                seen_b.add(url_key(r.get('_req_url') or r['الرابط']))
+            extra_b = harvest_paginated_products(
+                target, blog_roots, seen_b, None, cat_products={}, listing_urls=None,
+                next_hints=crawl_meta.get('next_hints'), scroll_roots=crawl_meta.get('scroll_roots'),
+                include_default_roots=False, force_probe=True)
+            extra_b = extra_b[:max(0, max_pages - len(pages))]
+            crawl_meta['blog_extra'] = len(extra_b)
+            if extra_b:
+                p4, i4 = audit_urls(extra_b, target, 'ترقيم المدونة', workers, None)
+                for r in p4:
+                    k_req = url_key(r.get('_req_url') or r['الرابط'])
+                    k_fin = url_key(r.get('_raw_url') or r['الرابط'])
+                    r['_req_in_map'] = k_req in sitemap_keys
+                    r['_req_linked'] = True
+                    r['في الخريطة'] = k_req in sitemap_keys or k_fin in sitemap_keys
+                    r['مرتبط برابط'] = True
+                pages += p4
+                imgs += i4
 
     # إعادة هادئة للصفحات التي رفضها المتجر مؤقتاً (429 / 5xx / انقطاع)
     retry = [r.get('_req_url') or r['_raw_url'] for r in pages
