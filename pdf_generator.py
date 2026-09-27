@@ -317,20 +317,6 @@ def build_diagnosis(score, stats, lang):
         if stats.get('dup_content'):
             add('صفحات تتشارك نفس العنوان والوصف حرفياً', stats['dup_content'],
                 'تُعدّ محتوى مكرراً، فيختار جوجل واحدة ويتجاهل الباقي.')
-        if stats.get('url_wrongname'):
-            add('روابط تحمل اسم منتج مختلف عن المعروض', stats['url_wrongname'],
-                'غالباً نُسخ المنتج وتغيّر اسمه دون الرابط، فيصل الزبون لغير ما نقر عليه.')
-        if stats.get('url_style'):
-            bd = stats.get('url_style_breakdown') or {}
-            names = {'u_repeat': 'كلمة مكررة داخل الرابط', 'u_underscore': 'شرطة سفلية بدل الواصلة',
-                     'u_uppercase': 'حروف إنجليزية كبيرة'}
-            parts = '، '.join(f"{names[k]} ({v})" for k, v in bd.items() if v)
-            add('روابط صياغتها تحتاج تصحيحاً', stats['url_style'], (parts + '.') if parts else '')
-        if stats.get('url_malformed'):
-            add('روابط معطوبة فيها عنوان موقع داخل مسارها', stats['url_malformed'],
-                'تظهر للزبون مشوّهة في نتائج البحث.')
-        if stats.get('url_generic'):
-            add('روابط مكوّنة من أرقام أو رموز بلا كلمات', stats['url_generic'])
         if stats.get('noindex_pages'):
             add('صفحات تطلب من محركات البحث تجاهلها (noindex)', stats['noindex_pages'],
                 'لا تظهر في النتائج مهما كان محتواها جيداً.')
@@ -415,19 +401,6 @@ def build_diagnosis(score, stats, lang):
     if stats.get('dup_content'):
         points.append(f"{stats['dup_content']} pages share an identical title and "
                       "description, counting as duplicate content.")
-    if stats.get('url_wrongname'):
-        points.append(f"{stats['url_wrongname']} URLs carry a different product name than "
-                      "the page displays, usually because a product was cloned and "
-                      "renamed without updating its URL.")
-    if stats.get('url_style'):
-        points.append(f"{stats['url_style']} URLs have imperfect formatting: underscores, "
-                      "uppercase letters, excessive length, or a repeated word.")
-    if stats.get('url_malformed'):
-        points.append(f"{stats['url_malformed']} URLs are malformed and contain a full "
-                      "web address inside the slug, showing distorted in search results.")
-    if stats.get('url_generic'):
-        points.append(f"{stats['url_generic']} URLs consist of numbers or codes with no "
-                      "descriptive words.")
     if stats.get('noindex_pages'):
         points.append(f"{stats['noindex_pages']} pages carry a noindex tag asking "
                       "search engines to ignore them.")
@@ -879,42 +852,18 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         ('أوصاف تحتاج إصلاحاً عاجلاً' if rtl else 'Descriptions needing urgent work',
          f"{stats.get('critical_descs', 0)} {T['u_desc']}",
          'bad' if stats.get('critical_descs') else 'ok'),
+        ('صفحات بنفس العنوان والوصف حرفياً' if rtl else
+         'Pages with identical title and description',
+         f"{stats.get('dup_content', 0)} {T['u_page']}",
+         'bad' if stats.get('dup_content') else 'ok'),
+        ('منتجات مستنسخة من منتج واحد' if rtl else 'Cloned products',
+         f"{stats.get('url_clone', 0)} {T['u_product']}",
+         'bad' if stats.get('url_clone') else 'ok'),
         ('صفحات بلا وسم كانونيكال' if rtl else 'Pages without a canonical tag',
          f"{stats.get('canon_missing', 0)} {T['u_page']}",
          'warn' if stats.get('canon_missing') else 'ok'),
     ])
     pdf.impact('meta')
-
-    # ======================= الروابط =======================
-    n += 1
-    pdf.add_page()
-    pdf.section(n, 'urls')
-    good_u = max(tot - stats.get('url_bad', 0), 0)
-    pdf.table([
-        ('روابط سليمة الصياغة' if rtl else 'Well-formed URLs',
-         (f"{good_u} من {tot}" if rtl else f"{good_u} of {tot}"),
-         'ok' if good_u / tot > 0.8 else 'warn'),
-        ('منتجات مستنسخة من منتج واحد' if rtl else 'Cloned products',
-         f"{stats.get('url_clone', 0)} {T['u_product']}",
-         'bad' if stats.get('url_clone') else 'ok'),
-        ('صفحات بنفس العنوان والوصف حرفياً' if rtl else
-         'Pages with identical title and description',
-         f"{stats.get('dup_content', 0)} {T['u_page']}",
-         'bad' if stats.get('dup_content') else 'ok'),
-        ('روابط تحمل اسم منتج مختلف' if rtl else 'URLs naming a different product',
-         f"{stats.get('url_wrongname', 0)} {T['u_link']}",
-         'bad' if stats.get('url_wrongname') else 'ok'),
-        ('روابط معطوبة فيها عنوان موقع' if rtl else 'Malformed URLs containing an address',
-         f"{stats.get('url_malformed', 0)} {T['u_link']}",
-         'bad' if stats.get('url_malformed') else 'ok'),
-        ('روابط بأرقام أو رموز بلا كلمات' if rtl else 'URLs with no descriptive words',
-         f"{stats.get('url_generic', 0)} {T['u_link']}",
-         'warn' if stats.get('url_generic') else 'ok'),
-        ('روابط بصياغة غير مثالية' if rtl else 'URLs with imperfect formatting',
-         f"{stats.get('url_style', 0)} {T['u_link']}",
-         'warn' if stats.get('url_style') else 'ok'),
-    ])
-    pdf.impact('urls')
 
     # ======================= الصور =======================
     n += 1
@@ -1032,7 +981,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 #  الأسعار قابلة للتعديل من الواجهة قبل إصدار الفاتورة.
 # ==============================================================
 DEFAULT_PRICES = {
-    'meta_title': 15.0,   # عنوان الميتا + الرابط: خدمة واحدة لكل صفحة
+    'meta_title': 12.0,   # عنوان الميتا مع تحديث الرابط ليطابقه: خدمة واحدة لكل صفحة
     'meta_desc': 10.0,    # وصف الميتا لكل صفحة
     'image_alt': 5.0,     # النص البديل لكل صورة
     'broken_link_fix': 5.0,    # معالجة رابط معطل: تحويل 301 و/أو تصحيح الرابط الداخلي، حسب حاجته
@@ -1069,7 +1018,9 @@ def build_quote(summary, prices=None, discount_rate=0.0):
 
     items = []
     if titles:
-        items.append({'key': 'meta_title', 'qty': titles, 'unit': pr['meta_title']})
+        items.append({'key': 'meta_title', 'qty': titles, 'unit': pr['meta_title'],
+                      'desc_key': 'meta_title_d_salla' if summary.get('platform') == 'salla'
+                      else 'meta_title_d_redirect'})
     if descs:
         items.append({'key': 'meta_desc', 'qty': descs, 'unit': pr['meta_desc']})
     if alts:
@@ -1097,6 +1048,10 @@ INVOICE_TXT = {
         'h_item': 'الخدمة', 'h_qty': 'الكمية', 'h_unit': 'سعر الوحدة',
         'h_total': 'الإجمالي', 'currency': 'ريال',
         'meta_title': 'كتابة عناوين الميتا وروابط الصفحات',
+        'meta_title_d_salla': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، وتحديث رابطها '
+                              'ليطابقه (سلة تحوّل الرابط القديم تلقائياً)',
+        'meta_title_d_redirect': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، وتحديث رابطها '
+                                 'ليطابقه مع تحويل 301 من الرابط القديم',
         'meta_title_d': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، '
                         'مع ضبط الرابط ليكون وصفياً ومطابقاً للمنتج',
         'meta_desc': 'كتابة أوصاف الميتا',
@@ -1129,6 +1084,10 @@ INVOICE_TXT = {
         'h_item': 'Service', 'h_qty': 'Qty', 'h_unit': 'Unit price',
         'h_total': 'Amount', 'currency': 'SAR',
         'meta_title': 'Meta titles and page URLs',
+        'meta_title_d_salla': 'A search-optimised title per page within the ideal length, with '
+                              'its URL updated to match (Salla redirects the old URL automatically)',
+        'meta_title_d_redirect': 'A search-optimised title per page within the ideal length, with '
+                                 'its URL updated to match and a 301 from the old URL',
         'meta_title_d': 'A search-optimised title for each page within the ideal '
                         'length, with the URL corrected to match the product',
         'meta_desc': 'Meta descriptions',
