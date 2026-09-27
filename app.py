@@ -42,7 +42,9 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap');
 html, body, [class*="css"] { font-family:'Tajawal','Segoe UI',Tahoma,sans-serif; }
-.main .block-container { direction:rtl; text-align:right; padding-top:1.2rem; max-width:1500px; }
+[data-testid="stMainBlockContainer"], .main .block-container { direction:rtl; text-align:right; padding-top:1.2rem; max-width:1500px; }
+[data-testid="stMarkdownContainer"], [data-testid="stWidgetLabel"] { direction:rtl; text-align:right; }
+input, textarea { direction:rtl; text-align:right; }
 h1,h2,h3,h4,h5,p,span,div,label { text-align:right; }
 section[data-testid="stSidebar"] { direction:rtl; text-align:right; background:#0f172a; }
 section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
