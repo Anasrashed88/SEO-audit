@@ -2900,6 +2900,8 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=
         alt_counts = uimg['حالة النص البديل'].value_counts().to_dict()
     s = {
         'total_pages': len(df),
+        # الصفحات التي تعمل فعلاً ويراها الزائر — هذا ما يُعرض للعميل
+        'live_pages': int(len(ok)),
         'score': round(ok['درجة السيو'].mean(), 1) if not ok.empty else 0.0,
         'products': int((ok['نوع الصفحة'] == T_PRODUCT).sum()),
         # الأقسام الحقيقية فقط؛ الماركات والقوائم العامة تُعدّ منفصلة
