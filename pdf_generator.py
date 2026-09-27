@@ -65,9 +65,8 @@ SECTION_TXT = {
     'ar': {
         'structure': {
             'title': 'بنية المتجر ونطاق الفحص',
-            'intro': 'يبدأ الفحص من الصفحة الرئيسية ويتصفح المتجر كما يتصفحه الزائر، '
-                     'متتبعاً الروابط الداخلية وصفحات الأقسام. لا تدخل التقرير أي صفحة '
-                     'لا يمكن للزائر الوصول إليها بالنقر.',
+            'intro': 'يجمع الفحص صفحات المتجر من خريطة الموقع ومن الروابط التي يتنقل بها '
+                     'الزائر داخل المتجر، ثم يفحص كل صفحة كما تراها محركات البحث.',
             'impact': 'هذه الأرقام هي ما تراه محركات البحث فعلياً عند زحفها للمتجر. أي '
                       'رابط معطل يصل إليه الزائر يهدر جزءاً من ميزانية الزحف المخصصة '
                       'للمتجر، ويقلل فرص أرشفة الصفحات المهمة.',
@@ -96,20 +95,19 @@ SECTION_TXT = {
         'images': {
             'title': 'صور المتجر ونصوصها البديلة',
             'intro': 'النص البديل هو الوصف المرفق بالصورة في كود الصفحة. محركات البحث '
-                     'لا ترى الصورة، بل تقرأ هذا النص. ويفحص هذا القسم أيضاً صيغة الصور، '
-                     'إذ تؤثر مباشرة في حجم الصفحة وسرعتها.',
+                     'لا ترى الصورة، بل تقرأ هذا النص. ولا يدخل هذا القسم شعار المتجر وصور '
+                     'القالب المتكررة في كل الصفحات.',
             'impact': 'بحث صور جوجل مصدر زيارات مهم في المتاجر البصرية كالأزياء والعطور '
                       'والهدايا، حيث يبحث الزبون بالصورة قبل الكلمة. الصورة بلا نص بديل '
-                      'غير موجودة بالنسبة لجوجل. كما أن الصيغ الحديثة تخفض حجم الصورة '
-                      'بنحو الثلث بنفس الجودة، فتتحسن سرعة الجوال تلقائياً.',
+                      'غير موجودة بالنسبة لجوجل.',
         },
         'sitemap': {
             'title': 'مقارنة المعروض بخريطة الموقع',
-            'intro': 'خريطة الموقع هي القائمة التي يعلنها المتجر لمحركات البحث. يقارن '
-                     'هذا القسم ما يراه الزائر فعلاً بما تعلنه الخريطة، في الاتجاهين.',
-            'impact': 'المنتج المعروض وغير المدرج في الخريطة قد لا تعلم به محركات البحث '
-                      'أصلاً. والصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط '
-                      'داخلي تبقى بلا قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات.',
+            'intro': 'خريطة الموقع هي القائمة التي يعلنها المتجر لمحركات البحث. يتحقق هذا '
+                     'القسم من أن صفحات الخريطة تعمل ويصل إليها الزائر.',
+            'impact': 'الصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط داخلي تبقى بلا '
+                      'قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. ربطها من صفحات المتجر '
+                      'يعيد لها قيمتها.',
         },
         'broken': {
             'title': 'روابط لا تعمل: تحويلها وتصحيحها',
@@ -229,6 +227,41 @@ def shape_ar(text):
     return get_display(arabic_reshaper.reshape(str(text)))
 
 
+def quote_units(stats):
+    """مجموع البنود في عرض السعر، ليتطابق الغلاف مع الفاتورة."""
+    return (int(stats.get('fix_titles_urls', stats.get('bad_titles', 0)) or 0)
+            + int(stats.get('fix_descs', stats.get('bad_descs', 0)) or 0)
+            + int(stats.get('missing_alts', 0) or 0) + int(stats.get('weak_alts', 0) or 0)
+            + int(stats.get('broken_actionable', 0) or 0))
+
+
+# ---------- مطابقة العدد والمعدود بالعربية: 3 عناوين، 15 عنواناً، 101 عنوان ----------
+AR_COUNT_FORMS = {
+    # المفرد: (جمع 3–10، منصوب 11–99)
+    'صفحة': ('صفحات', 'صفحة'), 'منتج': ('منتجات', 'منتجاً'), 'عنوان': ('عناوين', 'عنواناً'),
+    'وصف': ('أوصاف', 'وصفاً'), 'صورة': ('صور', 'صورة'), 'رابط': ('روابط', 'رابطاً'),
+    'مقال': ('مقالات', 'مقالاً'), 'تصنيف': ('تصنيفات', 'تصنيفاً'), 'قسم': ('أقسام', 'قسماً'),
+    'بند': ('بنود', 'بنداً'), 'حرف': ('أحرف', 'حرفاً'), 'كلمة': ('كلمات', 'كلمة'),
+}
+_AR_VARIANTS = {}
+for base, (plural, acc) in AR_COUNT_FORMS.items():
+    for v in (base, plural, acc):
+        _AR_VARIANTS[v] = base
+_AR_COUNT_RE = re.compile(r'(?<![\d.,])(\d+)(\s+)(' + '|'.join(
+    sorted(map(re.escape, _AR_VARIANTS), key=len, reverse=True)) + r')(?![\u0600-\u06FF])')
+
+
+def ar_counts(text):
+    def fix(m):
+        n = int(m.group(1))
+        base = _AR_VARIANTS[m.group(3)]
+        plural, acc = AR_COUNT_FORMS[base]
+        r = n % 100
+        word = plural if 3 <= r <= 10 else acc if 11 <= r <= 99 else base
+        return f"{m.group(1)}{m.group(2)}{word}"
+    return _AR_COUNT_RE.sub(fix, str(text))
+
+
 def build_diagnosis(score, stats, lang):
     """يُرجع (مقدمة، قائمة نقاط، خلاصة).
 
@@ -245,111 +278,86 @@ def build_diagnosis(score, stats, lang):
     points = []
 
     if lang == 'ar':
+        # صيغة «البند: العدد — الأثر» تتجنب أخطاء مطابقة العدد والمعدود والأفعال
+        def add(label, n, why=''):
+            points.append(f"{label}: {n}" + (f" — {why}" if why else "."))
+
         if missing and imgs:
-            points.append(f"{missing} صورة من أصل {imgs} بلا نص بديل إطلاقاً "
-                          f"({round(missing / imgs * 100, 1)}%)، فلا تظهر في بحث صور جوجل.")
+            add('صور بلا نص بديل إطلاقاً', f"{missing} من أصل {imgs} ({round(missing / imgs * 100, 1)}%)",
+                'لا تظهر في بحث صور جوجل.')
         if weak:
-            points.append(f"{weak} صورة نصها البديل موجود لكنه غير وصفي أو مكرر، "
-                          "فلا يضيف قيمة لمحركات البحث.")
+            add('صور نصها البديل غير وصفي أو مكرر', weak, 'لا يضيف قيمة لمحركات البحث.')
         if stats.get('title_symbols'):
-            points.append(f"{stats['title_symbols']} عنوان ميتا مجرد رموز أو قيمة قالب "
-                          "افتراضية بدل النص، أي أن الصفحة بلا عنوان فعلي "
-                          "في نتائج البحث.")
+            add('عناوين ميتا مكوّنة من رموز أو قيمة قالب افتراضية', stats['title_symbols'],
+                'الصفحة بلا عنوان فعلي في نتائج البحث.')
         if stats.get('title_brand_only'):
-            points.append(f"{stats['title_brand_only']} عنوان لا يحمل سوى اسم المتجر "
-                          "بلا أي وصف للمنتج، فلا يطابق أي بحث للزبون.")
-        if stats.get('title_promo'):
-            points.append(f"{stats['title_promo']} عنوان بصياغة ترويجية (سعر أو عرض) بدل كلمات "
-                          "يبحث بها الزبون، فلا يظهر حين يبحث عن المنتج نفسه.")
+            add('عناوين هي اسم المتجر فقط', stats['title_brand_only'],
+                'تحتاج كلمات تصف تخصص المتجر أو ما يقدمه.')
         if stats.get('title_dup'):
-            points.append(f"{stats['title_dup']} صفحة تتشارك نفس عنوان الميتا، "
-                          "فلا تميّز محركات البحث بينها.")
+            add('صفحات تتشارك نفس عنوان الميتا', stats['title_dup'],
+                'لا تميّز محركات البحث بينها.')
         if stats.get('desc_same'):
-            points.append(f"{stats['desc_same']} وصف ميتا نسخة حرفية من العنوان، "
-                          "فيضيع سطر إضافي مجاني في نتيجة البحث.")
+            add('أوصاف ميتا منسوخة حرفياً من العنوان', stats['desc_same'],
+                'يضيع سطر إضافي مجاني في نتيجة البحث.')
         if crit_t:
-            points.append(f"{crit_t} عنوان ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
-                          f"{TITLE_MIN_OK} حرفاً أو يتجاوز {TITLE_MAX} حرفاً فيُقتطع "
-                          "في نتائج البحث.")
+            add('عناوين ميتا تحتاج إصلاحاً عاجلاً', crit_t,
+                f'مفقودة أو أقصر من {TITLE_MIN_OK} حرفاً، أو أطول من {TITLE_MAX} حرفاً فتُقتطع في نتائج البحث.')
         if imp_t:
-            points.append(f"{imp_t} عنوان ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
-                          f"({TITLE_MIN_OPTIMAL}-{TITLE_MAX} حرفاً) لاستغلال كامل "
-                          "المساحة المعروضة.")
+            add('عناوين يمكن رفعها إلى الطول المثالي', imp_t,
+                f'ضمن الحد المقبول، ورفعها إلى {TITLE_MIN_OPTIMAL}–{TITLE_MAX} حرفاً يستغل المساحة كاملة.')
         if crit_d:
-            points.append(f"{crit_d} وصف ميتا يحتاج إصلاحاً عاجلاً: مفقود أو أقصر من "
-                          f"{DESC_MIN_OK} حرفاً أو يتجاوز {DESC_MAX} حرفاً.")
+            add('أوصاف ميتا تحتاج إصلاحاً عاجلاً', crit_d,
+                f'مفقودة أو أقصر من {DESC_MIN_OK} حرفاً، أو أطول من {DESC_MAX} حرفاً.')
         if imp_d:
-            points.append(f"{imp_d} وصف ضمن الحد المقبول ويمكن رفعه إلى الطول المثالي "
-                          f"({DESC_MIN_OPTIMAL}-{DESC_MAX} حرفاً).")
+            add('أوصاف يمكن رفعها إلى الطول المثالي', imp_d,
+                f'ضمن الحد المقبول، والمثالي {DESC_MIN_OPTIMAL}–{DESC_MAX} حرفاً.')
         if stats.get('url_clone'):
-            points.append(f"{stats['url_clone']} منتجاً مستنسخاً: رابطه يحمل بادئة "
-                          "النسخ أو لاحقة رقمية، وهي نسخ مكررة من منتج واحد تتنافس "
-                          "مع أصلها في نتائج البحث.")
+            add('منتجات مستنسخة من منتج واحد', stats['url_clone'],
+                'نسخ مكررة تتنافس مع المنتج الأصلي في نتائج البحث.')
         if stats.get('dup_content'):
-            points.append(f"{stats['dup_content']} صفحة تتشارك نفس العنوان والوصف "
-                          "حرفياً، فتُعدّ محتوى مكرراً ويختار جوجل واحدة ويتجاهل الباقي.")
+            add('صفحات تتشارك نفس العنوان والوصف حرفياً', stats['dup_content'],
+                'تُعدّ محتوى مكرراً، فيختار جوجل واحدة ويتجاهل الباقي.')
         if stats.get('url_wrongname'):
-            points.append(f"{stats['url_wrongname']} رابط يحمل اسم منتج مختلف عن المنتج "
-                          "المعروض في الصفحة، غالباً لأن المنتج نُسخ ثم غُيّر اسمه دون "
-                          "تحديث الرابط. الزبون يصل لصفحة لا تطابق ما نقر عليه.")
+            add('روابط تحمل اسم منتج مختلف عن المعروض', stats['url_wrongname'],
+                'غالباً نُسخ المنتج وتغيّر اسمه دون الرابط، فيصل الزبون لغير ما نقر عليه.')
         if stats.get('url_style'):
-            points.append(f"{stats['url_style']} رابط بصياغة غير مثالية: شرطة سفلية "
-                          "أو حروف كبيرة أو طول مفرط أو تكرار كلمة داخل الرابط.")
+            bd = stats.get('url_style_breakdown') or {}
+            names = {'u_repeat': 'كلمة مكررة داخل الرابط', 'u_underscore': 'شرطة سفلية بدل الواصلة',
+                     'u_uppercase': 'حروف إنجليزية كبيرة'}
+            parts = '، '.join(f"{names[k]} ({v})" for k, v in bd.items() if v)
+            add('روابط صياغتها تحتاج تصحيحاً', stats['url_style'], (parts + '.') if parts else '')
         if stats.get('url_malformed'):
-            points.append(f"{stats['url_malformed']} رابط معطوب يحتوي عنوان موقع داخل "
-                          "مساره (لصق خاطئ في حقل الرابط)، فيظهر للزبون في نتائج البحث "
-                          "بشكل مشوّه ويضعف الثقة.")
+            add('روابط معطوبة فيها عنوان موقع داخل مسارها', stats['url_malformed'],
+                'تظهر للزبون مشوّهة في نتائج البحث.')
         if stats.get('url_generic'):
-            points.append(f"{stats['url_generic']} رابط مكوّن من أرقام أو رموز بلا "
-                          "كلمات وصفية.")
-        if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
-            points.append(f"{stats['img_legacy']} صورة بصيغة قديمة ثقيلة بدل الصيغ "
-                          "الحديثة الخفيفة، ما يزيد حجم الصفحة ويبطئ تحميلها "
-                          "على الجوال.")
+            add('روابط مكوّنة من أرقام أو رموز بلا كلمات', stats['url_generic'])
         if stats.get('noindex_pages'):
-            points.append(f"{stats['noindex_pages']} صفحة تحمل وسم noindex الذي يطلب "
-                          "من محركات البحث تجاهلها، فلا تظهر في النتائج مهما كان "
-                          "محتواها جيداً.")
-        if stats.get('deleted_pages'):
-            points.append(f"{stats['deleted_pages']} رابط لمنتجات محذوفة أو مخفية "
-                          "يُحوَّل إلى الصفحة الرئيسية بدل إظهار صفحة «غير موجود»، "
-                          "وهو ما يربك محركات البحث ويهدر ميزانية الزحف.")
+            add('صفحات تطلب من محركات البحث تجاهلها (noindex)', stats['noindex_pages'],
+                'لا تظهر في النتائج مهما كان محتواها جيداً.')
         if stats.get('h1_mismatch'):
-            points.append(f"{stats['h1_mismatch']} صفحة عنوانها في نتائج البحث يختلف "
-                          "عن العنوان المعروض فيها، فيصل الزبون لصفحة لا تطابق ما "
-                          "نقر عليه.")
+            add('صفحات عنوانها في البحث يختلف عن العنوان المعروض فيها', stats['h1_mismatch'],
+                'يصل الزبون لصفحة لا تطابق ما نقر عليه.')
         if stats.get('canon_broken'):
-            points.append(f"{stats['canon_broken']} صفحة تشير بوسم الكانونيكال إلى "
-                          "صفحة واحدة بدل نفسها، فتطلب من محركات البحث تجاهلها "
-                          "جميعاً. هذا أخطر خلل في التقرير ويعالج من القالب.")
+            add('صفحات تشير بوسم الكانونيكال إلى صفحة واحدة بدل نفسها', stats['canon_broken'],
+                'تطلب من محركات البحث تجاهلها جميعاً، وهو أخطر خلل في التقرير.')
         if stats.get('canon_missing'):
-            points.append(f"{stats['canon_missing']} صفحة بلا وسم كانونيكال، "
-                          "ما يعرّض المتجر لتكرار المحتوى.")
+            add('صفحات بلا وسم كانونيكال', stats['canon_missing'], 'تعرّض المتجر لتكرار المحتوى.')
         if stats.get('hidden_count'):
-            points.append(f"{stats['hidden_count']} صفحة منشورة في خريطة الموقع لا يصل "
-                          "إليها الزائر بأي رابط داخلي، فتفقد قيمتها.")
-        if stats.get('unlisted_count'):
-            points.append(f"{stats['unlisted_count']} صفحة معروضة في المتجر وغير مدرجة "
-                          "في خريطة الموقع، فقد لا تعلم بها محركات البحث.")
+            add('صفحات في خريطة الموقع لا يصل إليها الزائر بأي رابط داخلي', stats['hidden_count'],
+                'تفقد قيمتها في نتائج البحث.')
         if stats.get('scroll_only_count'):
-            points.append(f"{stats['scroll_only_count']} منتجاً لا يظهر رابطه في صفحات "
-                          "الأقسام ويصل إليه الزائر بالتمرير فقط، فيضعف ترابطه الداخلي "
-                          "وتقل قوته في نتائج البحث.")
-        if stats.get('not_indexed_count'):
-            points.append(f"{stats['not_indexed_count']} منتجاً معروضاً في المتجر "
-                          "لا يظهر في خريطة الموقع.")
-        if stats.get('redirect_qty'):
-            points.append(f"{stats['redirect_qty']} رابط لا يعمل (404) وله بديل قريب في المتجر، "
-                          "يحتاج تحويل 301 إلى هذا البديل.")
-        if stats.get('internal_fix_qty'):
-            points.append(f"{stats['internal_fix_qty']} رابط داخلي يقود الزائر إلى صفحة غير "
-                          "موجودة، يحتاج تصحيحاً ليشير إلى الصفحة المناسبة.")
+            add('منتجات لا يصل إليها الزائر إلا بالتمرير', stats['scroll_only_count'],
+                'يضعف ترابطها الداخلي وقوتها في نتائج البحث.')
+        if stats.get('broken_actionable'):
+            add('روابط لا تعمل تحتاج معالجة', stats['broken_actionable'],
+                'تحويلها إلى أقرب صفحة بديلة وتصحيح الروابط الداخلية التي تقود إليها.'
+                if stats.get('platform') == 'zid' else
+                'تصحيح الروابط الداخلية التي تقود الزائر إلى صفحة غير موجودة.')
         if stats.get('archive_pages', 0) > 20:
-            points.append(f"{stats['archive_pages']} صفحة أرشيف (وسوم وقوائم) تعرض "
-                          "محتوى مكرراً بعنوان واحد، وتستهلك ميزانية الزحف دون أن "
-                          "تجلب زيارات. يوصى بحصر الوسوم في المفيد منها.")
+            add('صفحات أرشيف (وسوم وقوائم)', stats['archive_pages'],
+                'محتوى مكرر يستهلك زحف محركات البحث دون زيارات.')
         if stats.get('thin_pages'):
-            points.append(f"{stats['thin_pages']} صفحة بمحتوى نصي أقل من 50 كلمة.")
+            add('صفحات بمحتوى نصي أقل من 50 كلمة', stats['thin_pages'])
 
         if not points:
             return ("لم يرصد الفحص فجوات جوهرية في الصفحات المعروضة:", [
@@ -420,16 +428,9 @@ def build_diagnosis(score, stats, lang):
     if stats.get('url_generic'):
         points.append(f"{stats['url_generic']} URLs consist of numbers or codes with no "
                       "descriptive words.")
-    if stats.get('img_legacy') and stats.get('img_modern_pct', 100) < 50:
-        points.append(f"{stats['img_legacy']} images use legacy formats (JPEG/PNG) "
-                      "instead of WebP, increasing page weight on mobile.")
     if stats.get('noindex_pages'):
         points.append(f"{stats['noindex_pages']} pages carry a noindex tag asking "
                       "search engines to ignore them.")
-    if stats.get('deleted_pages'):
-        points.append(f"{stats['deleted_pages']} deleted or hidden product URLs "
-                      "redirect to the homepage instead of returning a not-found "
-                      "page, confusing search engines.")
     if stats.get('h1_mismatch'):
         points.append(f"{stats['h1_mismatch']} pages show a search title that differs "
                       "from the heading on the page itself.")
@@ -443,9 +444,6 @@ def build_diagnosis(score, stats, lang):
     if stats.get('hidden_count'):
         points.append(f"{stats['hidden_count']} pages published in the sitemap have no "
                       "internal link path for visitors and lose their value.")
-    if stats.get('not_indexed_count'):
-        points.append(f"{stats['not_indexed_count']} visible products are absent "
-                      "from the sitemap.")
     if stats.get('redirect_qty'):
         points.append(f"{stats['redirect_qty']} broken URLs have a close alternative and need a 301.")
     if stats.get('internal_fix_qty'):
@@ -497,9 +495,8 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         return t.encode('latin-1', 'replace').decode('latin-1')
 
     use_shaping = rtl and HAS_SHAPING
-    fmt = (lambda t: str(t)) if use_shaping else (shape_ar if rtl else _latin)
-    if not rtl:
-        fmt = _latin
+    _base_fmt = (lambda t: str(t)) if use_shaping else (shape_ar if rtl else _latin)
+    fmt = (lambda t: _base_fmt(ar_counts(t))) if rtl else _latin
     ALIGN = "R" if rtl else "L"
     FONT = AR_FONT_NAME if rtl else "Helvetica"
     has_bold = bool(FONT_BOLD_PATH) if rtl else True
@@ -775,8 +772,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         (str(stats['products']), T['m_products'], C_INK),
         (str(stats['categories']), T['m_cats'], C_INK),
         (str(stats.get('total_images', 0)), T['m_images'], C_INK),
-        (str(stats.get('critical_titles', 0) + stats.get('missing_alts', 0)),
-         T['m_issues'], C_BAD),
+        (str(quote_units(stats)), T['m_issues'], C_BAD),
     ]
     gap, cw = 4, (W - 2 * 4) / 3
     y0 = pdf.get_y()
@@ -829,17 +825,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
          'warn' if stats.get('archive_pages', 0) > 20 else 'neutral'),
         ('الصفحات التعريفية والسياسات' if rtl else 'Info and policy pages',
          f"{stats['info_pages']} {T['u_page']}", 'neutral'),
-        ('روابط منتجات محذوفة تُحوَّل للرئيسية' if rtl else
-         'Deleted product URLs redirecting home',
-         f"{stats.get('deleted_pages', 0)} {T['u_link']}",
-         'bad' if stats.get('deleted_pages') else 'ok'),
         ('روابط لا تعمل تحتاج معالجة (404)' if rtl else 'Broken links to handle (404)',
          f"{stats.get('broken_actionable', 0)} {T['u_link']}",
          'bad' if stats.get('broken_actionable') else 'ok'),
-        ('صفحات تعذّر الاتصال بها أثناء الفحص' if rtl else
-         'Pages unreachable during the scan',
-         f"{stats.get('unreachable_pages', 0)} {T['u_page']}",
-         'warn' if stats.get('unreachable_pages') else 'ok'),
         ('صفحات ممنوعة من الأرشفة' if rtl else 'Pages blocked from indexing',
          f"{stats.get('noindex_pages', 0)} {T['u_page']}",
          'bad' if stats.get('noindex_pages') else 'ok'),
@@ -944,11 +932,6 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
          f"{good} {T['u_img']}", 'ok' if good else 'neutral'),
         ('نسبة الصور غير المهيأة' if rtl else 'Share of images not optimised',
          f"{ratio}%", 'bad' if ratio > 50 else 'warn' if ratio else 'ok'),
-        ('صيغ الصور المستخدمة' if rtl else 'Image formats in use', fmts, 'neutral'),
-        ('نسبة الصور بالصيغ الحديثة الخفيفة' if rtl else
-         'Share of modern lightweight formats',
-         f"{stats.get('img_modern_pct', 0)}%",
-         'ok' if stats.get('img_modern_pct', 0) > 50 else 'warn'),
     ])
     pdf.impact('images')
 
@@ -970,14 +953,6 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
              'Products linked only via scrolling',
              f"{stats.get('scroll_only_count', 0)} {T['u_product']}",
              'warn' if stats.get('scroll_only_count') else 'ok'),
-            ('صفحات معروضة وغير مدرجة في الخريطة' if rtl else
-             'Live pages missing from the sitemap',
-             f"{stats.get('unlisted_count', 0)} {T['u_page']}",
-             'bad' if stats.get('unlisted_count') else 'ok'),
-            ('نسبة المنتجات المعروضة المدرجة' if rtl else
-             'Visible products included in sitemap',
-             f"{stats.get('indexed_pct', 0)}%",
-             'ok' if stats.get('indexed_pct', 0) >= 95 else 'warn'),
         ])
         pdf.impact('sitemap')
 
@@ -1190,9 +1165,8 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
             t = t.replace(a_, b_)
         return t.encode('latin-1', 'replace').decode('latin-1')
 
-    fmt = (lambda t: str(t)) if (rtl and HAS_SHAPING) else (shape_ar if rtl else _latin)
-    if not rtl:
-        fmt = _latin
+    _base_fmt = (lambda t: str(t)) if (rtl and HAS_SHAPING) else (shape_ar if rtl else _latin)
+    fmt = (lambda t: _base_fmt(ar_counts(t))) if rtl else _latin
     FONT = AR_FONT_NAME if rtl else "Helvetica"
     B = "B" if (FONT_BOLD_PATH if rtl else True) else ""
     ALIGN = "R" if rtl else "L"
@@ -1200,14 +1174,25 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     dom = urlparse(domain).netloc or domain
     riyal = RIYAL_PATH.exists()
 
-    pdf = FPDF()
+    class _Invoice(FPDF):
+        def footer(self):
+            # الموقع والبريد أسفل كل صفحة، مثل تقرير العميل
+            self.set_y(-18)
+            self.set_draw_color(*C_LINE)
+            self.line(M, self.get_y(), 210 - M, self.get_y())
+            self.ln(3)
+            self.set_font(FONT, "", 9)
+            self.set_text_color(*C_MUTED)
+            self.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+
+    pdf = _Invoice()
     if rtl:
         pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
         if FONT_BOLD_PATH:
             pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
         if HAS_SHAPING:
             pdf.set_text_shaping(True, direction="rtl")
-    pdf.set_auto_page_break(True, margin=18)
+    pdf.set_auto_page_break(True, margin=26)
     pdf.add_page()
 
     def money(value, x, w, y, size=10, bold=False, color=C_MUTED, center=True):
@@ -1241,11 +1226,6 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
             pdf.image(str(LOGO_PATH), x=(M if rtl else 210 - M - 34), y=head_y, h=12)
         except Exception:
             pass
-    pdf.set_font(FONT, "", 8.5)
-    pdf.set_text_color(*C_MUTED)
-    pdf.set_xy(M if rtl else 210 - M - 60, head_y + 14)
-    pdf.cell(60, 4.5, "anasrashed.com", 0, 2, "L" if rtl else "R")
-    pdf.cell(60, 4.5, "anas@anasrashed.com", 0, 0, "L" if rtl else "R")
 
     # العنوان في الجهة المقابلة للشعار حتى لا يتداخلا
     tx = (M + 70) if rtl else M
