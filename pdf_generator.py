@@ -102,9 +102,9 @@ SECTION_TXT = {
                       'غير موجودة بالنسبة لجوجل.',
         },
         'sitemap': {
-            'title': 'مقارنة المعروض بخريطة الموقع',
+            'title': 'صفحات الخريطة والروابط الداخلية',
             'intro': 'خريطة الموقع هي القائمة التي يعلنها المتجر لمحركات البحث. يتحقق هذا '
-                     'القسم من أن صفحات الخريطة تعمل ويصل إليها الزائر.',
+                     'القسم من أن كل صفحة فيها يصل إليها الزائر برابط من داخل المتجر.',
             'impact': 'الصفحة المدرجة في الخريطة ولا يصل إليها الزائر بأي رابط داخلي تبقى بلا '
                       'قيمة: لا تستفيد من قوة المتجر ولا تجلب زيارات. ربطها من صفحات المتجر '
                       'يعيد لها قيمتها.',
@@ -178,7 +178,7 @@ SECTION_TXT = {
                       'the same quality, making pages lighter on mobile.',
         },
         'sitemap': {
-            'title': 'Visible catalogue vs sitemap',
+            'title': 'Sitemap pages and internal links',
             'intro': 'The sitemap is the list the store declares to search engines. This '
                      'section compares what visitors actually see against what the sitemap '
                      'declares, in both directions.',
@@ -741,7 +741,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 
     # بطاقات موجزة
     cards = [
-        (str(stats['total_pages']), T['m_pages'], C_INK),
+        (str(stats.get('live_pages', stats['total_pages'])), T['m_pages'], C_INK),
         (str(stats['products']), T['m_products'], C_INK),
         (str(stats['categories']), T['m_cats'], C_INK),
         (str(stats.get('total_images', 0)), T['m_images'], C_INK),
@@ -785,7 +785,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     pdf.section(n, 'structure')
     pdf.table([
         ('إجمالي الصفحات المعروضة والمفحوصة' if rtl else 'Total visible pages audited',
-         f"{stats['total_pages']} {T['u_page']}", 'neutral'),
+         f"{stats.get('live_pages', stats['total_pages'])} {T['u_page']}", 'neutral'),
         ('صفحات المنتجات' if rtl else 'Product pages',
          f"{stats['products']} {T['u_product']}", 'neutral'),
         ('أقسام المتجر' if rtl else 'Store categories',
@@ -824,9 +824,9 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     n += 1
     pdf.add_page()
     pdf.section(n, 'meta')
-    tot = max(stats['total_pages'] - stats.get('broken_pages', 0), 1)
-    ok_t = tot - stats['bad_titles']
-    ok_d = tot - stats['bad_descs']
+    tot = max(int(stats.get('live_pages', stats['total_pages'] - stats.get('broken_pages', 0))), 1)
+    ok_t = max(tot - stats.get('bad_titles', 0), 0)
+    ok_d = max(tot - stats.get('bad_descs', 0), 0)
     pdf.table([
         ('عناوين ضمن الطول المثالي (50-60)' if rtl else
          'Titles within optimal length (50-60)',
@@ -892,15 +892,12 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     pdf.impact('images')
 
     # ======================= خريطة الموقع =======================
-    if stats.get('coverage_enabled'):
+    # يظهر القسم فقط إذا وُجد ما يمكن معالجته: صفحات في الخريطة بلا رابط داخلي
+    if stats.get('coverage_enabled') and (stats.get('hidden_count') or stats.get('scroll_only_count')):
         n += 1
         pdf.add_page()
         pdf.section(n, 'sitemap')
         pdf.table([
-            ('روابط معلنة في خريطة الموقع' if rtl else 'URLs declared in sitemap',
-             f"{stats.get('sitemap_products', 0)} {T['u_link']}", 'neutral'),
-            ('منها تعمل ويصل إليها الزائر' if rtl else 'Of those, live and reachable',
-             f"{stats.get('sitemap_live', 0)} {T['u_link']}", 'neutral'),
             ('صفحات في الخريطة لا يصل إليها الزائر' if rtl else
              'Sitemap pages with no internal link',
              f"{stats.get('hidden_count', 0)} {T['u_page']}",
@@ -1049,7 +1046,7 @@ INVOICE_TXT = {
         'h_total': 'الإجمالي', 'currency': 'ريال',
         'meta_title': 'كتابة عناوين الميتا وروابط الصفحات',
         'meta_title_d_salla': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، وتحديث رابطها '
-                              'ليطابقه',
+                              'ليطابقه (سلة تحوّل الرابط القديم تلقائياً)',
         'meta_title_d_redirect': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، وتحديث رابطها '
                                  'ليطابقه مع تحويل 301 من الرابط القديم',
         'meta_title_d': 'صياغة عنوان بحثي لكل صفحة ضمن الطول المثالي، '
