@@ -335,14 +335,28 @@ def build_filtered_exports(df, images_df, lang='ar', platform='unknown'):
     return {k: (names[k], t) for k, t in tables.items() if t is not None and not t.empty}
 
 
+def clickable_urls(table):
+    """الروابط في الملفات تُكتب بحيث تُفتح بالضغط عليها: المسافة داخل الرابط تصبح %20.
+    (سلة تضع مسافات في روابط المقالات، والمسافة تقطع الرابط عند فتحه من الإكسل أو نسخه.)"""
+    if table is None or table.empty:
+        return table
+    out = table.copy()
+    for col in out.columns:
+        name = str(col)
+        if any(k in name for k in ('رابط', 'الوجهة', 'URL', 'Destination')):
+            out[col] = out[col].map(lambda v: v.replace(' ', '%20')
+                                    if isinstance(v, str) and v.startswith('http') else v)
+    return out
+
+
 def to_csv_bytes(table):
-    return table.to_csv(index=False).encode('utf-8-sig')
+    return clickable_urls(table).to_csv(index=False).encode('utf-8-sig')
 
 
 def to_xlsx_bytes(table, sheet='Sheet1'):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
-        table.to_excel(w, index=False, sheet_name=sheet)
+        clickable_urls(table).to_excel(w, index=False, sheet_name=sheet)
     return buf.getvalue()
 
 
@@ -378,9 +392,9 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
             sub = ldf[ldf[type_col] == label] if type_col in ldf.columns else pd.DataFrame()
             if not sub.empty:
                 fname = names.get(tkey, f"{tkey}.csv")
-                z.writestr(fname, sub.to_csv(index=False, encoding='utf-8-sig'))
+                z.writestr(fname, clickable_urls(sub).to_csv(index=False, encoding='utf-8-sig'))
         if limg is not None and not limg.empty:
-            z.writestr(names['images'], limg.to_csv(index=False, encoding='utf-8-sig'))
+            z.writestr(names['images'], clickable_urls(limg).to_csv(index=False, encoding='utf-8-sig'))
 
         if coverage:
             for key, data in [('notidx', coverage.get('unlisted_pages')),
@@ -388,7 +402,7 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
                               ('scroll', coverage.get('scroll_only_products'))]:
                 if data:
                     z.writestr(names[key],
-                               localize_df(pd.DataFrame(data), lang)
+                               clickable_urls(localize_df(pd.DataFrame(data), lang))
                                .to_csv(index=False, encoding='utf-8-sig'))
 
         if structured:
@@ -397,7 +411,7 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
                               ('catgap', structured.get('category_rows'))]:
                 if data:
                     z.writestr(names[key],
-                               localize_df(pd.DataFrame(data), lang)
+                               clickable_urls(localize_df(pd.DataFrame(data), lang))
                                .to_csv(index=False, encoding='utf-8-sig'))
 
         titles = build_titles_urls_list(df, lang, platform)
@@ -412,29 +426,29 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
                            ('alt_missing', alt_missing), ('alt_weak', alt_weak),
                            ('broken', broken)):
             if table is not None and not table.empty:
-                z.writestr(names[key], table.to_csv(index=False, encoding='utf-8-sig'))
+                z.writestr(names[key], clickable_urls(table).to_csv(index=False, encoding='utf-8-sig'))
 
         xbuf = io.BytesIO()
         with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
-            ldf.to_excel(w, index=False,
+            clickable_urls(ldf).to_excel(w, index=False,
                          sheet_name='Pages Audit' if lang == 'en' else 'فحص الصفحات')
             if limg is not None and not limg.empty:
-                limg.to_excel(w, index=False,
+                clickable_urls(limg).to_excel(w, index=False,
                               sheet_name='Images Audit' if lang == 'en' else 'فحص الصور')
             if titles is not None and not titles.empty:
-                titles.to_excel(w, index=False,
+                clickable_urls(titles).to_excel(w, index=False,
                                 sheet_name='Titles & URLs' if lang == 'en' else 'عناوين وروابط')
             if descs is not None and not descs.empty:
-                descs.to_excel(w, index=False,
+                clickable_urls(descs).to_excel(w, index=False,
                                sheet_name='Meta Descriptions' if lang == 'en' else 'أوصاف الميتا')
             if alt_missing is not None and not alt_missing.empty:
-                alt_missing.to_excel(w, index=False,
+                clickable_urls(alt_missing).to_excel(w, index=False,
                                      sheet_name='Missing Alt' if lang == 'en' else 'صور بلا وصف')
             if alt_weak is not None and not alt_weak.empty:
-                alt_weak.to_excel(w, index=False,
+                clickable_urls(alt_weak).to_excel(w, index=False,
                                   sheet_name='Weak Alt' if lang == 'en' else 'صور وصفها ضعيف')
             if broken is not None and not broken.empty:
-                broken.to_excel(w, index=False,
+                clickable_urls(broken).to_excel(w, index=False,
                                 sheet_name='Broken Links' if lang == 'en' else 'روابط لا تعمل')
         z.writestr(names['excel'], xbuf.getvalue())
     return buf.getvalue()
