@@ -2854,6 +2854,26 @@ def _code_series(df):
     return df['كود الاستجابة'].astype(str)
 
 
+def listing_kind(url):
+    """صفحات التصنيف ثلاثة أنواع يعدّها التاجر بشكل مختلف:
+    قسم حقيقي من أقسام المتجر، أو صفحة ماركة، أو قائمة عامة (أحدث المنتجات، العروض)."""
+    segs = [x.lower() for x in url_segments(str(url))]
+    if not segs:
+        return 'listing'
+    if BRAND_ID_RE.match(segs[-1]) or segs[0] in ('brands', 'brand', 'ماركات', 'ماركة'):
+        return 'brand' if len(segs) >= 2 or BRAND_ID_RE.match(segs[-1]) else 'listing'
+    if '/'.join(segs) in CATALOG_ROOTS:
+        return 'listing'
+    return 'category'
+
+
+def _shared_count(series):
+    vals = series.map(lambda x: str(x or '').strip())
+    vals = vals[vals != '']
+    counts = vals.value_counts()
+    return int(vals.isin(counts[counts >= 2].index).sum())
+
+
 def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     codes = _code_series(df)
@@ -2867,7 +2887,13 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=
         'total_pages': len(df),
         'score': round(ok['درجة السيو'].mean(), 1) if not ok.empty else 0.0,
         'products': int((ok['نوع الصفحة'] == T_PRODUCT).sum()),
-        'categories': int((ok['نوع الصفحة'] == T_CATEGORY).sum()),
+        # الأقسام الحقيقية فقط؛ الماركات والقوائم العامة تُعدّ منفصلة
+        'categories': int(((ok['نوع الصفحة'] == T_CATEGORY) &
+                           (ok['الرابط'].map(listing_kind) == 'category')).sum()),
+        'brand_pages': int(((ok['نوع الصفحة'] == T_CATEGORY) &
+                            (ok['الرابط'].map(listing_kind) == 'brand')).sum()),
+        'listing_pages': int(((ok['نوع الصفحة'] == T_CATEGORY) &
+                              (ok['الرابط'].map(listing_kind) == 'listing')).sum()),
         'info_pages': int((ok['نوع الصفحة'] == T_INFO).sum()),
         'blog_pages': int((ok['نوع الصفحة'] == T_BLOG).sum()),
         'archive_pages': int((ok['نوع الصفحة'] == T_ARCHIVE).sum()),
@@ -2899,8 +2925,8 @@ def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=
         if 'جودة العنوان' in ok.columns else 0,
         'title_promo': int((ok['جودة العنوان'] == 'q_promo').sum())
         if 'جودة العنوان' in ok.columns else 0,
-        'title_dup': int((ok['جودة العنوان'] == 'q_duplicate').sum())
-        if 'جودة العنوان' in ok.columns else 0,
+        # كل صفحة يتكرر عنوانها في صفحة أخرى، مهما كان سبب ضعفه الآخر
+        'title_dup': _shared_count(ok['عنوان الميتا']) if 'عنوان الميتا' in ok.columns else 0,
         'desc_dup': int((ok['جودة الوصف'] == 'q_duplicate').sum())
         if 'جودة الوصف' in ok.columns else 0,
         'desc_same': int((ok['جودة الوصف'] == 'q_same_as_title').sum())
