@@ -1834,7 +1834,7 @@ def _cacheable(res):
     if pd_.get('متاحة'):
         return True
     code = str(pd_.get('كود الاستجابة'))
-    return bool(re.search(r'خطأ 4(?:04|10)\b', code)) or DELETED_HOME in code
+    return bool(re.search(r'خطأ 4(?:04|10)\b', code))
 
 
 def _serialize(res):
@@ -3626,6 +3626,12 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
                 f"نجح فحص {pct}% من الصفحات. تعذّر {unreach}: {why}.", fix_hint)
         else:
             add(CHECK_PASS, "اكتمال الفحص", f"نجح فحص {pct}% من الصفحات.")
+    if crawl_meta and crawl_meta.get('home_suspicious'):
+        add(CHECK_FAIL, "صفحات حوّلها المتجر للرئيسية",
+            f"حوّل المتجر {crawl_meta['home_redirects']} صفحة من الخريطة إلى الصفحة الرئيسية. "
+            "عدد كبير كهذا غالباً تقييد من حماية المتجر لا منتجات محذوفة، فالنتائج ناقصة.",
+            "انتظر قليلاً ثم اضغط «أكمل الفحص» مع «الوضع الهادئ» أو «متصفح حقيقي». "
+            "وتأكد يدوياً: افتح أحد هذه الروابط في متصفحك، فإن فتح المنتج فهو ليس محذوفاً.")
     if crawl_meta and crawl_meta.get('retry_aborted'):
         add(CHECK_WARN, "إعادة المحاولة",
             "أوقفت الأداة إعادة المحاولة مبكراً لأن المتجر رفض أغلب عيّنة الاختبار، "
@@ -4042,8 +4048,18 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
                 imgs += i4
 
     # إعادة هادئة للصفحات التي رفضها المتجر مؤقتاً (429 / 5xx / انقطاع)
+    def _home_redirects():
+        return [r for r in pages if DELETED_HOME in str(r.get('كود الاستجابة'))]
+
+    def _suspicious(n):
+        # منتج محذوف أو اثنان أمر طبيعي؛ أما عشرات الصفحات أو أكثر من 15% من الخريطة
+        # فغالباً حماية المتجر تحوّل الأداة للرئيسية لأنها طلبت صفحات كثيرة
+        return n >= 10 and n > 0.15 * max(len(sitemap_keys), 1)
+
+    home_suspicious = _suspicious(len(_home_redirects()))
     retry = [r.get('_req_url') or r['_raw_url'] for r in pages
-             if not r['متاحة'] and _retryable(r['كود الاستجابة'])]
+             if not r['متاحة'] and (_retryable(r['كود الاستجابة']) or
+                                    (home_suspicious and DELETED_HOME in str(r['كود الاستجابة'])))]
     crawl_meta['retry_aborted'] = False
     if retry:
         say('retry_start', count=len(retry))
@@ -4118,6 +4134,11 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     summary['structured'] = structured
     summary['platform'] = platform
     summary['platform_label'] = PLATFORM_LABEL.get(platform, '—')
+    n_home = len([r for r in df.to_dict('records') if DELETED_HOME in str(r.get('كود الاستجابة'))]) \
+        if not df.empty else 0
+    crawl_meta['home_redirects'] = n_home
+    crawl_meta['home_suspicious'] = bool(n_home >= 10 and n_home > 0.15 * max(len(sitemap_keys), 1))
+    summary['suspicious_home'] = n_home if crawl_meta['home_suspicious'] else 0
     crawl_meta['connection'] = CONN_LABEL[connection_mode()]
     crawl_meta['cache_hits'] = _CACHE['hits']
     crawl_meta['cache_enabled'] = bool(use_cache)
