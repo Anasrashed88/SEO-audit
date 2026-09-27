@@ -190,20 +190,17 @@ def _title_issues(r, lang, dup_counts=None):
         need.append(f'العنوان طويل ({ln} حرفاً — الحد 60) فيُقتطع في نتائج البحث' if ar
                     else f'Title too long ({ln} chars — max 60), truncated in results')
     q = r.get('جودة العنوان')
-    if q == 'q_duplicate':
-        n = (dup_counts or {}).get(str(r.get('عنوان الميتا') or '').strip(), 0)
-        need.append((f'العنوان مكرر في {_pages_ar(n)}' if n else QL['q_duplicate']) if ar
-                    else (f'Title duplicated on {n} pages' if n else QL['q_duplicate']))
-    elif q == 'q_brand_only':
+    n_dup = (dup_counts or {}).get(str(r.get('عنوان الميتا') or '').strip(), 0)
+    if q == 'q_brand_only':
         need.append('العنوان هو اسم المتجر فقط — يحتاج كلمات تصف تخصص المتجر أو ما يقدمه' if ar
                     else 'Title is only the store name — needs words describing what the store offers')
-    elif q == 'q_promo':
-        from audit_engine import promo_phrase
-        ph = promo_phrase(r.get('عنوان الميتا'))
-        need.append((f'العنوان فيه عبارة ترويجية «{ph}» بدل كلمات يبحث بها الزبون' if ph
-                     else 'العنوان: ' + QL['q_promo']) if ar else
-                    (f'Title contains promotional wording "{ph}" instead of search terms' if ph
-                     else 'Title: ' + QL['q_promo']))
+    if n_dup >= 2:
+        # التكرار يُذكر دائماً، حتى لو كان للعنوان سبب ضعف آخر
+        need.append(f'العنوان مكرر في {_pages_ar(n_dup)}' if ar else f'Title duplicated on {n_dup} pages')
+    elif q == 'q_duplicate':
+        need.append(QL['q_duplicate'])
+    if q in ('q_duplicate', 'q_brand_only', 'q_promo'):
+        pass
     elif q not in ('q_ok', 'q_na', None) and not isinstance(q, float):
         need.append(('العنوان: ' if ar else 'Title: ') + QL.get(q, str(q)))
     u = r.get('جودة الرابط')
