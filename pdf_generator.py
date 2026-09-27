@@ -815,8 +815,15 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
          f"{stats['total_pages']} {T['u_page']}", 'neutral'),
         ('صفحات المنتجات' if rtl else 'Product pages',
          f"{stats['products']} {T['u_product']}", 'neutral'),
-        ('صفحات الأقسام والكولكشنات' if rtl else 'Category and collection pages',
+        ('أقسام المتجر' if rtl else 'Store categories',
          f"{stats['categories']} {T['u_cat']}", 'neutral'),
+    ] + ([
+        ('صفحات الماركات' if rtl else 'Brand pages',
+         f"{stats['brand_pages']} {T['u_page']}", 'neutral'),
+    ] if stats.get('brand_pages') else []) + ([
+        ('قوائم عامة (أحدث المنتجات، العروض)' if rtl else 'General listings (latest, offers)',
+         f"{stats['listing_pages']} {T['u_page']}", 'neutral'),
+    ] if stats.get('listing_pages') else []) + [
         ('مقالات وصفحات المدونة' if rtl else 'Blog posts and articles',
          f"{stats.get('blog_pages', 0)} {T['u_article']}",
          'warn' if not stats.get('blog_pages') else 'neutral'),
