@@ -163,12 +163,21 @@ def _n(v):
         return 0
 
 
+def _pages_ar(n):
+    n = int(n)
+    return 'صفحتين' if n == 2 else f'{n} صفحات' if 3 <= n % 100 <= 10 else f'{n} صفحة'
+
+
 def _title_issues(r, lang, dup_counts=None):
     """سبب دقيق لكل عنوان: الطول بالأرقام، أو التكرار وعدد الصفحات، أو الصياغة الترويجية."""
     QL, UL = QUALITY_LABEL[lang], URL_LABEL[lang]
     ar = lang == 'ar'
     need = []
     st, ln = r.get('حالة العنوان'), _n(r.get('طول العنوان'))
+    q0 = r.get('جودة العنوان')
+    if q0 in ('q_symbols', 'q_placeholder'):
+        return ('العنوان مكوّن من رموز أو قيمة قالب بلا نص' if ar
+                else 'Title is only symbols or a template placeholder')
     if st == 'missing':
         need.append('العنوان مفقود' if ar else 'Title missing')
     elif st == 'very_short':
@@ -183,8 +192,11 @@ def _title_issues(r, lang, dup_counts=None):
     q = r.get('جودة العنوان')
     if q == 'q_duplicate':
         n = (dup_counts or {}).get(str(r.get('عنوان الميتا') or '').strip(), 0)
-        need.append((f'العنوان مكرر في {n} صفحات' if n else QL['q_duplicate']) if ar
+        need.append((f'العنوان مكرر في {_pages_ar(n)}' if n else QL['q_duplicate']) if ar
                     else (f'Title duplicated on {n} pages' if n else QL['q_duplicate']))
+    elif q == 'q_brand_only':
+        need.append('العنوان هو اسم المتجر فقط — يحتاج كلمات تصف تخصص المتجر أو ما يقدمه' if ar
+                    else 'Title is only the store name — needs words describing what the store offers')
     elif q == 'q_promo':
         from audit_engine import promo_phrase
         ph = promo_phrase(r.get('عنوان الميتا'))
@@ -205,6 +217,10 @@ def _desc_issues(r, lang, dup_counts=None):
     ar = lang == 'ar'
     need = []
     st, ln = r.get('حالة الوصف'), _n(r.get('طول الوصف'))
+    q0 = r.get('جودة الوصف')
+    if q0 in ('q_symbols', 'q_placeholder'):
+        return ('الوصف مكوّن من رموز أو قيمة قالب بلا نص' if ar
+                else 'Description is only symbols or a template placeholder')
     if st == 'missing':
         need.append('الوصف مفقود' if ar else 'Description missing')
     elif st == 'very_short':
@@ -219,7 +235,7 @@ def _desc_issues(r, lang, dup_counts=None):
     q = r.get('جودة الوصف')
     if q == 'q_duplicate':
         n = (dup_counts or {}).get(str(r.get('وصف الميتا') or '').strip(), 0)
-        need.append((f'الوصف مكرر في {n} صفحات' if n else QL['q_duplicate']) if ar
+        need.append((f'الوصف مكرر في {_pages_ar(n)}' if n else QL['q_duplicate']) if ar
                     else (f'Description duplicated on {n} pages' if n else QL['q_duplicate']))
     elif q not in ('q_ok', 'q_na', None) and not isinstance(q, float):
         need.append(('الوصف: ' if ar else 'Description: ') + QL.get(q, str(q)))
