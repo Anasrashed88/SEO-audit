@@ -75,7 +75,7 @@ SECTION_TXT = {
             'title': 'عناوين وأوصاف الميتا',
             'intro': 'عنوان الميتا هو السطر الأزرق القابل للنقر في نتائج البحث، والوصف '
                      'هو السطران تحته. المعيار المعتمد: العنوان بين 50 و60 حرفاً، والوصف '
-                     'بين 120 و150 حرفاً، ويُحسب الطول بالحروف شاملاً المسافات وعلامات '
+                     'بين 120 و160 حرفاً، ويُحسب الطول بالحروف شاملاً المسافات وعلامات '
                      'الترقيم كما تحسبها محركات البحث.',
             'impact': 'العنوان القصير جداً يضيّع مساحة مجانية في نتيجة البحث، والطويل '
                       'يُقتطع بثلاث نقاط فتضيع نهايته. أما العنوان المفقود أو المكوّن من '
@@ -146,7 +146,7 @@ SECTION_TXT = {
             'title': 'Meta titles and descriptions',
             'intro': 'The meta title is the clickable blue line in search results; the '
                      'description is the two lines beneath it. Standard applied: titles '
-                     'between 50 and 60 characters, descriptions between 120 and 150, '
+                     'between 50 and 60 characters, descriptions between 120 and 160, '
                      'counted in characters including spaces and punctuation.',
             'impact': 'A very short title wastes free space in the result, while an '
                       'overly long one is truncated and loses its ending. A missing title '
@@ -845,8 +845,8 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         ('صفحات تتشارك نفس العنوان' if rtl else 'Pages sharing the same title',
          f"{stats.get('title_dup', 0)} {T['u_page']}",
          'warn' if stats.get('title_dup') else 'ok'),
-        ('أوصاف ضمن الطول المثالي (120-150)' if rtl else
-         'Descriptions within optimal length (120-150)',
+        ('أوصاف ضمن الطول المثالي (120-160)' if rtl else
+         'Descriptions within optimal length (120-160)',
          (f"{ok_d} من {tot}" if rtl else f"{ok_d} of {tot}"),
          'ok' if ok_d / tot > 0.7 else 'warn'),
         ('أوصاف تحتاج إصلاحاً عاجلاً' if rtl else 'Descriptions needing urgent work',
