@@ -232,14 +232,14 @@ def _desc_issues(r, lang, dup_counts=None):
     if st == 'missing':
         need.append('الوصف مفقود' if ar else 'Description missing')
     elif st == 'very_short':
-        need.append(f'الوصف قصير جداً ({ln} حرفاً — المثالي 120–150)' if ar
-                    else f'Description too short ({ln} chars — ideal 120–150)')
+        need.append(f'الوصف قصير جداً ({ln} حرفاً — المثالي 120–160)' if ar
+                    else f'Description too short ({ln} chars — ideal 120–160)')
     elif st == 'acceptable':
-        need.append(f'الوصف أقصر من المثالي ({ln} حرفاً — المثالي 120–150)' if ar
-                    else f'Description below ideal ({ln} chars — ideal 120–150)')
+        need.append(f'الوصف أقصر من المثالي ({ln} حرفاً — المثالي 120–160)' if ar
+                    else f'Description below ideal ({ln} chars — ideal 120–160)')
     elif st == 'long':
-        need.append(f'الوصف طويل ({ln} حرفاً — الحد 150) فيُقتطع في نتائج البحث' if ar
-                    else f'Description too long ({ln} chars — max 150), truncated')
+        need.append(f'الوصف طويل ({ln} حرفاً — الحد 160) فيُقتطع في نتائج البحث' if ar
+                    else f'Description too long ({ln} chars — max 160), truncated')
     q = r.get('جودة الوصف')
     if q == 'q_duplicate':
         n = (dup_counts or {}).get(str(r.get('وصف الميتا') or '').strip(), 0)
