@@ -42,9 +42,9 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap');
 html, body, [class*="css"] { font-family:'Tajawal','Segoe UI',Tahoma,sans-serif; }
-[data-testid="stMainBlockContainer"], .main .block-container { direction:rtl; text-align:right; padding-top:1.2rem; max-width:1500px; }
+[data-testid="stMainBlockContainer"], .main .block-container { direction:rtl; text-align:right; padding-top:3.5rem; max-width:1500px; }
 [data-testid="stMarkdownContainer"], [data-testid="stWidgetLabel"] { direction:rtl; text-align:right; }
-input, textarea { direction:rtl; text-align:right; }
+input, textarea { direction:ltr; text-align:left; }
 h1,h2,h3,h4,h5,p,span,div,label { text-align:right; }
 section[data-testid="stSidebar"] { direction:rtl; text-align:right; background:#0f172a; }
 section[data-testid="stSidebar"] * { color:#e2e8f0 !important; }
@@ -110,7 +110,7 @@ def logo_data_uri():
 
 def render_brandbar():
     logo = logo_data_uri()
-    img = f'<img src="{logo}" style="height:40px">' if logo else ''
+    img = f'<img src="{logo}" style="height:52px">' if logo else ''
     st.markdown(
         f'<div class="brandbar">'
         f'<div><div class="name">أنس راشد</div>'
@@ -891,6 +891,13 @@ if nav == "🔍 فحص متجر جديد":
             elif selfcheck and selfcheck['verdict'] == 'review':
                 st.warning("توجد تنبيهات على موثوقية النتائج. راجع تبويب «فحص الثقة» "
                            "قبل إرسال التقرير لعميل.")
+            n_missing = int(summary.get('unreachable_pages', 0) or 0) + \
+                int(summary.get('suspicious_home', 0) or 0)
+            if n_missing and gate_ok is True and not (selfcheck and selfcheck['verdict'] == 'blocked'):
+                st.error(f"⚠️ الفحص لم يكتمل: {n_missing} صفحة لم تُفحص فعلاً. التقرير وعرض السعر "
+                         "سيعرضان أرقاماً أقل من الحقيقة. اضغط «أكمل الفحص» أعلى الصفحة قبل الإرسال.")
+                gate_ok = st.checkbox("أفهم أن الفحص ناقص وأريد التحميل رغم ذلك", value=False,
+                                      key=f"incomplete_ok_{lang}")
 
             st.markdown("---")
             st.markdown("##### 💰 عرض السعر")
@@ -940,12 +947,15 @@ if nav == "🔍 فحص متجر جديد":
             except Exception as e:
                 inv_bytes = None
                 st.error(f"تعذّر توليد الفاتورة: {e}")
-            if inv_bytes:
+            if inv_bytes and gate_ok:
                 st.download_button(
                     "🧾 تحميل عرض السعر (PDF)" if lang == 'ar'
                     else "🧾 Download quotation (PDF)",
                     inv_bytes, f"Quote_{netloc}_{lang}.pdf", "application/pdf",
                     use_container_width=True)
+            elif inv_bytes:
+                st.button("🧾 تحميل عرض السعر (PDF)", disabled=True, use_container_width=True,
+                          help="مُعطّل لأن الفحص ناقص. أكمل الفحص أو أكّد أعلاه.")
             st.markdown("---")
 
             d1, d2 = st.columns(2)
