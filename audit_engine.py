@@ -512,6 +512,24 @@ def test_connection(url, timeout=15):
     return rows
 
 
+# التبديل التلقائي للوضع الهادئ: متاجر سلة مثلاً تقيّد الطلبات المتتالية،
+# فبمجرد أن يرفض المتجر 3 طلبات أو يحوّل 5 صفحات للرئيسية، يهدأ الفحص وحده.
+_AUTO = {'rejects': 0, 'home': 0, 'switched': False}
+AUTO_REJECTS, AUTO_HOME = 3, 5
+
+
+def auto_reset():
+    _AUTO.update({'rejects': 0, 'home': 0, 'switched': False})
+
+
+def _auto_calm(kind):
+    _AUTO[kind] += 1
+    limit = AUTO_REJECTS if kind == 'rejects' else AUTO_HOME
+    if not _CONN.get('gentle') and _AUTO[kind] >= limit:
+        _CONN['gentle'] = True
+        _AUTO['switched'] = True
+
+
 _THROTTLE = {'fails': 0, 'delay': 0.0, 'streak': 0}
 _THROTTLE_LOCK = threading.Lock()
 MAX_DELAY = 2.0          # أقصى تمهّل بين الطلبات (ثانية)
@@ -606,6 +624,8 @@ def safe_get(url, timeout=14, retries=2, headers=None):
             continue
         if res.status_code == 429 or res.status_code >= 500 or is_challenge(res):
             note_failure()
+            if res.status_code == 429 or is_challenge(res):
+                _auto_calm('rejects')
             last = res
             if attempt < retries:
                 ra = str(res.headers.get('Retry-After', '')).strip()
@@ -998,12 +1018,17 @@ def mark_wrong_product_alts(images_df, df, brand=''):
     name_toks = {u: distinct(n) for u, n in names.items()}
     out = images_df.copy()
     st_col = 'حالة النص البديل'
-    # صورة تظهر في أكثر من صفحة = صورة «منتجات مشابهة» أو قسم عرض: تحمل اسم منتجها هي، وهذا صحيح
+    # أي الصور صور المنتج نفسه؟ أولاً من بطاقة البيانات المنظمة (مستقلة عن القالب)،
+    # وإن غابت البطاقة: الصورة المتكررة في أكثر من صفحة ليست منه («منتجات مشابهة» أو قسم عرض)
     pages_per_img = out.groupby('رابط الصورة')['رابط الصفحة'].nunique()
+    has_own = '_own' in out.columns
     for idx, r in out.iterrows():
         if r.get('نوع الصفحة') != T_PRODUCT or r[st_col] not in ('alt_ok', 'alt_duplicate'):
             continue
-        if pages_per_img.get(r['رابط الصورة'], 1) > 1:
+        own = r.get('_own') if has_own else None
+        if own is False:
+            continue
+        if own is None and pages_per_img.get(r['رابط الصورة'], 1) > 1:
             continue
         own = name_toks.get(r['رابط الصفحة'])
         alt_t = distinct(r['النص البديل الحالي (Alt)'])
@@ -1417,6 +1442,16 @@ def iter_jsonld(soup):
 def node_types(node):
     t = node.get('@type')
     return {str(x) for x in (t if isinstance(t, list) else [t]) if x}
+
+
+def image_stem(u):
+    """اسم ملف الصورة بلا امتداد ولا لاحقة المقاس، لمطابقة نفس الصورة بأحجامها المختلفة."""
+    p = urlparse(clean_image_url(str(u or ''))).path.lower()
+    base = p.rsplit('/', 1)[-1]
+    base = re.sub(r'\.(jpe?g|png|webp|avif|gif|bmp)$', '', base)
+    base = re.sub(r'([-_@](\d{2,4}x\d{2,4}|\d{2,4}w|thumb(nail)?|small|medium|large|original|sm|md|lg|2x))+$',
+                  '', base)
+    return base
 
 
 def extract_product_facts(soup):
@@ -1932,6 +1967,7 @@ def _fetch_and_audit(url, base_url, source):
                 canon_now = clean_url(urljoin(final_url, lk['href']))
                 break
         if url_key(final_url) == home_key or (canon_now and url_key(canon_now) == home_key):
+            _auto_calm('home')
             return broken_page_row(req, DELETED_HOME, source, base_url, final_url,
                                    chain or 'canonical → الرئيسية')
 
@@ -1997,6 +2033,10 @@ def _fetch_and_audit(url, base_url, source):
 
     jd = extract_product_facts(soup) if page_type == T_PRODUCT else \
         {'name': '', 'images': [], 'sku': '', 'offers': False}
+    # المنصة (لا القالب) تكتب قائمة صور المنتج في بطاقة بياناته المنظمة: نعرف منها صور المنتج نفسه
+    own_stems = {image_stem(u) for u in jd['images']} if jd['images'] else set()
+    for im in page_images:
+        im['_own'] = (image_stem(im['رابط الصورة']) in own_stems) if own_stems else None
 
     prod_links = set()
     if page_type in (T_CATEGORY, T_HOME):
@@ -3623,9 +3663,12 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
     else:
         add(CHECK_PASS, "حجم الزحف", f"{n_ok} صفحة مفحوصة بنجاح.")
 
-    unreach = summary.get('unreachable_pages', 0)
+    susp = int(summary.get('suspicious_home', 0) or 0)
+    unreach = summary.get('unreachable_pages', 0) + susp
     total_try = n_ok + unreach
     reasons = unreachable_reasons(df)
+    if susp:
+        reasons['بسبب تحويل المتجر لها للرئيسية (تقييد)'] = susp
     why = '، '.join(f"{n} {r}" for r, n in reasons.items())
     fix_hint = ("اضغط «أكمل الفحص» لإعادة فحص الصفحات الفاشلة فقط. وإن كان المتجر يرفض "
                 "كثرة الطلبات، فعّل «الوضع الهادئ» أو «متصفح حقيقي» قبل ذلك.")
@@ -3649,6 +3692,9 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
         add(CHECK_WARN, "إعادة المحاولة",
             "أوقفت الأداة إعادة المحاولة مبكراً لأن المتجر رفض أغلب عيّنة الاختبار، "
             "حتى لا تنتظر بلا فائدة.", fix_hint)
+    if crawl_meta and crawl_meta.get('auto_gentle'):
+        add(CHECK_PASS, "الوضع الهادئ التلقائي",
+            "بدأ المتجر يقيّد الطلبات، ففعّلت الأداة الوضع الهادئ تلقائياً لبقية الفحص.")
     if crawl_meta and crawl_meta.get('cache_hits'):
         add(CHECK_PASS, "استكمال الفحص",
             f"{crawl_meta['cache_hits']} صفحة أُخذت من الفحص السابق دون طلبها من المتجر مرة أخرى.")
@@ -3945,6 +3991,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
 
     target = normalize_url(target)
     reset_throttle()
+    auto_reset()
     _PACE.update({'base': PACE_MIN, 'streak': 0})
     if is_gentle():
         workers = 1
@@ -4153,6 +4200,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     crawl_meta['home_suspicious'] = bool(n_home >= 10 and n_home > 0.15 * max(len(sitemap_keys), 1))
     summary['suspicious_home'] = n_home if crawl_meta['home_suspicious'] else 0
     crawl_meta['connection'] = CONN_LABEL[connection_mode()]
+    crawl_meta['auto_gentle'] = _AUTO['switched']
     crawl_meta['cache_hits'] = _CACHE['hits']
     crawl_meta['cache_enabled'] = bool(use_cache)
     selfcheck = run_self_checks(df, images_df, coverage, platform, summary, crawl_meta, structured)
