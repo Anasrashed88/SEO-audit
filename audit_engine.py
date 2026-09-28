@@ -689,19 +689,28 @@ LANG_CODES = {'ar', 'en', 'fr', 'ur', 'tr', 'es', 'de', 'it', 'id', 'fa', 'hi', 
 PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product|brand)-?(\d{4,})$', re.I)
 
 
+def is_lang_segment(seg):
+    """بادئة لغة: قصيرة (ar، en) أو باللغة والدولة (ar-sa، en-ae، ar_SA) كما تستخدمها زد."""
+    s = str(seg or '').lower().replace('_', '-')
+    if s in LANG_CODES:
+        return True
+    m = re.fullmatch(r'([a-z]{2})-([a-z]{2})', s)
+    return bool(m and m.group(1) in LANG_CODES)
+
+
 def url_segments(url):
     """مقاطع المسار بعد فك الترميز وحذف بادئة اللغة."""
     path = unquote(urlparse(clean_url(url)).path).strip('/')
     segs = [s for s in path.split('/') if s]
-    if segs and segs[0].lower() in LANG_CODES:
+    if segs and is_lang_segment(segs[0]):
         segs = segs[1:]
     return segs
 
 
 def has_lang_prefix(url):
     path = unquote(urlparse(clean_url(url)).path).strip('/')
-    first = path.split('/')[0].lower() if path else ''
-    return first in LANG_CODES
+    first = path.split('/')[0] if path else ''
+    return is_lang_segment(first)
 
 
 @lru_cache(maxsize=200000)
