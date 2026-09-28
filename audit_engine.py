@@ -137,7 +137,7 @@ STATUS_LABEL = {
 }
 
 TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK = 60, 50, 30
-DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 150, 120, 70
+DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK = 160, 120, 70   # جوجل يعرض عادةً 155–160 حرفاً
 ALT_MAX = 125
 ALT_DUP_THRESHOLD = 3
 
@@ -998,8 +998,12 @@ def mark_wrong_product_alts(images_df, df, brand=''):
     name_toks = {u: distinct(n) for u, n in names.items()}
     out = images_df.copy()
     st_col = 'حالة النص البديل'
+    # صورة تظهر في أكثر من صفحة = صورة «منتجات مشابهة» أو قسم عرض: تحمل اسم منتجها هي، وهذا صحيح
+    pages_per_img = out.groupby('رابط الصورة')['رابط الصفحة'].nunique()
     for idx, r in out.iterrows():
         if r.get('نوع الصفحة') != T_PRODUCT or r[st_col] not in ('alt_ok', 'alt_duplicate'):
+            continue
+        if pages_per_img.get(r['رابط الصورة'], 1) > 1:
             continue
         own = name_toks.get(r['رابط الصفحة'])
         alt_t = distinct(r['النص البديل الحالي (Alt)'])
