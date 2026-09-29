@@ -1544,9 +1544,14 @@ SCROLL_MARKERS = ('salla-infinite-scroll', 'infinite-scroll', 'infinite_scroll',
                   'ajaxinate', 'infinitescroll', 'pagination__load')
 
 
+_JSON_U_RE = re.compile(r'\\u([0-9a-fA-F]{4})')
+
+
 def unescape_json_text(text):
-    """الروابط داخل JSON تُكتب https:\\/\\/... فلا يلتقطها البحث العادي."""
-    return (text or '').replace('\\/', '/').replace('\\u002F', '/').replace('\\u002f', '/')
+    """الروابط داخل JSON تُكتب https:\\/\\/... والحروف العربية تُكتب \\u0645\\u0628...
+    نفك الاثنين قبل البحث، وإلا توقف الرابط عند أول حرف عربي (/products/copy-of- بدل الرابط كاملاً)."""
+    t = (text or '').replace('\\/', '/')
+    return _JSON_U_RE.sub(lambda m: chr(int(m.group(1), 16)), t)
 
 
 def extract_all_links(soup, raw_html, current_url, base_netloc):
@@ -1589,10 +1594,17 @@ def extract_all_links(soup, raw_html, current_url, base_netloc):
 
     # 3. روابط المنتجات والتصنيفات المضمنة في السكربتات وردود JSON
     if raw_html:
+        embedded = set()
         for m in EMBEDDED_LINK_RE.findall(unescape_json_text(raw_html)):
             full = clean_url(urljoin(current_url, m.strip()))
             if is_crawlable(full, base_netloc):
-                links.add(full)
+                embedded.add(full)
+        # حماية إضافية: رابط مضمّن ينتهي بشرطة وهو بداية رابط آخر في الصفحة = رابط مقطوع لا حقيقي
+        known = links | embedded
+        for full in embedded:
+            if full.endswith('-') and any(o != full and o.startswith(full) for o in known):
+                continue
+            links.add(full)
 
     return links
 
