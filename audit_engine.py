@@ -1042,11 +1042,15 @@ def mark_wrong_product_alts(images_df, df, brand=''):
         alt_t = distinct(r['النص البديل الحالي (Alt)'])
         # دليل قوي فقط: من بطاقة المنتج نكتفي بكلمتين مميزتين وتطابق 60%،
         # وبدونها (قاعدة التكرار) نشترط 3 كلمات وتطابق 80% حتى لا نخطئ
-        min_toks, min_ratio = (2, 0.6) if own is True else (3, 0.8)
-        if own_toks is None or not own_toks or len(alt_t) < min_toks or (alt_t & own_toks):
+        # نحكم فقط إذا كان وصف الصورة هو اسم منتج آخر تقريباً بكامله (3 كلمات مميزة فأكثر):
+        # الوصف القصير («مفتاح علب»، «كوب قهوة مع غطاء») قد يكون اسماً آخر للمنتج نفسه
+        if own_toks is None or not own_toks or len(alt_t) < 3 or (alt_t & own_toks):
             continue
         for u, toks in name_toks.items():
-            if u != r['رابط الصفحة'] and toks and len(alt_t & toks) / len(alt_t) >= min_ratio:
+            if u == r['رابط الصفحة'] or len(toks) < 3:
+                continue
+            common = len(alt_t & toks)
+            if common / len(alt_t) >= 0.8 and common / len(toks) >= 0.7:
                 out.at[idx, st_col] = 'alt_wrong_product'
                 break
     return out
