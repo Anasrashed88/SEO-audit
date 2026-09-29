@@ -1049,8 +1049,8 @@ def mark_wrong_product_alts(images_df, df, brand=''):
         for u, toks in name_toks.items():
             if u == r['رابط الصفحة'] or len(toks) < 3:
                 continue
-            common = len(alt_t & toks)
-            if common / len(alt_t) >= 0.8 and common / len(toks) >= 0.7:
+            shared = len(alt_t & toks)
+            if shared / len(alt_t) >= 0.8 and shared / len(toks) >= 0.7:
                 out.at[idx, st_col] = 'alt_wrong_product'
                 break
     return out
