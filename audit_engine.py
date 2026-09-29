@@ -3402,10 +3402,30 @@ def where_label(key, referrers, ref_counts, total_pages):
     return ' | '.join(paths) + more
 
 
+# كلمات المسار العامة لا تدل على منتج بعينه
+PATH_STOP = {'products', 'product', 'categories', 'category', 'collections', 'collection', 'pages',
+             'page', 'blog', 'shop', 'store', 'items', 'item', 'ar', 'en', 'design'}
+# اللون والمقاس يميّزان نسخ المنتج الواحد، لا نوع المنتج: وزنهما أقل من كلمات النوع
+VARIANT_WORDS = {
+    'black', 'white', 'red', 'blue', 'green', 'gray', 'grey', 'pink', 'brown', 'navy', 'sky', 'light',
+    'dark', 'golden', 'gold', 'silver', 'bronze', 'camel', 'chestnut', 'violet', 'purple', 'orange',
+    'yellow', 'beige', 'cream', 'rose', 'clear', 'transparent', 'nude', 'maroon', 'olive', 'mint', 'lilac',
+    'ml', 'l', 'cm', 'mm', 'g', 'kg', 'pcs', 'pc', 'oz', 'xs', 's', 'm', 'xl', 'xxl', 'small', 'medium', 'large',
+    'اسود', 'ابيض', 'احمر', 'ازرق', 'اخضر', 'رمادي', 'وردي', 'زهري', 'بني', 'كحلي', 'سماوي', 'فاتح',
+    'غامق', 'ذهبي', 'فضي', 'برونزي', 'بنفسجي', 'برتقالي', 'اصفر', 'بيج', 'كريمي', 'شفاف', 'عنابي', 'نحاسي',
+    'سوداء', 'بيضاء', 'حمراء', 'زرقاء', 'خضراء', 'صفراء', 'مل', 'سم', 'جم', 'غرام', 'كجم', 'لتر', 'حبه',
+    'صغير', 'وسط', 'كبير', 'مقاس', 'لون',
+}
+
+
 def _page_tokens(url, name='', title=''):
     toks = set(t for t in slug_tokens(slug_of(url)) if not t.isdigit())
     toks |= set(t for t in slug_tokens(name) if not t.isdigit())
-    return toks
+    return toks - PATH_STOP
+
+
+def _variant_norm():
+    return {normalize_ar_token(w) if re.search(r'[\u0600-\u06FF]', w) else w for w in VARIANT_WORDS}
 
 
 try:
@@ -3446,21 +3466,50 @@ def suggest_alternatives(df):
     type_pref = {T_PRODUCT: (T_PRODUCT, T_CATEGORY), T_CATEGORY: (T_CATEGORY, T_PRODUCT),
                  T_BLOG: (T_BLOG,), T_INFO: (T_INFO,)}
 
+    # رقم القسم يبقى ثابتاً حتى لو كُتب الرابط خطأً (/products/c3323): نبحث عن القسم الحي بنفس الرقم
+    cat_by_id = {}
+    for url, ctype, _ in cands:
+        if ctype != T_CATEGORY:
+            continue
+        segs = [x.lower() for x in url_segments(url)]
+        for i, sg in enumerate(segs):
+            m = re.fullmatch(r'c-?(\d{3,})', sg)
+            if m:
+                cat_by_id.setdefault(m.group(1), url)
+            if sg in ('categories', 'category') and i + 1 < len(segs) and segs[i + 1].isdigit():
+                cat_by_id.setdefault(segs[i + 1], url)
+
     for idx, r in df[broken_no_redirect_mask(df)].iterrows():
+        bsegs = [x.lower() for x in url_segments(str(r['الرابط']))]
+        cid = None
+        for i, sg in enumerate(bsegs):
+            m = re.fullmatch(r'c-?(\d{3,})', sg)
+            if m:
+                cid = m.group(1)
+            elif sg in ('categories', 'category') and i + 1 < len(bsegs) and bsegs[i + 1].isdigit():
+                cid = bsegs[i + 1]
+        if cid and cid in cat_by_id:
+            out[idx] = (cat_by_id[cid], CONF_HIGH)
+            continue
         btype = r.get('نوع الرابط') or _detect_type_by_url(clean_url(str(r['الرابط'])), '')
         want = (_page_tokens(r['الرابط']) - common)
         if not want:
             continue
         allowed = type_pref.get(btype, (T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO))
         best = None
+        vnorm = _variant_norm()
+        core_want = want - vnorm
+        base = core_want or want
         for url, ctype, toks in cands:
             if ctype not in allowed:
                 continue
-            hit = len(want & (toks - common))
+            ct = toks - common
+            hit = len(base & ct)
             if not hit:
                 continue
-            score = hit / len(want)
-            rank = (score, hit, -allowed.index(ctype))
+            score = hit / len(base)
+            variant_hit = len((want & vnorm) & ct)
+            rank = (score, hit, variant_hit, -allowed.index(ctype))
             if best is None or rank > best[0]:
                 best = (rank, url, hit, score, ctype)
         if not best and HAS_FUZZ:
