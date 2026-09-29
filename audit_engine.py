@@ -1046,11 +1046,17 @@ def mark_wrong_product_alts(images_df, df, brand=''):
         # الوصف القصير («مفتاح علب»، «كوب قهوة مع غطاء») قد يكون اسماً آخر للمنتج نفسه
         if own_toks is None or not own_toks or len(alt_t) < 3 or (alt_t & own_toks):
             continue
+        own_name = names.get(r['رابط الصفحة'], '')
+        if bool(AR_RE.search(own_name)) != bool(AR_RE.search(str(r['النص البديل الحالي (Alt)']))):
+            continue    # اسم المنتج بلغة ووصف الصورة بلغة أخرى: لا يمكن المقارنة بثقة
         for u, toks in name_toks.items():
             if u == r['رابط الصفحة'] or len(toks) < 3:
                 continue
             shared = len(alt_t & toks)
             if shared / len(alt_t) >= 0.8 and shared / len(toks) >= 0.7:
+                # المنتج الآخر نسخة من نفس المنتج بلون أو مقاس آخر؟ صور الألوان في المعرض طبيعية
+                if len(own_toks & toks) / max(min(len(own_toks), len(toks)), 1) >= 0.5:
+                    break
                 out.at[idx, st_col] = 'alt_wrong_product'
                 break
     return out
@@ -1457,6 +1463,9 @@ def iter_jsonld(soup):
 def node_types(node):
     t = node.get('@type')
     return {str(x) for x in (t if isinstance(t, list) else [t]) if x}
+
+
+AR_RE = re.compile(r'[\u0600-\u06FF]')
 
 
 def image_stem(u):
@@ -2957,6 +2966,82 @@ def _shared_count(series):
     return int(vals.isin(counts[counts >= 2].index).sum())
 
 
+def regrade_lengths(df):
+    """الحكم على طول العنوان والوصف يُعاد من الأرقام المحفوظة بمعايير الإصدار الحالي،
+    فلا تبقى صفحة محفوظة بحكم قديم إذا تغيّر الحد (مثل رفع حد الوصف إلى 160).
+    العنوان المكوّن من رموز يبقى «مفقوداً» كما حُكم عليه عند الفحص."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    avail = df['متاحة'].fillna(False).astype(bool) if 'متاحة' in df.columns else pd.Series(True, index=df.index)
+    for len_col, st_col, lo, opt, hi in (('طول العنوان', 'حالة العنوان', TITLE_MIN_OK, TITLE_MIN_OPTIMAL, TITLE_MAX),
+                                        ('طول الوصف', 'حالة الوصف', DESC_MIN_OK, DESC_MIN_OPTIMAL, DESC_MAX)):
+        if len_col not in df.columns or st_col not in df.columns:
+            continue
+        for idx in df[avail].index:
+            if df.at[idx, st_col] == 'missing':
+                continue
+            try:
+                n = int(float(df.at[idx, len_col] or 0))
+            except (TypeError, ValueError):
+                continue
+            df.at[idx, st_col] = grade_length(n, lo, opt, hi)
+    return df
+
+
+def decisive_type(url):
+    """نوع الصفحة من نمط رابط قاطع لا يحتمل التخمين (p123، c123، brand-123، page-123، a-123،
+    /products/، /categories/، /blog/). يعيد نصاً فارغاً إن لم يكن النمط قاطعاً."""
+    segs = [x.lower() for x in url_segments(str(url))]
+    if not segs:
+        return ''
+    last, first = segs[-1], segs[0]
+    if PRODUCT_ID_RE.match(last):
+        return T_PRODUCT
+    if BRAND_ID_RE.match(last) or CATEGORY_ID_RE.match(last):
+        return T_CATEGORY
+    if INFO_ID_RE.match(last):
+        return T_INFO
+    if ARTICLE_ID_RE.match(last) or (first in BLOG_SEGMENTS and len(segs) >= 2
+                                     and not any(x in ('tag', 'tags', 'category', 'categories', 'author')
+                                                 for x in segs[1:-1] + [segs[1]])):
+        return T_BLOG if len(segs) >= 2 else ''
+    if first in ('products', 'product') and len(segs) >= 2:
+        return T_PRODUCT
+    if first in ('categories', 'category', 'collections') and len(segs) >= 2:
+        return T_CATEGORY
+    if first == 'pages' and len(segs) >= 2:
+        return T_INFO
+    return ''
+
+
+def regrade_saved(df, base_url=''):
+    """كل حكم يُتخذ لحظة فحص الصفحة ويُحفظ معها يُعاد هنا بمعايير الإصدار الحالي،
+    حتى لا تبقى صفحة محفوظة بحكم قديم إذا تحسّنت قواعد الأداة:
+    - نوع الصفحة، حين يكون نمط الرابط قاطعاً (مثل صفحات الماركات brand-123).
+    - ضعف المحتوى، من عدد الكلمات المحفوظ."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    avail = df['متاحة'].fillna(False).astype(bool)
+    for idx in df[avail].index:
+        cur = df.at[idx, 'نوع الصفحة']
+        if cur in (T_HOME, T_BROKEN):
+            continue
+        t = decisive_type(df.at[idx, 'الرابط'])
+        if t and t != cur:
+            df.at[idx, 'نوع الصفحة'] = t
+    if 'عدد الكلمات' in df.columns and 'حالة المحتوى' in df.columns:
+        for idx in df[avail].index:
+            if df.at[idx, 'حالة المحتوى'] in ('good', 'thin'):
+                try:
+                    w = int(float(df.at[idx, 'عدد الكلمات'] or 0))
+                except (TypeError, ValueError):
+                    continue
+                df.at[idx, 'حالة المحتوى'] = 'good' if w >= 40 else 'thin'
+    return df
+
+
 def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     codes = _code_series(df)
@@ -4175,10 +4260,13 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     # تقرير التحويلات و404 يُبنى قبل إزالة التكرار حتى لا تضيع الروابط القديمة
     redirects = build_redirect_report(pages)
 
-    df = dedupe_pages(pd.DataFrame(pages))
+    df = regrade_saved(regrade_lengths(dedupe_pages(pd.DataFrame(pages))), target)
     images_df = pd.DataFrame(imgs)
     if not images_df.empty:
         images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])].copy().reset_index(drop=True)
+        # الحكم على وصف الصورة يُعاد من النص نفسه بمعايير الإصدار الحالي (حتى للصفحات المحفوظة)
+        images_df['حالة النص البديل'] = images_df['النص البديل الحالي (Alt)'].fillna('').astype(str) \
+            .map(lambda a: grade_alt(a)[0])
         images_df, n_template = drop_template_images(images_df, df)
         crawl_meta['template_images'] = n_template
         images_df = apply_duplicate_alt(images_df)
