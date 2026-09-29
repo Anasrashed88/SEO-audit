@@ -757,6 +757,9 @@ def prefer_url(a, b):
 
 
 def make_soup(markup):
+    # حماية أخيرة: أي نصف رمز يتيم في النص يُسقط محلل الصفحات، فنزيله قبل التحليل
+    if isinstance(markup, str):
+        markup = _SURROGATE_RE.sub('', markup)
     return BeautifulSoup(markup, PARSER)
 
 
@@ -1545,13 +1548,26 @@ SCROLL_MARKERS = ('salla-infinite-scroll', 'infinite-scroll', 'infinite_scroll',
 
 
 _JSON_U_RE = re.compile(r'\\u([0-9a-fA-F]{4})')
+_JSON_PAIR_RE = re.compile(r'\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})', re.I)
+_SURROGATE_RE = re.compile('[\ud800-\udfff]')
+
+
+def _decode_u(m):
+    code = int(m.group(1), 16)
+    return '' if 0xD800 <= code <= 0xDFFF else chr(code)     # نصف رمز يتيم: يُحذف
+
+
+def _decode_pair(m):
+    hi, lo = int(m.group(1), 16), int(m.group(2), 16)
+    return chr(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))    # رمز تعبيري كامل 🔥
 
 
 def unescape_json_text(text):
     """الروابط داخل JSON تُكتب https:\\/\\/... والحروف العربية تُكتب \\u0645\\u0628...
     نفك الاثنين قبل البحث، وإلا توقف الرابط عند أول حرف عربي (/products/copy-of- بدل الرابط كاملاً)."""
     t = (text or '').replace('\\/', '/')
-    return _JSON_U_RE.sub(lambda m: chr(int(m.group(1), 16)), t)
+    t = _JSON_PAIR_RE.sub(_decode_pair, t)      # الرموز التعبيرية تُكتب بنصفين: نجمعهما أولاً
+    return _SURROGATE_RE.sub('', _JSON_U_RE.sub(_decode_u, t))
 
 
 def extract_all_links(soup, raw_html, current_url, base_netloc):
