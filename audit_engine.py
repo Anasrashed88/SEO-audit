@@ -1016,6 +1016,12 @@ def mark_wrong_product_alts(images_df, df, brand=''):
         return {t for t in slug_tokens(text) if not t.isdigit() and t not in common}
 
     name_toks = {u: distinct(n) for u, n in names.items()}
+    # الأطقم والمجموعات تعرض صور مكوّناتها بأسمائها (طقم قهوة فيه غلاية وسيرفر): وصف صحيح
+    SET_WORDS = {'طقم', 'اطقم', 'مجموعه', 'مجموعة', 'بكج', 'باكج', 'بوكس', 'هديه', 'هدية', 'هدايا',
+                 'تشكيله', 'تشكيلة', 'set', 'bundle', 'kit', 'gift', 'pack', 'combo', 'collection'}
+    set_norm = {normalize_ar_token(w) for w in SET_WORDS} | SET_WORDS
+    is_set = {u: bool(set(slug_tokens(n)) & set_norm) or bool(set(slug_tokens(u)) & set_norm)
+              for u, n in names.items()}
     out = images_df.copy()
     st_col = 'حالة النص البديل'
     # أي الصور صور المنتج نفسه؟ أولاً من بطاقة البيانات المنظمة (مستقلة عن القالب)،
@@ -1030,12 +1036,17 @@ def mark_wrong_product_alts(images_df, df, brand=''):
             continue
         if own is None and pages_per_img.get(r['رابط الصورة'], 1) > 1:
             continue
-        own = name_toks.get(r['رابط الصفحة'])
+        if is_set.get(r['رابط الصفحة']):
+            continue
+        own_toks = name_toks.get(r['رابط الصفحة'])
         alt_t = distinct(r['النص البديل الحالي (Alt)'])
-        if own is None or not own or len(alt_t) < 2 or (alt_t & own):
+        # دليل قوي فقط: من بطاقة المنتج نكتفي بكلمتين مميزتين وتطابق 60%،
+        # وبدونها (قاعدة التكرار) نشترط 3 كلمات وتطابق 80% حتى لا نخطئ
+        min_toks, min_ratio = (2, 0.6) if own is True else (3, 0.8)
+        if own_toks is None or not own_toks or len(alt_t) < min_toks or (alt_t & own_toks):
             continue
         for u, toks in name_toks.items():
-            if u != r['رابط الصفحة'] and toks and len(alt_t & toks) / len(alt_t) >= 0.6:
+            if u != r['رابط الصفحة'] and toks and len(alt_t & toks) / len(alt_t) >= min_ratio:
                 out.at[idx, st_col] = 'alt_wrong_product'
                 break
     return out
