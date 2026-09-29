@@ -337,7 +337,7 @@ def build_diagnosis(score, stats, lang):
         if stats.get('broken_actionable'):
             add('روابط لا تعمل تحتاج معالجة', stats['broken_actionable'],
                 'تحويلها إلى أقرب صفحة بديلة وتصحيح الروابط الداخلية التي تقود إليها.'
-                if stats.get('platform') == 'zid' else
+                if stats.get('redirect_qty') else
                 'تصحيح الروابط الداخلية التي تقود الزائر إلى صفحة غير موجودة.')
         if stats.get('archive_pages', 0) > 20:
             add('صفحات أرشيف (وسوم وقوائم)', stats['archive_pages'],
