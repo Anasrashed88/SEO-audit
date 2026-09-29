@@ -1507,14 +1507,29 @@ def extract_product_facts(soup):
 
 COUNT_PATTERNS = [
     r'عدد\s*المنتجات\s*[:：]?\s*([\d,]+)',
-    r'([\d,]+)\s*منتج(?:اً|ا)?\b',
+    r'([\d,]+)\s*منتج(?:اً|ا|ات)?(?![\u0600-\u06FF])',
     r'من\s*أصل\s*([\d,]+)',
     r'\b([\d,]+)\s*products?\b',
     r'showing\s*\d+\s*(?:-|to)\s*\d+\s*of\s*([\d,]+)',
 ]
 
 
+# صيغة صريحة لا تحتمل اللبس: «إجمالي 412 منتجاً» / «Total 412 products» — تُقرأ من الصفحة كلها
+STRONG_COUNT_RE = re.compile(
+    r'(?:إجمالي|اجمالي|المجموع|مجموع)\s*[:：]?\s*([\d,٠-٩]+)\s*(?:منتج|منتجات|منتجاً|منتجا|سلعة|سلع)'
+    r'|\btotal\s*[:：]?\s*([\d,]+)\s*(?:products?|items?)\b', re.I)
+
+
 def extract_declared_count(soup, text=None):
+    full = text if text is not None else soup.get_text(' ', strip=True)
+    for mo in STRONG_COUNT_RE.finditer(full or ''):
+        raw = (mo.group(1) or mo.group(2) or '').translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        try:
+            v = int(raw.replace(',', ''))
+        except ValueError:
+            continue
+        if 0 < v < 100000:
+            return v
     for node in iter_jsonld(soup):
         if node_types(node) & {'ItemList', 'CollectionPage'}:
             n = node.get('numberOfItems')
@@ -3070,6 +3085,53 @@ def regrade_saved(df, base_url=''):
     return df
 
 
+def reconcile_counts(df, sitemap_urls, base_url):
+    """تتحقق الأداة من أرقامها بنفسها، دون عدّ يدوي:
+    - الخريطة: كم منتجاً وقسماً ومقالاً تعلنه، مقابل ما فُحص، مع تفسير كل فرق.
+    - إعلان المتجر: «إجمالي N منتج» في صفحة كل المنتجات، مقابل عدد المنتجات المفحوصة."""
+    out = {'types': {}, 'store_total': None}
+    if df is None or df.empty:
+        return out
+    live = df[df['متاحة'] == True]  # noqa: E712
+    live_keys = {}
+    for _, r in live.iterrows():
+        t = r['نوع الصفحة']
+        if t == T_CATEGORY and listing_kind(r['الرابط']) != 'category':
+            t = 'listing'
+        live_keys[url_key(r['الرابط'])] = t
+    in_map = set()
+    map_by_type = {}
+    for u in sitemap_urls or []:
+        t = decisive_type(u) or _detect_type_by_url(clean_url(u), base_url)
+        if t == T_CATEGORY and listing_kind(u) != 'category':
+            t = 'listing'          # صفحة «كل المنتجات» والماركات ليست أقساماً
+        k = url_key(u)
+        in_map.add(k)
+        map_by_type.setdefault(t, set()).add(k)
+    for t in (T_PRODUCT, T_CATEGORY, T_BLOG):
+        found = {k for k, tt in live_keys.items() if tt == t}
+        declared = map_by_type.get(t, set())
+        out['types'][t] = {
+            'found': len(found),
+            'in_map': len(declared),
+            'outside_map': len(found - in_map),          # وجدتها الأداة من روابط المتجر، وليست في الخريطة
+            'map_not_live': len(declared - set(live_keys)),  # في الخريطة ولا تعمل
+        }
+    # الرقم الرسمي من صفحة «كل المنتجات»
+    best = None
+    for _, r in live.iterrows():
+        segs = [x.lower() for x in url_segments(r['الرابط'])]
+        if '/'.join(segs) in CATALOG_ROOTS or segs in (['products'], ['shop'], ['collections', 'all']):
+            try:
+                v = int(float(r.get('عدد معلن') or 0))
+            except (TypeError, ValueError):
+                v = 0
+            if v:
+                best = max(best or 0, v)
+    out['store_total'] = best
+    return out
+
+
 def compute_summary(df, coverage=None, images_df=None, redirects=None, platform=None):
     ok = df[df['متاحة'] == True]  # noqa: E712
     codes = _code_series(df)
@@ -3869,6 +3931,36 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
         add(CHECK_WARN, "إعادة المحاولة",
             "أوقفت الأداة إعادة المحاولة مبكراً لأن المتجر رفض أغلب عيّنة الاختبار، "
             "حتى لا تنتظر بلا فائدة.", fix_hint)
+    rc = (crawl_meta or {}).get('recon') or {}
+    if rc.get('types'):
+        names = {T_PRODUCT: 'المنتجات', T_CATEGORY: 'الأقسام', T_BLOG: 'المقالات'}
+        parts, warn = [], False
+        for t, lbl in names.items():
+            v = rc['types'].get(t) or {}
+            if not (v.get('found') or v.get('in_map')):
+                continue
+            line = f"{lbl}: فُحص {v['found']} — في الخريطة {v['in_map']}"
+            why = []
+            if v.get('outside_map'):
+                why.append(f"{v['outside_map']} وجدتها الأداة من روابط المتجر خارج الخريطة")
+            if v.get('map_not_live'):
+                why.append(f"{v['map_not_live']} في الخريطة لا تعمل")
+            if why:
+                line += ' (' + '، '.join(why) + ')'
+            parts.append(line)
+        total = rc.get('store_total')
+        n_prod = (rc['types'].get(T_PRODUCT) or {}).get('found', 0)
+        if total:
+            gap = total - n_prod
+            if abs(gap) <= max(1, round(total * 0.01)):
+                parts.append(f"المتجر يعلن {total} منتجاً، والأداة فحصت {n_prod} ✓")
+            else:
+                warn = gap > 0
+                parts.append(f"المتجر يعلن {total} منتجاً، والأداة فحصت {n_prod} "
+                             f"({'أقل بـ ' + str(gap) if gap > 0 else 'أكثر بـ ' + str(-gap)})")
+        add(CHECK_WARN if warn else CHECK_PASS, "مطابقة الأرقام", ' | '.join(parts),
+            "المتجر يعلن منتجات أكثر مما وجدته الأداة. أكمل الفحص، أو أرسل الملفات للمراجعة." if warn else '')
+
     if crawl_meta and crawl_meta.get('auto_gentle'):
         add(CHECK_PASS, "الوضع الهادئ التلقائي",
             "بدأ المتجر يقيّد الطلبات، ففعّلت الأداة الوضع الهادئ تلقائياً لبقية الفحص.")
@@ -4381,6 +4473,8 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     summary['suspicious_home'] = n_home if crawl_meta['home_suspicious'] else 0
     crawl_meta['connection'] = CONN_LABEL[connection_mode()]
     crawl_meta['auto_gentle'] = _AUTO['switched']
+    col_ = crawl_meta.get('collector')
+    crawl_meta['recon'] = reconcile_counts(df, col_.urls() if col_ is not None else [], target)
     crawl_meta['cache_hits'] = _CACHE['hits']
     crawl_meta['cache_enabled'] = bool(use_cache)
     selfcheck = run_self_checks(df, images_df, coverage, platform, summary, crawl_meta, structured)
