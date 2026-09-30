@@ -1339,9 +1339,24 @@ def clean_image_url(url):
     return u.split('#')[0]
 
 
+# كل مرشّح في srcset: رابط ثم وصف اختياري (620w أو 2x)، والفاصل بينها «فاصلة ثم مسافة».
+# روابط التحجيم (Cloudflare في زد وغيرها) تحتوي فواصل بلا مسافة: /cdn-cgi/image/w=620,q=85/x.jpg
+# فلا نقطع عند كل فاصلة، وإلا خرج رابط مقطوع مثل .../cdn-cgi/image/w=620
+_SRCSET_RE = re.compile(r'(\S+?)(?=\s+[\d.]+[wx](?:\s*,|\s*$)|\s*,\s+|\s*$)')
+
+
+def first_srcset_url(srcset):
+    for m in _SRCSET_RE.finditer((srcset or '').strip()):
+        u = m.group(1).strip().rstrip(',')
+        if u and not re.fullmatch(r'[\d.]+[wx],?', u):
+            return u
+    return ''
+
+
 def get_image_src(img):
-    for attr in ['data-src', 'data-original', 'data-lazy', 'data-lazy-src',
-                 'data-image', 'data-large_image', 'data-zoom-image',
+    for attr in ['data-src', 'data-original', 'data-lazy', 'data-lazy-src', 'data-lazyload',
+                 'data-image', 'data-large_image', 'data-zoom-image', 'data-zoom', 'data-full',
+                 'data-hi-res', 'data-img', 'data-echo', 'data-url', 'lazy-src', 'data-ll-src',
                  'data-src-webp', 's-image']:
         val = img.get(attr)
         if val and val.strip() and not val.strip().startswith('data:'):
@@ -1351,17 +1366,25 @@ def get_image_src(img):
         for source in parent.find_all('source'):
             srcset = source.get('srcset') or source.get('data-srcset')
             if srcset and not srcset.strip().startswith('data:'):
-                first = srcset.split(',')[0].strip().split(' ')[0]
+                first = first_srcset_url(srcset)
                 if first:
                     return first
-    for attr in ['data-srcset', 'srcset']:
+    for attr in ['data-srcset', 'data-lazy-srcset', 'srcset']:
         val = img.get(attr)
         if val and val.strip() and not val.strip().startswith('data:'):
-            first = val.split(',')[0].strip().split(' ')[0]
+            first = first_srcset_url(val)
             if first:
                 return first
     src = img.get('src')
-    return src.strip() if src and not src.strip().startswith('data:') else ''
+    if src and not src.strip().startswith('data:'):
+        return src.strip()
+    # بعض القوالب تضع الصورة الحقيقية داخل <noscript> فقط
+    nxt = img.find_next_sibling('noscript')
+    if nxt is not None:
+        m = re.search(r'<img[^>]+src=["\']([^"\']+)', nxt.decode_contents() if hasattr(nxt, 'decode_contents') else str(nxt))
+        if m and not m.group(1).startswith('data:'):
+            return m.group(1)
+    return ''
 
 
 def is_relevant_seo_image(img, src):
@@ -3861,6 +3884,45 @@ def unreachable_reasons(df):
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
+def template_reading_checks(df, images_df):
+    """علامات تدل أن الأداة قرأت القالب بطريقة خاطئة — تعمل مع أي قالب، ولو لم نره من قبل.
+    يعيد قائمة (مستوى، رسالة)."""
+    issues = []
+    if df is None or df.empty:
+        return issues
+    live = df[df['متاحة'] == True]  # noqa: E712
+    prods = live[live['نوع الصفحة'] == T_PRODUCT]
+    n_prod = len(prods)
+    uniq = images_df.drop_duplicates('رابط الصورة') if images_df is not None and not images_df.empty else pd.DataFrame()
+    # (أ) صور أقل من المنتجات: غالباً القالب يعرض الصور بطريقة لم تُقرأ
+    if n_prod >= 10 and len(uniq) < n_prod:
+        issues.append(('warn', f"عدد الصور ({len(uniq)}) أقل من عدد المنتجات ({n_prod}): قد يعرض القالب "
+                               "الصور بطريقة لم تقرأها الأداة كاملة، فأرقام الصور قد تكون ناقصة."))
+    # (ب) صفحات منتجات بلا أي صورة
+    if n_prod >= 10 and images_df is not None and not images_df.empty:
+        with_img = set(images_df['رابط الصفحة'])
+        no_img = int((~prods['الرابط'].isin(with_img)).sum())
+        if no_img > n_prod * 0.3:
+            issues.append(('warn', f"{no_img} صفحة منتج من {n_prod} لم تُقرأ فيها أي صورة."))
+    # (ج) روابط صور مقطوعة أو غير مكتملة (بلا امتداد صورة ولا مسار ملف)
+    if not uniq.empty:
+        bad = uniq['رابط الصورة'].astype(str).map(
+            lambda u: bool(re.search(r'/cdn-cgi/image/[^/]*$|[=,]$', u)))
+        if int(bad.sum()):
+            issues.append(('warn', f"{int(bad.sum())} رابط صورة يبدو مقطوعاً: القالب يكتب روابط الصور بصيغة "
+                                   "لم تُقرأ كاملة."))
+    # (د) عنوان أو وصف واحد على أغلب الصفحات: غالباً قراءة خاطئة لا مشكلة حقيقية
+    if len(live) >= 20:
+        for col, lbl in (('عنوان الميتا', 'العنوان'), ('وصف الميتا', 'الوصف')):
+            if col in live.columns:
+                vals = live[col].map(lambda x: str(x or '').strip())
+                vals = vals[vals != '']
+                if len(vals) and vals.value_counts().iloc[0] > len(live) * 0.5:
+                    issues.append(('warn', f"{lbl} نفسه في أكثر من نصف الصفحات: تحقق يدوياً من صفحتين، "
+                                           "فقد تكون الأداة قرأت نصاً ثابتاً من القالب."))
+    return issues
+
+
 def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
                     structured=None):
     checks = []
@@ -3897,8 +3959,11 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
         else:
             up = f" منها {sm['uploaded']} مرفوعة يدوياً" if sm.get('uploaded') else ''
             if sm.get('files_ok', 0):
+                nf = int(sm.get('files_ok', 0))
+                files_w = 'ملف واحد' if nf == 1 else 'ملفان' if nf == 2 else \
+                    f'{nf} ملفات' if 3 <= nf % 100 <= 10 else f'{nf} ملفاً'
                 add(CHECK_PASS, "خريطة الموقع",
-                    f"قُرئت كل ملفات الخريطة ({sm.get('files_ok', 0)} ملف{up}، {sm.get('total_urls', 0)} رابط).")
+                    f"قُرئت كل ملفات الخريطة ({files_w}{up}، {sm.get('total_urls', 0)} رابطاً).")
             else:
                 add(CHECK_WARN, "خريطة الموقع",
                     f"لم تجد الأداة ملفات الخريطة مباشرة، ووصلت إلى {sm.get('total_urls', 0)} رابط فقط عبر "
@@ -3953,6 +4018,14 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
         add(CHECK_WARN, "إعادة المحاولة",
             "أوقفت الأداة إعادة المحاولة مبكراً لأن المتجر رفض أغلب عيّنة الاختبار، "
             "حتى لا تنتظر بلا فائدة.", fix_hint)
+    tr = template_reading_checks(df, images_df)
+    if tr:
+        for lvl, msg in tr:
+            add(CHECK_WARN, "قراءة القالب", msg,
+                "أرسل ملفات هذا المتجر للمراجعة قبل إرسال تقريره لعميل.")
+    elif df is not None and len(df):
+        add(CHECK_PASS, "قراءة القالب", "لا علامات على قراءة خاطئة للقالب: الصور والعناوين قُرئت بشكل طبيعي.")
+
     rc = (crawl_meta or {}).get('recon') or {}
     if rc.get('types'):
         names = {T_PRODUCT: 'المنتجات', T_CATEGORY: 'الأقسام', T_BLOG: 'المقالات'}
