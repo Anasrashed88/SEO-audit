@@ -2772,6 +2772,14 @@ def _is_sitemap_loc(loc):
 
 
 SITEMAP_PAUSE = 0.3   # مهلة قصيرة بين ملفات الخريطة فقط (لا بين الصفحات)
+# أسماء ملفات الخريطة المعروفة لكل منصة: تُجرَّب دائماً، لأن المتجر قد لا يعلنها في robots.txt
+# (زد: sitemap_products.xml بلا رقم، وشوبيفاي: sitemap_products_1.xml)
+KNOWN_SITEMAP_NAMES = [
+    'sitemap_products.xml', 'sitemap_categories.xml', 'sitemap_pages.xml', 'sitemap_blogs.xml',
+    'sitemap_products_1.xml', 'sitemap_collections_1.xml', 'sitemap_pages_1.xml', 'sitemap_blogs_1.xml',
+    'sitemap-products.xml', 'sitemap-categories.xml', 'sitemap-pages.xml', 'sitemap-blogs.xml',
+    'product-sitemap.xml', 'category-sitemap.xml',
+]
 
 
 class SitemapCollector:
@@ -2812,24 +2820,24 @@ class SitemapCollector:
             else:
                 self.add(loc)
 
-    def walk(self, sm_url, depth, declared=True):
+    def walk(self, sm_url, depth, declared=True, probe=False):
         if depth > self.max_depth:
             return False
         if sm_url in self.visited:
             return True
         self.visited.add(sm_url)
-        tries = 3 if declared else 1
+        tries = 1 if probe else (3 if declared else 1)
         locs, reason = None, None
         for attempt in range(tries):
             if attempt == 0 and self.report['files_ok']:
                 time.sleep(SITEMAP_PAUSE)
-            locs, reason = fetch_sitemap_locs(sm_url, quick=not declared, with_reason=True)
+            locs, reason = fetch_sitemap_locs(sm_url, quick=(not declared and not probe), with_reason=True)
             if locs is not None:
                 break
             if attempt + 1 < tries:
                 time.sleep(1.5 * (attempt + 1))
         if locs is None:
-            if declared:
+            if declared and not probe:
                 self.failed[sm_url] = reason
             return False
         self.failed.pop(sm_url, None)
@@ -2867,6 +2875,14 @@ class SitemapCollector:
             self.walk(c, 0, declared=True)
         if self.found:
             self.report['source'] = 'user + robots.txt' if user_given else 'robots.txt'
+
+        before_known = len(self.found)
+        for name in KNOWN_SITEMAP_NAMES:
+            if name.lower() in self.uploaded_names:
+                continue
+            self.walk(f"{self.base_url}/{name}", 0, declared=True, probe=True)
+        if len(self.found) > before_known and not self.report['source']:
+            self.report['source'] = 'known-names'
 
         if not self.found:
             via = sitemap_urls_via_usp(self.base_url, self.base_netloc)
@@ -3880,8 +3896,14 @@ def run_self_checks(df, images_df, coverage, platform, summary, crawl_meta=None,
                 "افتح الملفات المذكورة في متصفحك واحفظها، ثم ارفعها في خيارات خريطة الموقع وأعد الفحص.")
         else:
             up = f" منها {sm['uploaded']} مرفوعة يدوياً" if sm.get('uploaded') else ''
-            add(CHECK_PASS, "خريطة الموقع",
-                f"قُرئت كل ملفات الخريطة ({sm.get('files_ok', 0)} ملف{up}، {sm.get('total_urls', 0)} رابط).")
+            if sm.get('files_ok', 0):
+                add(CHECK_PASS, "خريطة الموقع",
+                    f"قُرئت كل ملفات الخريطة ({sm.get('files_ok', 0)} ملف{up}، {sm.get('total_urls', 0)} رابط).")
+            else:
+                add(CHECK_WARN, "خريطة الموقع",
+                    f"لم تجد الأداة ملفات الخريطة مباشرة، ووصلت إلى {sm.get('total_urls', 0)} رابط فقط عبر "
+                    "مكتبة قراءة الخرائط. قد تكون الخريطة ناقصة.",
+                    "إن كنت تعرف رابط الخريطة، الصقه في «خيارات خريطة الموقع» وأعد الفحص.")
 
     if crawl_meta and crawl_meta.get('connection'):
         add(CHECK_PASS, "طريقة الاتصال", f"فُحص المتجر بـ: {crawl_meta['connection']}.")
