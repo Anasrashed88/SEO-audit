@@ -746,6 +746,10 @@ def url_key(url):
         mo = PLATFORM_ID_RE.match(segs[-1])
         if mo:
             return f"{host}/#{mo.group(1).lower()}{mo.group(2)}"
+        # زد: /categories/1689986/ و/categories/1689986/اسم-القسم = نفس القسم برقمه الثابت
+        low = [x.lower() for x in segs]
+        if len(low) >= 2 and low[0] in ('categories', 'category') and low[1].isdigit():
+            return f"{host}/#cat{low[1]}"
     return f"{host}/{'/'.join(segs)}".rstrip('/').lower()
 
 
@@ -753,6 +757,13 @@ def prefer_url(a, b):
     """بين رابطين لنفس الصفحة: نفضّل النسخة بلا بادئة لغة ثم الأقصر."""
     ka = (1 if has_lang_prefix(a) else 0, len(a))
     kb = (1 if has_lang_prefix(b) else 0, len(b))
+    if ka[0] == kb[0]:
+        # أحدهما امتداد للآخر (/categories/12/ مقابل /categories/12/اسم-القسم): نفضّل الأوضح
+        sa, sb = unquote(a).rstrip('/'), unquote(b).rstrip('/')
+        if sb.startswith(sa + '/'):
+            return b
+        if sa.startswith(sb + '/'):
+            return a
     return a if ka <= kb else b
 
 
