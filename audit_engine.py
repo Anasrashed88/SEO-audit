@@ -2802,6 +2802,8 @@ KNOWN_SITEMAP_NAMES = [
     'sitemap_products_1.xml', 'sitemap_collections_1.xml', 'sitemap_pages_1.xml', 'sitemap_blogs_1.xml',
     'sitemap-products.xml', 'sitemap-categories.xml', 'sitemap-pages.xml', 'sitemap-blogs.xml',
     'product-sitemap.xml', 'category-sitemap.xml',
+    # زد تضع خرائط المدونة والماركات في مجلدات فرعية
+    'blog/sitemap.xml', 'blogs/sitemap.xml', 'brands/sitemap.xml', 'pages/sitemap.xml',
 ]
 
 
@@ -3124,7 +3126,7 @@ def regrade_saved(df, base_url=''):
     return df
 
 
-def reconcile_counts(df, sitemap_urls, base_url):
+def reconcile_counts(df, sitemap_urls, base_url, req_to_final=None):
     """تتحقق الأداة من أرقامها بنفسها، دون عدّ يدوي:
     - الخريطة: كم منتجاً وقسماً ومقالاً تعلنه، مقابل ما فُحص، مع تفسير كل فرق.
     - إعلان المتجر: «إجمالي N منتج» في صفحة كل المنتجات، مقابل عدد المنتجات المفحوصة."""
@@ -3140,11 +3142,15 @@ def reconcile_counts(df, sitemap_urls, base_url):
         live_keys[url_key(r['الرابط'])] = t
     in_map = set()
     map_by_type = {}
+    redirect = req_to_final or {}
     for u in sitemap_urls or []:
-        t = decisive_type(u) or _detect_type_by_url(clean_url(u), base_url)
-        if t == T_CATEGORY and listing_kind(u) != 'category':
-            t = 'listing'          # صفحة «كل المنتجات» والماركات ليست أقساماً
-        k = url_key(u)
+        k = redirect.get(url_key(u), url_key(u))     # رابط الخريطة الذي يحوّل: نتبعه للصفحة الفعلية
+        if k in live_keys:
+            t = live_keys[k]                          # النوع من الصفحة التي وصل إليها، لا من شكل الرابط
+        else:
+            t = decisive_type(u) or _detect_type_by_url(clean_url(u), base_url)
+            if t == T_CATEGORY and listing_kind(u) != 'category':
+                t = 'listing'      # صفحة «كل المنتجات» والماركات ليست أقساماً
         in_map.add(k)
         map_by_type.setdefault(t, set()).add(k)
     for t in (T_PRODUCT, T_CATEGORY, T_BLOG):
@@ -4569,7 +4575,12 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     crawl_meta['connection'] = CONN_LABEL[connection_mode()]
     crawl_meta['auto_gentle'] = _AUTO['switched']
     col_ = crawl_meta.get('collector')
-    crawl_meta['recon'] = reconcile_counts(df, col_.urls() if col_ is not None else [], target)
+    req_to_final = {}
+    for r in pages:    # قبل الدمج: كل رابط طُلب، وإلى أين وصل
+        rq = r.get('_req_url') or r.get('_raw_url') or r['الرابط']
+        if r.get('متاحة'):
+            req_to_final[url_key(rq)] = url_key(r['الرابط'])
+    crawl_meta['recon'] = reconcile_counts(df, col_.urls() if col_ is not None else [], target, req_to_final)
     crawl_meta['cache_hits'] = _CACHE['hits']
     crawl_meta['cache_enabled'] = bool(use_cache)
     selfcheck = run_self_checks(df, images_df, coverage, platform, summary, crawl_meta, structured)
