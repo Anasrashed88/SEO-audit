@@ -213,14 +213,50 @@ SECTION_TXT = {
     },
 }
 
-C_INK = (15, 23, 42)
+C_INK = (15, 23, 42)          # كحلي عميق: الهوية والعناوين
 C_MUTED = (100, 116, 139)
 C_LINE = (226, 232, 240)
-C_BG = (248, 250, 252)
-C_OK = (5, 150, 105)
-C_WARN = (217, 119, 6)
-C_BAD = (220, 38, 38)
+C_BG = (246, 248, 251)
+C_SOFT = (238, 242, 247)
+C_ACC = (13, 148, 136)         # فيروزي: لمسة الهوية
+C_OK = (16, 163, 127)
+C_WARN = (234, 150, 32)
+C_BAD = (225, 72, 72)
+C_NAVY2 = (30, 41, 66)
 STATUS_RGB = {'ok': C_OK, 'warn': C_WARN, 'bad': C_BAD, 'neutral': C_MUTED}
+
+
+def draw_donut(pdf, cx, cy, r, th, parts, bg=None):
+    """حلقة بيانية: parts = [(قيمة، لون)] تبدأ من الأعلى باتجاه عقارب الساعة."""
+    tot = sum(max(v, 0) for v, _ in parts) or 1
+    pdf.set_fill_color(*(bg or C_SOFT))
+    pdf.ellipse(cx - r, cy - r, 2 * r, 2 * r, 'F')
+    ang = 90.0
+    for v, col in parts:
+        if v <= 0:
+            continue
+        sweep = min(359.99, 360.0 * v / tot)
+        pdf.set_fill_color(*col)
+        pdf.solid_arc(cx - r, cy - r, 2 * r, ang - sweep, ang, style='F')
+        ang -= sweep
+    pdf.set_fill_color(255, 255, 255)
+    pdf.ellipse(cx - r + th, cy - r + th, 2 * (r - th), 2 * (r - th), 'F')
+
+
+def draw_stack(pdf, x, y, w, h, parts, rtl=False):
+    """شريط مكدّس بزوايا دائرية: parts = [(قيمة، لون)]؛ يبدأ من اليمين في العربية."""
+    tot = sum(max(v, 0) for v, _ in parts) or 1
+    pdf.set_fill_color(*C_SOFT)
+    pdf.rect(x, y, w, h, 'F', round_corners=True, corner_radius=h / 2)
+    pos = x + w if rtl else x
+    for v, col in parts:
+        if v <= 0:
+            continue
+        seg = w * v / tot
+        sx = pos - seg if rtl else pos
+        pdf.set_fill_color(*col)
+        pdf.rect(sx, y, seg, h, 'F', round_corners=seg >= h, corner_radius=min(h / 2, seg / 2))
+        pos = sx if rtl else pos + seg
 
 
 def shape_ar(text):
@@ -486,22 +522,31 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         def header(self):
             if self.page_no() <= 1:
                 return
-            self.set_y(10)
+            self.set_fill_color(*C_INK)
+            self.rect(0, 0, 210, 3, 'F')
+            self.set_fill_color(*C_ACC)
+            self.rect(0 if rtl else 150, 0, 60, 3, 'F')
+            self.set_y(9)
             self.set_font(FONT, "", 8)
             self.set_text_color(*C_MUTED)
-            self.cell(W, 4, fmt(f"{T['owner']}  ·  {clean_domain}"), align=ALIGN)
-            self.set_draw_color(*C_LINE)
-            self.line(M, 17, 210 - M, 17)
-            self.set_y(26)
+            self.set_x(M)
+            if rtl:
+                self.cell(W / 2, 5, clean_domain, align="L")
+                self.cell(W / 2, 5, fmt(T['title']), align="R")
+            else:
+                self.cell(W / 2, 5, fmt(T['title']), align="L")
+                self.cell(W / 2, 5, clean_domain, align="R")
+            self.set_y(24)
 
         def footer(self):
             if self.page_no() <= 1:
                 return
-            self.set_y(-16)
+            self.set_y(-15)
             self.set_draw_color(*C_LINE)
-            self.line(M, 282, 210 - M, 282)
+            self.line(M, 283, 210 - M, 283)
             self.set_font(FONT, "", 8)
             self.set_text_color(*C_MUTED)
+            self.set_x(M)
             self.cell(W / 2, 8, "anasrashed.com", align="L" if rtl else "R")
             self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no())),
                       align="R" if rtl else "L")
@@ -540,61 +585,76 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
                 self.set_x(x)
                 self.cell(width, lh, fmt(line), ln=True, align=ALIGN)
 
-        def section(self, num, key):
-            """ترويسة قسم: مربع رقم ملوّن + عنوان + شرح."""
+        def section(self, num, key, title=None, intro=None):
+            """ترويسة قسم عصرية: شارة رقم دائرية، عنوان كبير، خط فيروزي، ثم الشرح."""
             y = self.get_y()
-            box = 9
-            bx = (210 - M - box) if rtl else M
-            self.set_fill_color(*C_INK)
-            self.rect(bx, y, box, box, 'F')
-            self.set_font(FONT, "", 10)
+            d = 10
+            bx = (210 - M - d) if rtl else M
+            self.set_fill_color(*(C_INK if str(num) else C_ACC))
+            self.ellipse(bx, y, d, d, 'F')
+            self.set_font(FONT, BOLD(), 10.5)
             self.set_text_color(255, 255, 255)
-            self.set_xy(bx, y + 0.6)
-            self.cell(box, box - 1, str(num), align="C")
-            self.set_font(FONT, BOLD(), 15)
+            self.set_xy(bx, y + 0.3)
+            self.cell(d, d, str(num), align="C")
+            self.set_font(FONT, BOLD(), 16)
             self.set_text_color(*C_INK)
-            tw = W - box - 4
-            self.set_xy(M if rtl else M + box + 4, y + 0.4)
-            self.cell(tw, box, fmt(S[key]['title']), align=ALIGN)
-            self.set_y(y + box + 4)
-            self.para(S[key]['intro'])
-            self.ln(3)
+            tw = W - d - 5
+            self.set_xy(M if rtl else M + d + 5, y + 0.2)
+            self.cell(tw, d, fmt(title or S[key]['title']), align=ALIGN)
+            self.set_fill_color(*C_ACC)
+            lx = (210 - M - d - 5 - 18) if rtl else (M + d + 5)
+            self.rect(lx, y + d + 1.5, 18, 1.1, 'F', round_corners=True, corner_radius=0.5)
+            self.set_y(y + d + 6)
+            self.para(intro or S[key]['intro'], size=9.2)
+            self.ln(4)
 
         def table(self, rows):
-            """جدول نتائج: عمود العنصر وعمود النتيجة بلون دلالي."""
-            wv, wl = 52, W - 52
-            self.set_font(FONT, BOLD(), 9.5)
-            self.set_fill_color(*C_INK)
-            self.set_text_color(255, 255, 255)
-            self.set_x(M)
+            """جدول نتائج داخل بطاقة: اسم العنصر، والنتيجة في شارة بلون دلالي."""
+            rh, wv = 9.0, 50
+            wl = W - wv
+            soft = {'ok': (231, 246, 240), 'warn': (253, 243, 226), 'bad': (252, 233, 233),
+                    'neutral': C_SOFT}
+            y0 = self.get_y()
+            h_total = 9 + rh * len(rows)
+            if y0 + h_total > 268 and h_total < 230:
+                self.add_page()
+                y0 = self.get_y()
+            self.set_draw_color(*C_LINE)
+            self.set_fill_color(255, 255, 255)
+            self.rect(M, y0, W, min(h_total, 268 - y0), 'DF', round_corners=True, corner_radius=3)
+            self.set_fill_color(*C_BG)
+            self.rect(M, y0, W, 9, 'F', round_corners=True, corner_radius=3)
+            self.set_font(FONT, BOLD(), 8.8)
+            self.set_text_color(*C_MUTED)
+            self.set_xy(M + 4, y0 + 0.5)
             if rtl:
-                self.cell(wv, 8, fmt(T['h_val']), 0, 0, 'C', fill=True)
-                self.cell(wl, 8, fmt(T['h_item']), 0, 1, 'R', fill=True)
+                self.cell(wv - 4, 8, fmt(T['h_val']), 0, 0, 'C')
+                self.cell(wl - 4, 8, fmt(T['h_item']), 0, 1, 'R')
             else:
-                self.cell(wl, 8, fmt(T['h_item']), 0, 0, 'L', fill=True)
-                self.cell(wv, 8, fmt(T['h_val']), 0, 1, 'C', fill=True)
-            self.set_font(FONT, "", 9)
+                self.cell(wl - 4, 8, fmt(T['h_item']), 0, 0, 'L')
+                self.cell(wv - 4, 8, fmt(T['h_val']), 0, 1, 'C')
+            y = y0 + 9
             for i, (label, value, stt) in enumerate(rows):
-                if self.get_y() > 250:
+                if y + rh > 268:
                     self.add_page()
-                self.set_x(M)
-                if i % 2 == 0:
-                    self.set_fill_color(*C_BG)
-                    self.rect(M, self.get_y(), W, 7.5, 'F')
-                self.set_text_color(*STATUS_RGB.get(stt, C_MUTED))
-                self.set_font(FONT, "", 9)
-                if rtl:
-                    self.cell(wv, 7.5, fmt(value), 0, 0, 'C')
-                    self.set_text_color(*C_INK)
-                    self.cell(wl, 7.5, fmt(label), 0, 1, 'R')
-                else:
-                    self.set_text_color(*C_INK)
-                    self.cell(wl, 7.5, fmt(label), 0, 0, 'L')
-                    self.set_text_color(*STATUS_RGB.get(stt, C_MUTED))
-                    self.cell(wv, 7.5, fmt(value), 0, 1, 'C')
-                self.set_draw_color(*C_LINE)
-                self.line(M, self.get_y(), 210 - M, self.get_y())
-            self.ln(6)
+                    y = self.get_y()
+                if i:
+                    self.set_draw_color(*C_SOFT)
+                    self.line(M + 4, y, 210 - M - 4, y)
+                pill_w = min(wv - 10, max(22, self.get_string_width(fmt(value)) + 8))
+                px = (M + (wv - pill_w) / 2) if rtl else (M + wl + (wv - pill_w) / 2)
+                self.set_fill_color(*soft.get(stt, C_SOFT))
+                self.rect(px, y + 1.6, pill_w, rh - 3.2, 'F', round_corners=True, corner_radius=2.9)
+                self.set_font(FONT, BOLD(), 8.8)
+                self.set_text_color(*STATUS_RGB.get(stt, C_INK) if stt != 'neutral' else C_INK)
+                self.set_xy(px, y + 1.6)
+                self.cell(pill_w, rh - 3.2, fmt(value), align="C")
+                self.set_font(FONT, "", 9.2)
+                self.set_text_color(*C_INK)
+                self.set_xy((M + wv) if rtl else (M + 5), y)
+                self.cell(wl - 5, rh, fmt(label), align=ALIGN)
+                y += rh
+            self.set_y(y + 7)
 
         def fit(self, txt, width, size=8.5):
             """يقصّ النص من نهايته حتى يتسع للعرض المتاح."""
@@ -657,15 +717,15 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
             if self.get_y() + h > 265:
                 self.add_page()
             y = self.get_y()
-            self.set_fill_color(*C_BG)
-            self.rect(M, y, W, h, 'F')
-            self.set_fill_color(*C_INK)
+            self.set_fill_color(236, 248, 246)
+            self.rect(M, y, W, h, 'F', round_corners=True, corner_radius=3)
+            self.set_fill_color(*C_ACC)
             if rtl:
-                self.rect(210 - M - 2.2, y, 2.2, h, 'F')
+                self.rect(210 - M - 2.4, y + 3, 2.4, h - 6, 'F', round_corners=True, corner_radius=1.2)
             else:
-                self.rect(M, y, 2.2, h, 'F')
+                self.rect(M, y + 3, 2.4, h - 6, 'F', round_corners=True, corner_radius=1.2)
             self.set_font(FONT, BOLD(), 9.5)
-            self.set_text_color(*C_INK)
+            self.set_text_color(*C_ACC)
             self.set_xy(M + 7, y + 3.5)
             self.cell(W - 14, 5, fmt(T['impact']), ln=True, align=ALIGN)
             self.set_font(FONT, "", 9)
@@ -677,16 +737,17 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
                 yy += 5.0
             self.set_y(y + h + 6)
 
-        def mini(self, x, y, w, value, label, color=C_INK):
-            self.set_fill_color(*C_BG)
-            self.rect(x, y, w, 20, 'F')
-            self.set_font(FONT, BOLD(), 15)
+        def mini(self, x, y, w, value, label, color=C_INK, h=22):
+            self.set_draw_color(*C_LINE)
+            self.set_fill_color(255, 255, 255)
+            self.rect(x, y, w, h, 'DF', round_corners=True, corner_radius=3)
+            self.set_font(FONT, BOLD(), 17)
             self.set_text_color(*color)
-            self.set_xy(x, y + 3)
-            self.cell(w, 8, fmt(value), align="C")
-            self.set_font(FONT, "", 8)
+            self.set_xy(x, y + 3.5)
+            self.cell(w, 9, fmt(value), align="C")
+            self.set_font(FONT, "", 8.2)
             self.set_text_color(*C_MUTED)
-            self.set_xy(x, y + 11.5)
+            self.set_xy(x, y + 13)
             self.cell(w, 5, fmt(label), align="C")
 
     pdf = Report()
@@ -700,46 +761,84 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
 
     # ======================= الغلاف =======================
     pdf.add_page()
+    verdict_lbl = (T['sc_bad'] if score < 60 else T['sc_warn'] if score < 80 else T['sc_ok'])
+    # شريط علوي كحلي بعرض الصفحة
+    pdf.set_fill_color(*C_INK)
+    pdf.rect(0, 0, 210, 118, 'F')
+    pdf.set_fill_color(*C_NAVY2)
+    pdf.ellipse(120 if rtl else -40, -50, 130, 130, 'F')
+    pdf.set_fill_color(*C_ACC)
+    pdf.rect(0, 118, 210, 2.2, 'F')
     if logo_exists:
         try:
-            pdf.image(str(LOGO_PATH), x=(210 - 40) / 2, y=22, h=15)
+            pdf.set_fill_color(255, 255, 255)
+            lx = (210 - M - 44) if rtl else M
+            pdf.rect(lx, 18, 44, 20, 'F', round_corners=True, corner_radius=3)
+            pdf.image(str(LOGO_PATH), x=lx + 4, y=21, h=14)
         except Exception:
             pass
-    pdf.set_y(48)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font(FONT, BOLD(), 26)
+    pdf.set_xy(M, 52)
+    pdf.cell(W, 13, fmt(T['title']), align=ALIGN)
+    pdf.set_font(FONT, "", 11.5)
+    pdf.set_text_color(203, 213, 225)
+    pdf.set_xy(M, 66)
+    pdf.cell(W, 7, fmt(T['subtitle']), align=ALIGN)
+    # اسم المتجر في شارة
+    pdf.set_font(FONT, BOLD(), 12)
+    dw = pdf.get_string_width(clean_domain) + 14
+    dx = (210 - M - dw) if rtl else M
+    pdf.set_fill_color(*C_ACC)
+    pdf.rect(dx, 82, dw, 11, 'F', round_corners=True, corner_radius=5.5)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(dx, 82)
+    pdf.cell(dw, 11, clean_domain, align="C")
+    pdf.set_font(FONT, "", 9.5)
+    pdf.set_text_color(203, 213, 225)
+    pdf.set_xy(M, 98)
+    meta = f"{T['platform']}: {stats.get('platform_label', '—')}     {T['date']}: {datetime.now().strftime('%Y-%m-%d')}"
+    pdf.cell(W, 6, fmt(meta), align=ALIGN)
+
+    # بطاقة الدرجة: حلقة بيانية + الحكم
+    cy = 168
+    card_y = 134
     pdf.set_draw_color(*C_LINE)
-    pdf.line(M + 55, 46, 210 - M - 55, 46)
-
-    pdf.set_font(FONT, BOLD(), 23)
-    pdf.set_text_color(*C_INK)
-    pdf.cell(0, 12, fmt(T['title']), ln=True, align="C")
-    pdf.set_font(FONT, "", 11)
-    pdf.set_text_color(*C_MUTED)
-    pdf.cell(0, 7, fmt(T['subtitle']), ln=True, align="C")
-    pdf.ln(6)
-
-    # بطاقة الدرجة
-    y = pdf.get_y()
-    pdf.set_fill_color(*C_BG)
-    pdf.rect(M, y, W, 44, 'F')
-    pdf.set_fill_color(*verdict_rgb)
-    pdf.rect(M, y, W, 1.6, 'F')
-    pdf.set_font(FONT, BOLD(), 40)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(M, card_y, W, 66, 'DF', round_corners=True, corner_radius=4)
+    ring_cx = (210 - M - 40) if rtl else (M + 40)
+    draw_donut(pdf, ring_cx, cy, 25, 6.5, [(score, verdict_rgb), (100 - score, C_SOFT)])
+    pdf.set_font(FONT, BOLD(), 22)
     pdf.set_text_color(*verdict_rgb)
-    pdf.set_xy(M, y + 7)
-    pdf.cell(W, 18, f"{score}%", align="C")
-    pdf.set_font(FONT, "", 10.5)
+    pdf.set_xy(ring_cx - 20, cy - 7)
+    pdf.cell(40, 10, f"{score}%", align="C")
+    pdf.set_font(FONT, "", 7.5)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_xy(ring_cx - 20, cy + 3)
+    pdf.cell(40, 5, fmt('الدرجة' if rtl else 'Score'), align="C")
+    tx = M + 8 if rtl else M + 80
+    tw_ = W - 88
+    pdf.set_font(FONT, BOLD(), 15)
     pdf.set_text_color(*C_INK)
-    pdf.set_xy(M, y + 25)
-    pdf.cell(W, 6, fmt(T['score_lbl']), align="C")
+    pdf.set_xy(tx, card_y + 14)
+    pdf.cell(tw_, 9, fmt(T['score_lbl']), align=ALIGN)
+    pdf.set_fill_color(*verdict_rgb)
+    pdf.set_font(FONT, BOLD(), 10)
+    vw = pdf.get_string_width(fmt(verdict_lbl)) + 12
+    vx = (tx + tw_ - vw) if rtl else tx
+    pdf.rect(vx, card_y + 26, vw, 9, 'F', round_corners=True, corner_radius=4.5)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(vx, card_y + 26)
+    pdf.cell(vw, 9, fmt(verdict_lbl), align="C")
     pdf.set_font(FONT, "", 9)
     pdf.set_text_color(*C_MUTED)
-    pdf.set_xy(M, y + 32)
-    verdict_lbl = (T['sc_bad'] if score < 60 else
-                   T['sc_warn'] if score < 80 else T['sc_ok'])
-    pdf.cell(W, 6, fmt(verdict_lbl), align="C")
-    pdf.set_y(y + 52)
+    yy = card_y + 40
+    for line in pdf.wrap(T['scope'], tw_, 9):
+        pdf.set_xy(tx, yy)
+        pdf.cell(tw_, 5, fmt(line), align=ALIGN)
+        yy += 5
 
-    # بطاقات موجزة
+    # أرقام موجزة
     cards = [
         (str(stats.get('live_pages', stats['total_pages'])), T['m_pages'], C_INK),
         (str(stats['products']), T['m_products'], C_INK),
@@ -747,35 +846,179 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
         (str(stats.get('total_images', 0)), T['m_images'], C_INK),
         (str(quote_units(stats)), T['m_issues'], C_BAD),
     ]
-    gap, cw = 4, (W - 2 * 4) / 3
-    y0 = pdf.get_y()
-    for i, (v, l, c) in enumerate(cards):
-        col, row = i % 3, i // 3
-        pdf.mini(M + col * (cw + gap), y0 + row * 24, cw, v, l, c)
-    pdf.set_y(y0 + 56)
+    gap, cw = 3.5, (W - 4 * 3.5) / 5
+    order = list(reversed(cards)) if rtl else cards
+    for i, (v, l, c) in enumerate(order):
+        pdf.mini(M + i * (cw + gap), 210, cw, v, l, c)
 
-    # بيانات المتجر
-    pdf.set_draw_color(*C_LINE)
-    pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
-    pdf.ln(5)
-    pdf.set_font(FONT, "", 10)
-    pdf.set_text_color(*C_INK)
-    for lbl, val in [(T['store'], clean_domain),
-                     (T['platform'], stats.get('platform_label', '—')),
-                     (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
-        pdf.set_x(M)
-        pdf.cell(W, 6.5, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
-    pdf.ln(3)
-    pdf.set_font(FONT, "", 8.5)
-    pdf.set_text_color(*C_MUTED)
-    pdf.set_x(M)
-    pdf.cell(W, 5, fmt(T['scope']), ln=True, align=ALIGN)
-
-    pdf.set_y(265)
+    pdf.set_y(262)
     pdf.set_font(FONT, "", 9)
     pdf.set_text_color(*C_MUTED)
     pdf.cell(0, 5, fmt(T['prepared']), ln=True, align="C")
+    pdf.set_text_color(*C_ACC)
     pdf.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+
+    # ======================= النظرة العامة (رسوم بيانية) =======================
+    OV = {
+        'ar': {'title': 'النظرة العامة', 'intro': 'صورة سريعة لحالة المتجر: ما هو سليم، وما يحتاج تحسيناً، وما يحتاج إصلاحاً عاجلاً.',
+               'health': 'صحة عناصر السيو', 'titles': 'عناوين الميتا', 'descs': 'أوصاف الميتا', 'imgs': 'نصوص الصور البديلة',
+               'g': 'سليم', 'i': 'يحتاج تحسيناً', 'u': 'يحتاج إصلاحاً', 'work': 'حجم العمل المطلوب', 'mix': 'مكوّنات المتجر',
+               'w_t': 'عناوين', 'w_d': 'أوصاف', 'w_i': 'صور', 'w_b': 'روابط معطلة',
+               'p': 'منتجات', 'c': 'أقسام', 'b': 'مقالات', 'f': 'تعريفية', 'o': 'أخرى'},
+        'en': {'title': 'Overview', 'intro': "A quick picture of the store's health: what is fine, what can improve, and what needs fixing now.",
+               'health': 'SEO element health', 'titles': 'Meta titles', 'descs': 'Meta descriptions', 'imgs': 'Image alt texts',
+               'g': 'Good', 'i': 'Can improve', 'u': 'Needs fixing', 'work': 'Work required', 'mix': 'Store composition',
+               'w_t': 'Titles', 'w_d': 'Descriptions', 'w_i': 'Images', 'w_b': 'Broken links',
+               'p': 'Products', 'c': 'Categories', 'b': 'Articles', 'f': 'Info', 'o': 'Other'},
+    }[lang]
+    live_n = int(stats.get('live_pages', stats['total_pages']) or 0)
+    pdf.add_page()
+    pdf.section('', None, OV['title'], OV['intro'])
+
+    # (1) صحة العناصر: أشرطة مكدسة
+    y = pdf.get_y()
+    pdf.set_draw_color(*C_LINE)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(M, y, W, 66, 'DF', round_corners=True, corner_radius=3)
+    pdf.set_font(FONT, BOLD(), 11)
+    pdf.set_text_color(*C_INK)
+    pdf.set_xy(M + 6, y + 4)
+    pdf.cell(W - 12, 7, fmt(OV['health']), align=ALIGN)
+    crit_t = int(stats.get('critical_titles', 0)); bad_t = int(stats.get('bad_titles', 0))
+    crit_d = int(stats.get('critical_descs', 0)); bad_d = int(stats.get('bad_descs', 0))
+    rows_h = [
+        (OV['titles'], [(max(live_n - bad_t, 0), C_OK), (max(bad_t - crit_t, 0), C_WARN), (crit_t, C_BAD)]),
+        (OV['descs'], [(max(live_n - bad_d, 0), C_OK), (max(bad_d - crit_d, 0), C_WARN), (crit_d, C_BAD)]),
+        (OV['imgs'], [(int(stats.get('good_alts', 0)), C_OK), (int(stats.get('weak_alts', 0)), C_WARN),
+                      (int(stats.get('missing_alts', 0)), C_BAD)]),
+    ]
+    by = y + 15
+    lab_w = 42
+    bar_w = W - 12 - lab_w - 22
+    for lbl, parts in rows_h:
+        tot = sum(v for v, _ in parts) or 1
+        good_pct = round(parts[0][0] / tot * 100)
+        pdf.set_font(FONT, "", 9.2)
+        pdf.set_text_color(*C_INK)
+        if rtl:
+            pdf.set_xy(210 - M - 6 - lab_w, by)
+            pdf.cell(lab_w, 8, fmt(lbl), align="R")
+            draw_stack(pdf, M + 6 + 22, by + 1.5, bar_w, 5, parts, rtl=True)
+            pdf.set_font(FONT, BOLD(), 9.2)
+            pdf.set_text_color(*C_OK)
+            pdf.set_xy(M + 6, by)
+            pdf.cell(20, 8, f"{good_pct}%", align="L")
+        else:
+            pdf.set_xy(M + 6, by)
+            pdf.cell(lab_w, 8, fmt(lbl), align="L")
+            draw_stack(pdf, M + 6 + lab_w, by + 1.5, bar_w, 5, parts)
+            pdf.set_font(FONT, BOLD(), 9.2)
+            pdf.set_text_color(*C_OK)
+            pdf.set_xy(210 - M - 6 - 20, by)
+            pdf.cell(20, 8, f"{good_pct}%", align="R")
+        by += 12
+    # مفتاح الألوان
+    legend = [(OV['g'], C_OK), (OV['i'], C_WARN), (OV['u'], C_BAD)]
+    pdf.set_font(FONT, "", 8.2)
+    lxp = (210 - M - 8) if rtl else (M + 8)
+    for name, col in legend:
+        tw2 = pdf.get_string_width(fmt(name))
+        pdf.set_fill_color(*col)
+        if rtl:
+            pdf.ellipse(lxp - 3, by + 2.2, 3, 3, 'F')
+            pdf.set_text_color(*C_MUTED)
+            pdf.set_xy(lxp - 5 - tw2, by)
+            pdf.cell(tw2, 7.5, fmt(name))
+            lxp -= tw2 + 12
+        else:
+            pdf.ellipse(lxp, by + 2.2, 3, 3, 'F')
+            pdf.set_text_color(*C_MUTED)
+            pdf.set_xy(lxp + 5, by)
+            pdf.cell(tw2, 7.5, fmt(name))
+            lxp += tw2 + 12
+    pdf.set_y(y + 72)
+
+    # (2) حجم العمل (أعمدة أفقية) + (3) مكوّنات المتجر (حلقة)
+    y = pdf.get_y()
+    half = (W - 6) / 2
+    left_x = M if not rtl else M + half + 6       # البطاقة الأولى في جهة القراءة
+    right_x = M + half + 6 if not rtl else M
+    for bx in (left_x, right_x):
+        pdf.set_draw_color(*C_LINE)
+        pdf.set_fill_color(255, 255, 255)
+        pdf.rect(bx, y, half, 88, 'DF', round_corners=True, corner_radius=3)
+    # حجم العمل
+    pdf.set_font(FONT, BOLD(), 11)
+    pdf.set_text_color(*C_INK)
+    pdf.set_xy(left_x + 6, y + 4)
+    pdf.cell(half - 12, 7, fmt(OV['work']), align=ALIGN)
+    work = [(OV['w_t'], int(stats.get('fix_titles_urls', stats.get('bad_titles', 0)) or 0)),
+            (OV['w_d'], int(stats.get('fix_descs', stats.get('bad_descs', 0)) or 0)),
+            (OV['w_i'], int(stats.get('missing_alts', 0) or 0) + int(stats.get('weak_alts', 0) or 0)),
+            (OV['w_b'], int(stats.get('broken_actionable', 0) or 0))]
+    mx = max([v for _, v in work] + [1])
+    wy = y + 16
+    for lbl, v in work:
+        pdf.set_font(FONT, "", 8.8)
+        pdf.set_text_color(*C_INK)
+        pdf.set_xy(left_x + 6, wy)
+        pdf.cell(half - 12, 5, fmt(lbl), align=ALIGN)
+        pdf.set_font(FONT, BOLD(), 8.8)
+        pdf.set_text_color(*C_INK)
+        pdf.set_xy(left_x + 6, wy)
+        pdf.cell(half - 12, 5, f"{v:,}", align="L" if rtl else "R")
+        bw = (half - 12) * (v / mx if mx else 0)
+        pdf.set_fill_color(*C_SOFT)
+        pdf.rect(left_x + 6, wy + 6.5, half - 12, 4.5, 'F', round_corners=True, corner_radius=2.25)
+        if bw > 0:
+            pdf.set_fill_color(*C_ACC)
+            bxx = (left_x + 6 + (half - 12) - bw) if rtl else (left_x + 6)
+            pdf.rect(bxx, wy + 6.5, max(bw, 4.5), 4.5, 'F', round_corners=True, corner_radius=2.25)
+        wy += 17
+    # مكوّنات المتجر
+    pdf.set_font(FONT, BOLD(), 11)
+    pdf.set_text_color(*C_INK)
+    pdf.set_xy(right_x + 6, y + 4)
+    pdf.cell(half - 12, 7, fmt(OV['mix']), align=ALIGN)
+    cats_all = int(stats.get('categories', 0)) + int(stats.get('brand_pages', 0) or 0) + int(stats.get('listing_pages', 0) or 0)
+    known = int(stats.get('products', 0)) + cats_all + int(stats.get('blog_pages', 0)) + int(stats.get('info_pages', 0))
+    mix = [(OV['p'], int(stats.get('products', 0)), C_INK), (OV['c'], cats_all, C_ACC),
+           (OV['b'], int(stats.get('blog_pages', 0)), (99, 102, 241)), (OV['f'], int(stats.get('info_pages', 0)), C_WARN),
+           (OV['o'], max(live_n - known, 0), (148, 163, 184))]
+    rcx = right_x + half / 2
+    draw_donut(pdf, rcx, y + 36, 19, 6, [(v, c) for _, v, c in mix])
+    pdf.set_font(FONT, BOLD(), 13)
+    pdf.set_text_color(*C_INK)
+    pdf.set_xy(rcx - 15, y + 31)
+    pdf.cell(30, 7, f"{live_n:,}", align="C")
+    pdf.set_font(FONT, "", 7)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_xy(rcx - 15, y + 37.5)
+    pdf.cell(30, 4, fmt(T['m_pages']), align="C")
+    ly = y + 60
+    col_w = (half - 12) / 2
+    for i, (name, v, col) in enumerate([m for m in mix if m[1] > 0]):
+        cxx = i % 2
+        rxx = i // 2
+        if rtl:
+            ix = right_x + half - 6 - (cxx + 1) * col_w
+        else:
+            ix = right_x + 6 + cxx * col_w
+        iy = ly + rxx * 7
+        pdf.set_fill_color(*col)
+        if rtl:
+            pdf.ellipse(ix + col_w - 3.5, iy + 1.8, 3, 3, 'F')
+            pdf.set_xy(ix, iy)
+            pdf.set_font(FONT, "", 8)
+            pdf.set_text_color(*C_MUTED)
+            pdf.cell(col_w - 5, 6.5, fmt(f"{name} {v:,}"), align="R")
+        else:
+            pdf.ellipse(ix, iy + 1.8, 3, 3, 'F')
+            pdf.set_xy(ix + 5, iy)
+            pdf.set_font(FONT, "", 8)
+            pdf.set_text_color(*C_MUTED)
+            pdf.cell(col_w - 5, 6.5, fmt(f"{name} {v:,}"), align="L")
+    pdf.set_y(y + 94)
 
     n = 0
 
@@ -931,42 +1174,49 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     intro, points, close = build_diagnosis(score, stats, lang)
     pdf.para(intro, size=9.5, color=C_INK)
     pdf.ln(3)
-    for pt in points:
-        lines = pdf.wrap(pt, W - 10, 9)
-        need = len(lines) * 5 + 3
-        if pdf.get_y() + need > 262:
+    for k, pt in enumerate(points, 1):
+        lines = pdf.wrap(pt, W - 22, 9)
+        h = len(lines) * 5 + 6
+        if pdf.get_y() + h > 266:
             pdf.add_page()
         y = pdf.get_y()
-        pdf.set_fill_color(*C_INK)
-        dot = (210 - M - 2.4) if rtl else M
-        pdf.rect(dot, y + 1.6, 2.4, 2.4, 'F')
+        pdf.set_fill_color(*(C_BG if k % 2 else (255, 255, 255)))
+        pdf.rect(M, y, W, h, 'F', round_corners=True, corner_radius=2.5)
+        d = 6.5
+        cx = (210 - M - 4 - d) if rtl else (M + 4)
+        pdf.set_fill_color(*C_ACC)
+        pdf.ellipse(cx, y + (h - d) / 2, d, d, 'F')
+        pdf.set_font(FONT, BOLD(), 8)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_xy(cx, y + (h - d) / 2)
+        pdf.cell(d, d, str(k), align="C")
         pdf.set_font(FONT, "", 9)
-        pdf.set_text_color(*C_MUTED)
+        pdf.set_text_color(*C_INK)
         for i, line in enumerate(lines):
-            pdf.set_xy(M if rtl else M + 6, y + i * 5)
-            pdf.cell(W - 6, 5, fmt(line), align=ALIGN)
-        pdf.set_y(y + len(lines) * 5 + 2.5)
-    pdf.ln(3)
+            pdf.set_xy((M + 4) if rtl else (M + 4 + d + 4), y + 3 + i * 5)
+            pdf.cell(W - 22, 5, fmt(line), align=ALIGN)
+        pdf.set_y(y + h + 1.8)
+    pdf.ln(4)
 
-    lines = pdf.wrap(close, W - 14, 9.5)
-    h = len(lines) * 5.2 + 8
-    if pdf.get_y() + h > 265:
+    lines = pdf.wrap(close, W - 16, 9.8)
+    h = len(lines) * 5.4 + 10
+    if pdf.get_y() + h > 266:
         pdf.add_page()
     y = pdf.get_y()
-    pdf.set_fill_color(*C_BG)
-    pdf.rect(M, y, W, h, 'F')
+    pdf.set_fill_color(*C_INK)
+    pdf.rect(M, y, W, h, 'F', round_corners=True, corner_radius=3)
     pdf.set_fill_color(*verdict_rgb)
     if rtl:
-        pdf.rect(210 - M - 2.2, y, 2.2, h, 'F')
+        pdf.rect(210 - M - 3, y + 3, 3, h - 6, 'F', round_corners=True, corner_radius=1.5)
     else:
-        pdf.rect(M, y, 2.2, h, 'F')
-    pdf.set_font(FONT, "", 9.5)
-    pdf.set_text_color(*C_INK)
-    yy = y + 4
+        pdf.rect(M, y + 3, 3, h - 6, 'F', round_corners=True, corner_radius=1.5)
+    pdf.set_font(FONT, "", 9.8)
+    pdf.set_text_color(255, 255, 255)
+    yy = y + 5
     for line in lines:
-        pdf.set_xy(M + 7, yy)
-        pdf.cell(W - 14, 5.2, fmt(line), align=ALIGN)
-        yy += 5.2
+        pdf.set_xy(M + 8, yy)
+        pdf.cell(W - 16, 5.4, fmt(line), align=ALIGN)
+        yy += 5.4
 
     return bytes(pdf.output())
 
@@ -1158,174 +1408,216 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     pdf.set_auto_page_break(True, margin=26)
     pdf.add_page()
 
-    def money(value, x, w, y, size=10, bold=False, color=C_MUTED, center=True):
-        """يكتب المبلغ ثم رمز الريال بجانبه بحجم متناسب مع الخط."""
+    # رمز الريال بنسختين: داكن للخلفية الفاتحة، وأبيض للبطاقة الكحلية
+    sym_dark = sym_white = None
+    if riyal:
+        try:
+            from PIL import Image as _Img
+            base = _Img.open(str(RIYAL_PATH)).convert('RGBA')
+            sym_dark = base
+            white = _Img.new('RGBA', base.size, (255, 255, 255, 0))
+            white.putalpha(base.getchannel('A'))
+            px = white.load()
+            for xx in range(base.size[0]):
+                for yy in range(base.size[1]):
+                    a_ = base.getpixel((xx, yy))[3]
+                    px[xx, yy] = (255, 255, 255, a_)
+            sym_white = white
+        except Exception:
+            sym_dark = str(RIYAL_PATH)
+            sym_white = str(RIYAL_PATH)
+
+    def money(value, x, w, y, size=10, bold=False, color=C_MUTED, align='C', light=False):
+        """المبلغ مع رمز الريال: يسار الرقم في العربية، ويمينه في الإنجليزية."""
         txt = f"{value:,.0f}"
         pdf.set_font(FONT, B if bold else "", size)
         pdf.set_text_color(*color)
-        sym_h = size * 0.30
+        sym_h = size * 0.32
         sym_w = sym_h * 0.92
-        gap = 1.2
+        gap = 1.3
         tw = pdf.get_string_width(txt)
-        total = tw + (sym_w + gap if riyal else
-                      pdf.get_string_width(" " + T['currency']))
-        start = x + (w - total) / 2 if center else x
-        pdf.set_xy(start, y)
-        pdf.cell(tw, size * 0.5, txt, 0, 0, 'L')
+        total = tw + (sym_w + gap if riyal else pdf.get_string_width(" " + T['currency']))
+        start = x + (w - total) / 2 if align == 'C' else (x + w - total if align == 'R' else x)
+        line_h = size * 0.5
+        sym = sym_white if light else sym_dark
         if riyal:
+            sx, nx = (start, start + sym_w + gap) if rtl else (start + tw + gap, start)
             try:
-                pdf.image(str(RIYAL_PATH), x=start + tw + gap,
-                          y=y + (size * 0.5 - sym_h) / 2 + 0.2, h=sym_h)
+                pdf.image(sym, x=sx, y=y + (line_h - sym_h) / 2 + 0.25, h=sym_h)
             except Exception:
                 pass
+            pdf.set_xy(nx, y)
+            pdf.cell(tw, line_h, txt, 0, 0, 'L')
         else:
-            pdf.set_xy(start + tw, y)
-            pdf.cell(total - tw, size * 0.5, fmt(T['currency']), 0, 0, 'L')
+            cur = fmt(T['currency'])
+            pdf.set_xy(start, y)
+            pdf.cell(total, line_h, (f"{cur} {txt}" if rtl else f"{txt} {cur}"), 0, 0, 'L')
 
-    # ---------- الترويسة: الشعار وتحته الرابط والبريد ----------
-    head_y = 14
+    # ---------- الترويسة: شريط كحلي ----------
+    pdf.set_fill_color(*C_INK)
+    pdf.rect(0, 0, 210, 58, 'F')
+    pdf.set_fill_color(*C_NAVY2)
+    pdf.ellipse(-25 if rtl else 135, -62, 100, 100, 'F')
+    pdf.set_fill_color(*C_ACC)
+    pdf.rect(0, 58, 210, 1.8, 'F')
     if LOGO_PATH.exists():
         try:
-            pdf.image(str(LOGO_PATH), x=(M if rtl else 210 - M - 34), y=head_y, h=12)
+            lx = M if rtl else 210 - M - 40
+            pdf.set_fill_color(255, 255, 255)
+            pdf.rect(lx, 14, 40, 18, 'F', round_corners=True, corner_radius=3)
+            pdf.image(str(LOGO_PATH), x=lx + 3.5, y=16.5, h=13)
         except Exception:
             pass
-
-    # العنوان في الجهة المقابلة للشعار حتى لا يتداخلا
-    tx = (M + 70) if rtl else M
-    tw = W - 70
-    pdf.set_xy(tx, head_y + 1)
-    pdf.set_font(FONT, B, 20)
-    pdf.set_text_color(*C_INK)
-    pdf.cell(tw, 9, fmt(T['title']), 0, 2, ALIGN)
+    tx = M + 50 if rtl else M
+    tw = W - 50
+    pdf.set_xy(tx, 14)
+    pdf.set_font(FONT, B, 24)
+    pdf.set_text_color(255, 255, 255)
+    pdf.cell(tw, 11, fmt(T['title']), 0, 2, ALIGN)
     pdf.set_font(FONT, "", 10)
-    pdf.set_text_color(*C_MUTED)
+    pdf.set_text_color(203, 213, 225)
     pdf.cell(tw, 6, fmt(T['sub']), 0, 0, ALIGN)
-
-    pdf.set_y(head_y + 24)
-    pdf.set_draw_color(*C_LINE)
-    pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
-    pdf.ln(5)
-
     ref = datetime.now().strftime('%Y%m%d-') + f"{abs(hash(dom)) % 9000 + 1000}"
-    pdf.set_font(FONT, "", 10)
+    pdf.set_font(FONT, "", 9)
+    pdf.set_xy(tx, 40)
+    pdf.cell(tw, 6, fmt(f"{T['no']}: {ref}     {T['date']}: {datetime.now().strftime('%Y-%m-%d')}"), 0, 0, ALIGN)
+
+    # ---------- بطاقة العميل ----------
+    y = 68
+    pdf.set_draw_color(*C_LINE)
+    pdf.set_fill_color(*C_BG)
+    pdf.rect(M, y, W, 18, 'F', round_corners=True, corner_radius=3)
+    pdf.set_font(FONT, "", 9)
+    pdf.set_text_color(*C_MUTED)
+    pdf.set_xy(M + 6, y + 2.5)
+    pdf.cell(W - 12, 6, fmt(T['to']), 0, 2, ALIGN)
+    pdf.set_font(FONT, B, 12.5)
     pdf.set_text_color(*C_INK)
-    for lbl, val in [(T['to'], store_name or dom), (T['no'], ref),
-                     (T['date'], datetime.now().strftime('%Y-%m-%d'))]:
-        pdf.set_x(M)
-        pdf.cell(W, 6.2, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
-    pdf.ln(4)
+    pdf.cell(W - 12, 7, store_name or dom, 0, 0, ALIGN)
+    pdf.set_y(y + 25)
 
     # ---------- جدول البنود ----------
-    wq, wu, wt = 24, 32, 32
+    wq, wu, wt = 26, 30, 34
     wn = W - wq - wu - wt
+    yh = pdf.get_y()
     pdf.set_fill_color(*C_INK)
+    pdf.rect(M, yh, W, 10, 'F', round_corners=True, corner_radius=3)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font(FONT, B, 9.5)
-    pdf.set_x(M)
-    heads = ([(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq),
-              (T['h_item'], wn)] if rtl else
-             [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu),
-              (T['h_total'], wt)])
-    for i, (h, w) in enumerate(heads):
-        pdf.cell(w, 8, fmt(h), 0, 1 if i == len(heads) - 1 else 0,
-                 'C' if w != wn else ALIGN, fill=True)
-
+    heads = ([(T['h_total'], wt), (T['h_unit'], wu), (T['h_qty'], wq), (T['h_item'], wn)] if rtl else
+             [(T['h_item'], wn), (T['h_qty'], wq), (T['h_unit'], wu), (T['h_total'], wt)])
+    xx = M
+    for h_, w_ in heads:
+        pdf.set_xy(xx + (4 if w_ == wn and not rtl else 0), yh + 1)
+        pdf.cell(w_ - (4 if w_ == wn else 0), 8, fmt(h_), 0, 0, 'C' if w_ != wn else ALIGN)
+        xx += w_
+    pdf.set_y(yh + 12)
     for idx, it in enumerate(quote['items']):
         name = T[it['key']]
-        unit_lbl = {'image_alt': T['unit_img'],
-                    'redirect_fix': T['unit_link'], 'broken_link_fix': T['unit_link'],
+        unit_lbl = {'image_alt': T['unit_img'], 'redirect_fix': T['unit_link'], 'broken_link_fix': T['unit_link'],
                     'internal_link_fix': T['unit_link']}.get(it['key'], T['unit_page'])
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
         for word in T.get(it.get('desc_key') or '', T[it['key'] + '_d']).split():
             trial = (cur + " " + word).strip()
-            if pdf.get_string_width(fmt(trial)) <= wn - 4:
+            if pdf.get_string_width(fmt(trial)) <= wn - 8:
                 cur = trial
             else:
                 lines.append(cur)
                 cur = word
         if cur:
             lines.append(cur)
-        h = 7.5 + len(lines) * 4.4 + 2
+        h = 10 + len(lines) * 4.4 + 3
         y = pdf.get_y()
-        if idx % 2 == 0:
-            pdf.set_fill_color(*C_BG)
-            pdf.rect(M, y, W, h, 'F')
-        pdf.set_font(FONT, B, 10)
+        pdf.set_fill_color(*(C_BG if idx % 2 == 0 else (255, 255, 255)))
+        pdf.rect(M, y, W, h, 'F', round_corners=True, corner_radius=2.5)
+        name_x = (M + wt + wu + wq) if rtl else (M + 4)
+        qty_x = (M + wt + wu) if rtl else (M + wn)
+        unit_x = (M + wt) if rtl else (M + wn + wq)
+        tot_x = M if rtl else (M + wn + wq + wu)
+        pdf.set_font(FONT, B, 10.5)
         pdf.set_text_color(*C_INK)
-        if rtl:
-            money(it['total'], M, wt, y + 2, 10, True, C_INK)
-            money(it['unit'], M + wt, wu, y + 2, 10, False, C_MUTED)
-            pdf.set_xy(M + wt + wu, y + 1.5)
-            pdf.set_font(FONT, "", 10)
-            pdf.set_text_color(*C_MUTED)
-            pdf.cell(wq, 6, fmt(f"{it['qty']} {unit_lbl}"), 0, 0, 'C')
-            pdf.set_font(FONT, B, 10)
-            pdf.set_text_color(*C_INK)
-            pdf.cell(wn, 6, fmt(name), 0, 1, 'R')
-        else:
-            pdf.set_xy(M, y + 1.5)
-            pdf.cell(wn, 6, fmt(name), 0, 0, 'L')
-            pdf.set_font(FONT, "", 10)
-            pdf.set_text_color(*C_MUTED)
-            pdf.cell(wq, 6, fmt(f"{it['qty']} {unit_lbl}"), 0, 0, 'C')
-            money(it['unit'], M + wn + wq, wu, y + 2, 10, False, C_MUTED)
-            money(it['total'], M + wn + wq + wu, wt, y + 2, 10, True, C_INK)
+        pdf.set_xy(name_x, y + 2.5)
+        pdf.cell(wn - 4, 6, fmt(name), 0, 0, ALIGN)
+        # الكمية في شارة
+        qtxt = fmt(f"{it['qty']:,} {unit_lbl}")
+        pdf.set_font(FONT, "", 9)
+        qw = min(wq - 3, pdf.get_string_width(qtxt) + 7)
+        pdf.set_fill_color(*C_SOFT)
+        pdf.rect(qty_x + (wq - qw) / 2, y + 2.6, qw, 6.5, 'F', round_corners=True, corner_radius=3.2)
+        pdf.set_text_color(*C_INK)
+        pdf.set_xy(qty_x + (wq - qw) / 2, y + 2.6)
+        pdf.cell(qw, 6.5, qtxt, 0, 0, 'C')
+        money(it['unit'], unit_x, wu, y + 3.4, 10, False, C_MUTED)
+        money(it['total'], tot_x, wt, y + 3.4, 10.5, True, C_INK)
         pdf.set_font(FONT, "", 8.5)
         pdf.set_text_color(*C_MUTED)
-        yy = y + 8
+        yy = y + 10
         for ln_ in lines:
-            pdf.set_xy(M + (0 if rtl else 2), yy)
-            pdf.cell(wn, 4.4, fmt(ln_), 0, 0, ALIGN)
+            pdf.set_xy(name_x if rtl else M + 4, yy)
+            pdf.cell(wn - 4, 4.4, fmt(ln_), 0, 0, ALIGN)
             yy += 4.4
-        pdf.set_y(y + h)
-        pdf.set_draw_color(*C_LINE)
-        pdf.line(M, pdf.get_y(), 210 - M, pdf.get_y())
+        pdf.set_y(y + h + 1.5)
 
-    # ---------- المجاميع ----------
-    pdf.ln(4)
-    rows = [(T['subtotal'], quote['subtotal'], False)]
+    # ---------- المجاميع (بطاقة كحلية) والدفع بجانبها ----------
+    pdf.ln(3)
+    box_w = 92
+    pay_w = W - box_w - 6
+    y0 = pdf.get_y()
+    if y0 + 40 > 262:
+        pdf.add_page()
+        y0 = pdf.get_y()
+    bx = M if rtl else 210 - M - box_w
+    px_ = (M + box_w + 6) if rtl else M
+    y = y0
+    rows_ = [(T['subtotal'], quote['subtotal'])]
     if quote['discount']:
-        rows.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%",
-                     -quote['discount'], False))
-    rows.append((T['total'], quote['total'], True))
-    for lbl, val, strong in rows:
-        y = pdf.get_y()
-        pdf.set_font(FONT, B if strong else "", 12 if strong else 10)
-        pdf.set_text_color(*(C_INK if strong else C_MUTED))
-        if rtl:
-            pdf.set_xy(M + 60, y)
-            pdf.cell(W - 60, 8, "", 0, 0)
-            money(val, M, 70, y + 1.5, 12 if strong else 10, strong,
-                  C_INK if strong else C_MUTED, center=False)
-            pdf.set_xy(M + 90, y)
-            pdf.cell(W - 90, 8, fmt(lbl), 0, 1, 'R')
-        else:
-            pdf.set_xy(M, y)
-            pdf.cell(70, 8, fmt(lbl), 0, 0, 'L')
-            money(val, M + 80, 70, y + 1.5, 12 if strong else 10, strong,
-                  C_INK if strong else C_MUTED, center=False)
-            pdf.ln(8)
-    pdf.set_font(FONT, "", 8.5)
+        rows_.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%", -quote['discount']))
+    for lbl, val in rows_:
+        pdf.set_font(FONT, "", 10)
+        pdf.set_text_color(*C_MUTED)
+        pdf.set_xy(bx + 5, y)
+        pdf.cell(box_w - 10, 7, fmt(lbl), 0, 0, ALIGN)
+        money(val, bx + 5, box_w - 10, y + 1.2, 10, False, C_MUTED, align='L' if rtl else 'R')
+        y += 8
+    pdf.set_fill_color(*C_INK)
+    pdf.rect(bx, y + 1, box_w, 17, 'F', round_corners=True, corner_radius=3)
+    pdf.set_font(FONT, B, 11)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(bx + 6, y + 5)
+    pdf.cell(box_w - 12, 8, fmt(T['total']), 0, 0, ALIGN)
+    money(quote['total'], bx + 6, box_w - 12, y + 6.2, 14, True, (255, 255, 255),
+          align='L' if rtl else 'R', light=True)
+    pdf.set_font(FONT, "", 8)
     pdf.set_text_color(*C_MUTED)
-    pdf.set_x(M)
-    pdf.cell(W, 5, fmt(T['novat']), ln=True, align=ALIGN)
-    pdf.ln(4)
+    pdf.set_xy(bx, y + 20)
+    pdf.cell(box_w, 5, fmt(T['novat']), 0, 0, ALIGN)
+    y_end = y + 26
 
-    # ---------- الدفع ----------
-    y = pdf.get_y()
-    pdf.set_fill_color(*C_BG)
-    pdf.rect(M, y, W, 25, 'F')
-    pdf.set_font(FONT, B, 10)
-    pdf.set_text_color(*C_INK)
-    pdf.set_xy(M + 5, y + 3)
-    pdf.cell(W - 10, 6, fmt(T['pay']), ln=True, align=ALIGN)
-    pdf.set_font(FONT, "", 9.5)
-    pdf.set_text_color(*C_MUTED)
+    # بطاقة الدفع
+    ph = max(y_end - y0 - 6, 30)
+    pdf.set_fill_color(236, 248, 246)
+    pdf.rect(px_, y0, pay_w, ph, 'F', round_corners=True, corner_radius=3)
+    pdf.set_fill_color(*C_ACC)
+    pdf.rect((px_ + pay_w - 3) if rtl else px_, y0 + 3, 3, ph - 6, 'F', round_corners=True, corner_radius=1.5)
+    pdf.set_font(FONT, B, 10.5)
+    pdf.set_text_color(*C_ACC)
+    pdf.set_xy(px_ + 7, y0 + 4)
+    pdf.cell(pay_w - 14, 6, fmt(T['pay']), 0, 2, ALIGN)
     for lbl, val in [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])]:
-        pdf.set_x(M + 5)
-        pdf.cell(W - 10, 6, fmt(f"{lbl}: {val}"), ln=True, align=ALIGN)
-    pdf.set_y(y + 29)
+        pdf.set_font(FONT, "", 8.3)
+        pdf.set_text_color(*C_MUTED)
+        pdf.set_x(px_ + 7)
+        pdf.cell(pay_w - 14, 5, fmt(lbl), 0, 2, ALIGN)
+        pdf.set_font(FONT, B, 9.3)
+        pdf.set_text_color(*C_INK)
+        pdf.set_x(px_ + 7)
+        if rtl and HAS_SHAPING:
+            pdf.set_text_shaping(False)      # الأرقام والرمز + تُكتب من اليسار كما هي
+        pdf.cell(pay_w - 14, 5.5, val, 0, 2, ALIGN)
+        if rtl and HAS_SHAPING:
+            pdf.set_text_shaping(True, direction="rtl")
+    pdf.set_y(max(y_end, y0 + ph) + 5)
 
     pdf.set_font(FONT, "", 8.5)
     pdf.set_text_color(*C_MUTED)
