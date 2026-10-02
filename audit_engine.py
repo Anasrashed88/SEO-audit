@@ -3641,7 +3641,11 @@ def suggest_alternatives(df):
         want = (_page_tokens(r['الرابط']) - common)
         if not want:
             continue
-        allowed = type_pref.get(btype, (T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO))
+        # رابط عام (عبارة بلا /products/ ولا رقم منتج، مثل /غرف-اطفال-صغيرة): غالباً رابط قائمة لقسم.
+        # وجهته قسم أو مقال، ولا يذهب لمنتج واحد إلا بتطابق قوي جداً
+        generic = not decisive_type(str(r['الرابط'])) and btype not in (T_PRODUCT,)
+        allowed = (T_CATEGORY, T_BLOG, T_INFO, T_PRODUCT) if generic else \
+            type_pref.get(btype, (T_PRODUCT, T_CATEGORY, T_BLOG, T_INFO))
         best = None
         vnorm = _variant_norm()
         core_want = want - vnorm
@@ -3655,7 +3659,14 @@ def suggest_alternatives(df):
                 continue
             score = hit / len(base)
             variant_hit = len((want & vnorm) & ct)
-            rank = (score, hit, variant_hit, -allowed.index(ctype))
+            if generic:
+                if ctype == T_PRODUCT and (hit < 3 or score < 0.75):
+                    continue
+                prio = 3 if (ctype == T_BLOG and score >= 0.99) else \
+                    2 if ctype == T_CATEGORY else 1 if ctype in (T_BLOG, T_INFO) else 0
+                rank = (prio, score, hit, hit / max(len(ct), 1), variant_hit)
+            else:
+                rank = (score, hit, variant_hit, -allowed.index(ctype))
             if best is None or rank > best[0]:
                 best = (rank, url, hit, score, ctype)
         if not best and HAS_FUZZ:
@@ -3676,8 +3687,9 @@ def suggest_alternatives(df):
         _, url, hit, score, ctype = best
         if hit >= 2 and score >= 0.75:
             conf = CONF_HIGH
-        elif (hit >= 2 and score >= 0.5) or (len(want) == 1 and hit == 1 and ctype == T_CATEGORY):
-            conf = CONF_MED
+        elif (hit >= 2 and score >= 0.5) or (len(want) == 1 and hit == 1 and ctype == T_CATEGORY) \
+                or (generic and ctype == T_CATEGORY):
+            conf = CONF_MED     # قسم لرابط عام: مناسب، لكنه يستحق نظرة قبل الرفع
         else:
             continue
         out[idx] = (url, conf)
