@@ -8,29 +8,36 @@ from datetime import datetime
 
 import pandas as pd
 
-# ترتيب الخدمات في المراحل عند التقسيم حسب النوع، ومفتاح كل خدمة في عرض السعر
+# الخدمات: مفتاحها، ومفتاحها في عرض السعر، والجداول (ملفات التصدير) التي تكوّنها
 SERVICES = [
     ('titles', 'meta_title', 'عناوين الميتا والروابط', 'Meta titles & URLs'),
     ('descs', 'meta_desc', 'أوصاف الميتا', 'Meta descriptions'),
     ('images', 'image_alt', 'النصوص البديلة للصور', 'Image alt texts'),
     ('broken', 'broken_link_fix', 'الروابط المعطلة', 'Broken links'),
 ]
+SERVICE_TABLES = {'titles': ['titles'], 'descs': ['descs'], 'images': ['alt_missing', 'alt_weak'],
+                  'broken': ['broken']}
+# أسماء أوراق ملف المهام = أسماء ملفات التصدير نفسها
+SHEET_NAMES = {'titles': 'عناوين وروابط تحتاج إصلاح', 'descs': 'أوصاف ميتا تحتاج إصلاح',
+               'alt_missing': 'صور بلا وصف', 'alt_weak': 'صور وصفها غير وصفي أو مكرر',
+               'broken': 'روابط لا تعمل', 'zid_redirects': 'تحويلات زد للاستيراد'}
 ORDINAL_AR = ['الأولى', 'الثانية', 'الثالثة', 'الرابعة', 'الخامسة']
 
 
 def work_tables(exports):
-    """من ملفات العمل الجاهزة: العناوين، والأوصاف، والصور (بلا وصف + ضعيفة)، والروابط التي تحتاج عملاً."""
+    """ملفات العمل كما هي في تبويب التصدير، بكل أعمدتها.
+    الروابط المعطلة: ما يحتاج عملاً فقط (هي التي في عرض السعر)."""
     def get(k):
         v = exports.get(k)
-        return v[1].copy() if v else pd.DataFrame()
-    images = pd.concat([get('alt_missing'), get('alt_weak')], ignore_index=True)
+        return v[1].copy().reset_index(drop=True) if v else pd.DataFrame()
     broken = get('broken')
     if not broken.empty:
         act = next((c for c in broken.columns if 'الإجراء' in str(c) or 'Action' in str(c)), None)
         if act:
             broken = broken[~broken[act].astype(str).str.contains('لا إجراء|No action', na=False)]
-    return {'titles': get('titles'), 'descs': get('descs'), 'images': images,
-            'broken': broken.reset_index(drop=True)}
+    return {'titles': get('titles'), 'descs': get('descs'), 'alt_missing': get('alt_missing'),
+            'alt_weak': get('alt_weak'), 'broken': broken.reset_index(drop=True),
+            'zid_redirects': get('zid_redirects')}
 
 
 def _chunks(df, n):
@@ -44,18 +51,20 @@ def _chunks(df, n):
     return out
 
 
+def _service_empty(tables, svc):
+    return all(tables.get(t) is None or tables.get(t).empty for t in SERVICE_TABLES[svc])
+
+
 def split_phases(tables, n, mode='priority'):
-    """يعيد قائمة مراحل، كل مرحلة {الخدمة: جدول}.
-    priority: كل خدمة تُقسم على المراحل والأهم في المرحلة الأولى.
-    type: كل خدمة كاملة في مرحلة واحدة (العناوين أولاً، ثم الأوصاف، ثم الصور)."""
+    """يعيد قائمة مراحل، كل مرحلة {اسم الجدول: جدول} بنفس أعمدة ملفات التصدير.
+    priority: كل جدول يُقسم على المراحل والأهم في المرحلة الأولى.
+    type: كل خدمة كاملة في مرحلة واحدة (العناوين والأوصاف، ثم الصور)."""
     n = max(1, int(n))
     phases = [dict() for _ in range(n)]
     if mode == 'type':
-        active = [k for k, *_ in SERVICES if not tables.get(k, pd.DataFrame()).empty]
-        # الروابط المعطلة تُرافق أول مرحلة (عمل صغير وعاجل)
+        active = [k for k, *_ in SERVICES if not _service_empty(tables, k)]
         main = [k for k in active if k != 'broken']
         n_eff = min(n, max(1, len(main)))
-        # مجموعات متتالية: مرحلتان = (العناوين + الأوصاف) ثم (الصور)
         size, extra = divmod(len(main), n_eff)
         groups, start = [], 0
         for i in range(n_eff):
@@ -65,23 +74,48 @@ def split_phases(tables, n, mode='priority'):
         if start < len(main):
             groups[-1].extend(main[start:])
         for i, g in enumerate(groups):
-            for k in g:
-                phases[i][k] = tables[k]
+            for svc in g:
+                for t in SERVICE_TABLES[svc]:
+                    if tables.get(t) is not None and not tables[t].empty:
+                        phases[i][t] = tables[t]
         if 'broken' in active:
             phases[0]['broken'] = tables['broken']
-        return [p for p in phases if p] or [dict()]
-    for k, *_ in SERVICES:
-        t = tables.get(k, pd.DataFrame())
-        if t is None or t.empty:
-            continue
-        for i, part in enumerate(_chunks(t, n)):
-            if not part.empty:
-                phases[i][k] = part
+    else:
+        for svc, *_ in SERVICES:
+            for t in SERVICE_TABLES[svc]:
+                tb = tables.get(t)
+                if tb is None or tb.empty:
+                    continue
+                for i, part in enumerate(_chunks(tb, n)):
+                    if not part.empty:
+                        phases[i][t] = part
+    # تحويلات زد: الصفوف الخاصة بالروابط المعطلة في كل مرحلة
+    red = tables.get('zid_redirects')
+    if red is not None and not red.empty:
+        from_col = next((c for c in red.columns if 'من' in str(c) or 'From' in str(c)), None)
+        for p in phases:
+            b = p.get('broken')
+            if from_col and b is not None and not b.empty:
+                url_col = next((c for c in b.columns if str(c) in ('الرابط', 'URL')), b.columns[0])
+                paths = {_path(u) for u in b[url_col]}
+                sub = red[red[from_col].map(_path).isin(paths)]
+                if not sub.empty:
+                    p['zid_redirects'] = sub.reset_index(drop=True)
     return [p for p in phases if p] or [dict()]
 
 
+def _path(u):
+    from urllib.parse import urlparse, unquote
+    u = unquote(str(u or ''))
+    return (urlparse(u).path if u.startswith('http') else u).rstrip('/').lower()
+
+
 def phase_counts(phase):
-    return {k: len(phase.get(k, pd.DataFrame())) for k, *_ in SERVICES}
+    def ln(t):
+        v = phase.get(t)
+        return 0 if v is None else len(v)
+    return {'titles': ln('titles'), 'descs': ln('descs'), 'images': ln('alt_missing') + ln('alt_weak'),
+            'broken': ln('broken')}
 
 
 def phase_summary(phase, platform):
@@ -93,16 +127,23 @@ def phase_summary(phase, platform):
 
 
 def task_file(phase, phase_no, total):
-    """ملف مهام المرحلة: ورقة لكل خدمة."""
+    """ملف مهام المرحلة: نفس ملفات التصدير بكل أعمدتها، كل ملف في ورقة، مرقّمة من 1 داخل المرحلة."""
+    from export_utils import clickable_urls
     buf = io.BytesIO()
+    c = phase_counts(phase)
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
-        info = pd.DataFrame([{'المرحلة': f"{phase_no} من {total}",
-                              **{name: len(phase.get(k, pd.DataFrame())) for k, _, name, _ in SERVICES}}])
-        info.to_excel(w, index=False, sheet_name='ملخص المرحلة')
-        for k, _, name, _ in SERVICES:
-            t = phase.get(k)
-            if t is not None and not t.empty:
-                t.to_excel(w, index=False, sheet_name=name[:31])
+        pd.DataFrame([{'المرحلة': f"{phase_no} من {total}", 'عناوين': c['titles'], 'أوصاف': c['descs'],
+                       'صور': c['images'], 'روابط معطلة': c['broken']}]).to_excel(
+            w, index=False, sheet_name='ملخص المرحلة')
+        for key in ('titles', 'descs', 'alt_missing', 'alt_weak', 'broken', 'zid_redirects'):
+            t = phase.get(key)
+            if t is None or t.empty:
+                continue
+            t = t.copy()
+            num_col = next((col for col in t.columns if str(col) in ('م', '#')), None)
+            if num_col is not None:
+                t[num_col] = range(1, len(t) + 1)
+            clickable_urls(t).to_excel(w, index=False, sheet_name=SHEET_NAMES[key][:31])
     return buf.getvalue()
 
 
