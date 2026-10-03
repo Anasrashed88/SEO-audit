@@ -1356,7 +1356,7 @@ INVOICE_TXT = {
         'unit_page': 'صفحة', 'unit_img': 'صورة', 'unit_link': 'رابط',
         'subtotal': 'المجموع', 'discount': 'خصم الكمية', 'total': 'الإجمالي المستحق',
         'novat': 'الأسعار غير شاملة ضريبة القيمة المضافة',
-        'pay': 'بيانات الدفع', 'iban': 'الآيبان', 'stc': 'STC Bank',
+        'pay': 'بيانات الدفع', 'iban': 'الآيبان (البنك الأهلي السعودي)', 'stc': 'STC Bank',
         'note': 'يبدأ التنفيذ بعد تأكيد الطلب.',
         'scope': 'الكميات مبنية على نتائج الفحص الفني، وتشمل ما يحتاج إصلاحاً فقط.',
     },
@@ -1393,7 +1393,7 @@ INVOICE_TXT = {
         'unit_page': 'pages', 'unit_img': 'images', 'unit_link': 'links',
         'subtotal': 'Subtotal', 'discount': 'Volume discount', 'total': 'Total due',
         'novat': 'Prices exclude VAT',
-        'pay': 'Payment details', 'iban': 'IBAN', 'stc': 'STC Bank',
+        'pay': 'Payment details', 'iban': 'IBAN (Saudi National Bank)', 'stc': 'STC Bank',
         'note': 'Work begins upon confirmation.',
         'scope': 'Quantities are based on the technical audit and cover only '
                  'what needs fixing.',
@@ -1698,8 +1698,7 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
     pdf.set_text_color(*C_ACC)
     pdf.set_xy(px_ + 7, y0 + (ph - content_h) / 2)
     pdf.cell(pay_w - 14, 6, fmt(T['pay']), 0, 2, ALIGN)
-    pay_rows = ([(PT['bank'], 'STC Bank'), (T['iban'], PAYMENT['iban'])] if phase
-                else [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])])
+        pay_rows = [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])]
     for lbl, val in pay_rows:
         pdf.set_font(FONT, "", 8.3)
         pdf.set_text_color(*C_MUTED)
