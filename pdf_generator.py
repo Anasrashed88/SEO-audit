@@ -1401,7 +1401,30 @@ INVOICE_TXT = {
 }
 
 
-def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
+FREELANCE_DOC = 'FL-486531330'
+PHASE_TXT = {
+    'ar': {'no': 'رقم الفاتورة', 'doc': 'وثيقة عمل حر رقم: ' + FREELANCE_DOC, 'client': 'العميل', 'phone': 'الجوال', 'store': 'المتجر',
+           'novat': 'مقدم الخدمة غير مسجل في ضريبة القيمة المضافة',
+           'terms': ['هذه الفاتورة خاصة بتنفيذ مخرجات {phase} فقط.',
+                     'يبدأ العمل الفعلي في المرحلة فور تحويل المبلغ المستحق لها.',
+                     'يُمنح العميل مهلة 3 أيام عمل من تسليم تقرير المرحلة لإبداء الملاحظات، '
+                     'ويُعد عدم الرد قبولاً نهائياً لإنجاز المرحلة.',
+                     'تنتقل حقوق استخدام مخرجات المرحلة للعميل بعد سداد قيمتها كاملة.'],
+           'bank': 'البنك'},
+    'en': {'no': 'Invoice No.', 'doc': 'Freelance Document No: ' + FREELANCE_DOC, 'client': 'Client', 'phone': 'Mobile', 'store': 'Store',
+           'novat': 'The service provider is not registered for VAT',
+           'terms': ['This invoice covers the deliverables of {phase} only.',
+                     'Work on the phase begins once its amount is transferred.',
+                     'The client has 3 working days from delivery of the phase report to send feedback; '
+                     'no reply is considered final acceptance of the phase.',
+                     'Usage rights to the phase deliverables transfer to the client once it is paid in full.'],
+           'bank': 'Bank'},
+}
+
+
+def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
+    """عرض سعر — أو فاتورة مرحلة إذا مُرّر phase:
+    {'title', 'number', 'date', 'client_name', 'client_phone', 'phase_label'}"""
     """عرض سعر بصفحة واحدة: الهوية وبيانات التواصل أعلى، والمبالغ برمز الريال."""
     rtl = (lang == 'ar')
     if rtl and not FONT_PATH.exists():
@@ -1509,27 +1532,59 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     pdf.set_xy(tx, 14)
     pdf.set_font(FONT, B, 24)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(tw, 11, fmt(T['title']), 0, 2, ALIGN)
+    PT = PHASE_TXT[lang]
+    head_title = phase['title'] if phase else T['title']
+    tsz = 24
+    while tsz > 15 and pdf.get_string_width(fmt(head_title)) > tw:
+        tsz -= 1
+        pdf.set_font(FONT, B, tsz)
+    pdf.cell(tw, 11, fmt(head_title), 0, 2, ALIGN)
     pdf.set_font(FONT, "", 10)
     pdf.set_text_color(203, 213, 225)
-    pdf.cell(tw, 6, fmt(T['sub']), 0, 0, ALIGN)
-    ref = datetime.now().strftime('%Y%m%d-') + f"{abs(hash(dom)) % 9000 + 1000}"
+    pdf.cell(tw, 6, fmt(PT['doc'] if phase else T['sub']), 0, 0, ALIGN)
+    if phase:
+        ref, when = phase['number'], phase['date']
+    else:
+        ref = datetime.now().strftime('%Y%m%d-') + f"{abs(hash(dom)) % 9000 + 1000}"
+        when = datetime.now().strftime('%Y-%m-%d')
     pdf.set_font(FONT, "", 9)
     pdf.set_xy(tx, 40)
-    pdf.cell(tw, 6, fmt(f"{T['no']}: {ref}     {T['date']}: {datetime.now().strftime('%Y-%m-%d')}"), 0, 0, ALIGN)
+    iso = (lambda v: f"\u2066{v}\u2069") if rtl else (lambda v: v)    # الأرقام بترتيبها داخل النص العربي
+    pdf.cell(tw, 6, fmt(f"{PT['no'] if phase else T['no']}: {iso(ref)}     {T['date']}: {iso(when)}"), 0, 0, ALIGN)
 
     # ---------- بطاقة العميل ----------
     y = 68
     pdf.set_draw_color(*C_LINE)
     pdf.set_fill_color(*C_BG)
     pdf.rect(M, y, W, 18, 'F', round_corners=True, corner_radius=3)
-    pdf.set_font(FONT, "", 9)
-    pdf.set_text_color(*C_MUTED)
-    pdf.set_xy(M + 6, y + 2.5)
-    pdf.cell(W - 12, 6, fmt(T['to']), 0, 2, ALIGN)
-    pdf.set_font(FONT, B, 12.5)
-    pdf.set_text_color(*C_INK)
-    pdf.cell(W - 12, 7, store_name or dom, 0, 0, ALIGN)
+    if phase and (phase.get('client_name') or phase.get('client_phone')):
+        cols = [(PT['client'], phase.get('client_name') or '—'), (PT['phone'], phase.get('client_phone') or '—'),
+                (PT['store'], store_name or dom)]
+        cw_ = (W - 12) / 3
+        order_ = list(reversed(cols)) if rtl else cols
+        for ci, (lbl, val) in enumerate(order_):
+            cx_ = M + 6 + ci * cw_
+            pdf.set_font(FONT, "", 9)
+            pdf.set_text_color(*C_MUTED)
+            pdf.set_xy(cx_, y + 2.5)
+            pdf.cell(cw_, 6, fmt(lbl), 0, 0, ALIGN)
+            pdf.set_font(FONT, B, 11)
+            pdf.set_text_color(*C_INK)
+            pdf.set_xy(cx_, y + 8.5)
+            plain = lbl == PT['phone'] or lbl == PT['store']
+            if rtl and HAS_SHAPING and plain:
+                pdf.set_text_shaping(False)
+            pdf.cell(cw_, 7, val if plain else fmt(val), 0, 0, ALIGN)
+            if rtl and HAS_SHAPING and plain:
+                pdf.set_text_shaping(True, direction="rtl")
+    else:
+        pdf.set_font(FONT, "", 9)
+        pdf.set_text_color(*C_MUTED)
+        pdf.set_xy(M + 6, y + 2.5)
+        pdf.cell(W - 12, 6, fmt(T['to']), 0, 2, ALIGN)
+        pdf.set_font(FONT, B, 12.5)
+        pdf.set_text_color(*C_INK)
+        pdf.cell(W - 12, 7, store_name or dom, 0, 0, ALIGN)
     pdf.set_y(y + 25)
 
     # ---------- جدول البنود ----------
@@ -1576,6 +1631,8 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
         pdf.set_xy(name_x, y + 2.5)
         pdf.cell(wn - 4, 6, fmt(name), 0, 0, ALIGN)
         # الكمية في شارة
+        if not rtl and it['qty'] == 1 and unit_lbl.endswith('s'):
+            unit_lbl = unit_lbl[:-1]          # 1 link لا 1 links
         qtxt = fmt(f"{it['qty']:,} {unit_lbl}")
         pdf.set_font(FONT, "", 9)
         qw = min(wq - 3, pdf.get_string_width(qtxt) + 7)
@@ -1627,7 +1684,7 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     pdf.set_font(FONT, "", 8)
     pdf.set_text_color(*C_MUTED)
     pdf.set_xy(bx, y + 20)
-    pdf.cell(box_w, 5, fmt(T['novat']), 0, 0, ALIGN)
+    pdf.cell(box_w, 5, fmt(PT['novat'] if phase else T['novat']), 0, 0, ALIGN)
     y_end = y + 26
 
     # بطاقة الدفع
@@ -1641,7 +1698,9 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
     pdf.set_text_color(*C_ACC)
     pdf.set_xy(px_ + 7, y0 + (ph - content_h) / 2)
     pdf.cell(pay_w - 14, 6, fmt(T['pay']), 0, 2, ALIGN)
-    for lbl, val in [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])]:
+    pay_rows = ([(PT['bank'], 'STC Bank'), (T['iban'], PAYMENT['iban'])] if phase
+                else [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])])
+    for lbl, val in pay_rows:
         pdf.set_font(FONT, "", 8.3)
         pdf.set_text_color(*C_MUTED)
         pdf.set_x(px_ + 7)
@@ -1658,9 +1717,18 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name=''):
 
     pdf.set_font(FONT, "", 8.5)
     pdf.set_text_color(*C_MUTED)
-    for line in (T['scope'], T['note'], T['valid']):
-        pdf.set_x(M)
-        pdf.cell(W, 5, fmt(line), ln=True, align=ALIGN)
+    if phase:
+        terms = [t.format(phase=phase.get('phase_label', '')) for t in PT['terms']]
+        pdf.set_font(FONT, "", 8)
+        for k, t in enumerate(terms, 1):
+            for j, line in enumerate(pdf.multi_cell(W, 4.2, fmt(f"{k}. {t}"), align=ALIGN, dry_run=True,
+                                                     output="LINES")):
+                pdf.set_x(M)
+                pdf.cell(W, 4.2, line, ln=True, align=ALIGN)
+    else:
+        for line in (T['scope'], T['note'], T['valid']):
+            pdf.set_x(M)
+            pdf.cell(W, 5, fmt(line), ln=True, align=ALIGN)
     return bytes(pdf.output())
 
 
