@@ -128,7 +128,7 @@ def phase_summary(phase, platform):
 
 def task_file(phase, phase_no, total):
     """ملف مهام المرحلة: نفس ملفات التصدير بكل أعمدتها، كل ملف في ورقة، مرقّمة من 1 داخل المرحلة."""
-    from export_utils import clickable_urls
+    from export_utils import write_chunked
     buf = io.BytesIO()
     c = phase_counts(phase)
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
@@ -143,7 +143,7 @@ def task_file(phase, phase_no, total):
             num_col = next((col for col in t.columns if str(col) in ('م', '#')), None)
             if num_col is not None:
                 t[num_col] = range(1, len(t) + 1)
-            clickable_urls(t).to_excel(w, index=False, sheet_name=SHEET_NAMES[key][:31])
+            write_chunked(w, t, SHEET_NAMES[key])       # كل 500 صف في ورقة
     return buf.getvalue()
 
 
