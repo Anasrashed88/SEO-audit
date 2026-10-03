@@ -1273,7 +1273,7 @@ DEFAULT_PRICES = {
 }
 PAYMENT = {
     'iban': 'SA87 1000 0026 5571 0000 0103',
-    'stc': '+966 55 354 1890',
+    'stc': '0553541890',
 }
 # خصم الكمية: المتاجر الكبيرة تحصل على سعر أفضل
 VOLUME_TIERS = [(1000, 0.20), (500, 0.15), (200, 0.10), (0, 0.0)]
@@ -1687,32 +1687,35 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
     pdf.cell(box_w, 5, fmt(PT['novat'] if phase else T['novat']), 0, 0, ALIGN)
     y_end = y + 26
 
-    # بطاقة الدفع
-    ph = max(y_end - y0 - 6, 30)
-    pdf.set_fill_color(236, 248, 246)
-    pdf.rect(px_, y0, pay_w, ph, 'F', round_corners=True, corner_radius=3)
-    pdf.set_fill_color(*C_ACC)
-    pdf.rect((px_ + pay_w - 3) if rtl else px_, y0 + 3, 3, ph - 6, 'F', round_corners=True, corner_radius=1.5)
-    content_h = 6 + 2 * (5 + 5.5)
-    pdf.set_font(FONT, B, 10.5)
-    pdf.set_text_color(*C_ACC)
-    pdf.set_xy(px_ + 7, y0 + (ph - content_h) / 2)
-    pdf.cell(pay_w - 14, 6, fmt(T['pay']), 0, 2, ALIGN)
+    # بطاقة الدفع: في فواتير المراحل فقط. عرض السعر قرار قبل الاتفاق، فلا يطلب تحويلاً
+    if phase:
+        ph = max(y_end - y0 - 6, 30)
+        pdf.set_fill_color(236, 248, 246)
+        pdf.rect(px_, y0, pay_w, ph, 'F', round_corners=True, corner_radius=3)
+        pdf.set_fill_color(*C_ACC)
+        pdf.rect((px_ + pay_w - 3) if rtl else px_, y0 + 3, 3, ph - 6, 'F', round_corners=True, corner_radius=1.5)
+        content_h = 6 + 2 * (5 + 5.5)
+        pdf.set_font(FONT, B, 10.5)
+        pdf.set_text_color(*C_ACC)
+        pdf.set_xy(px_ + 7, y0 + (ph - content_h) / 2)
+        pdf.cell(pay_w - 14, 6, fmt(T['pay']), 0, 2, ALIGN)
         pay_rows = [(T['iban'], PAYMENT['iban']), (T['stc'], PAYMENT['stc'])]
-    for lbl, val in pay_rows:
-        pdf.set_font(FONT, "", 8.3)
-        pdf.set_text_color(*C_MUTED)
-        pdf.set_x(px_ + 7)
-        pdf.cell(pay_w - 14, 5, fmt(lbl), 0, 2, ALIGN)
-        pdf.set_font(FONT, B, 9.3)
-        pdf.set_text_color(*C_INK)
-        pdf.set_x(px_ + 7)
-        if rtl and HAS_SHAPING:
-            pdf.set_text_shaping(False)      # الأرقام والرمز + تُكتب من اليسار كما هي
-        pdf.cell(pay_w - 14, 5.5, val, 0, 2, ALIGN)
-        if rtl and HAS_SHAPING:
-            pdf.set_text_shaping(True, direction="rtl")
-    pdf.set_y(max(y_end, y0 + ph) + 5)
+        for lbl, val in pay_rows:
+            pdf.set_font(FONT, "", 8.3)
+            pdf.set_text_color(*C_MUTED)
+            pdf.set_x(px_ + 7)
+            pdf.cell(pay_w - 14, 5, fmt(lbl), 0, 2, ALIGN)
+            pdf.set_font(FONT, B, 9.3)
+            pdf.set_text_color(*C_INK)
+            pdf.set_x(px_ + 7)
+            if rtl and HAS_SHAPING:
+                pdf.set_text_shaping(False)      # الأرقام والرمز + تُكتب من اليسار كما هي
+            pdf.cell(pay_w - 14, 5.5, val, 0, 2, ALIGN)
+            if rtl and HAS_SHAPING:
+                pdf.set_text_shaping(True, direction="rtl")
+        pdf.set_y(max(y_end, y0 + ph) + 5)
+    else:
+        pdf.set_y(y_end + 5)
 
     pdf.set_font(FONT, "", 8.5)
     pdf.set_text_color(*C_MUTED)
