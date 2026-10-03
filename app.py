@@ -179,6 +179,10 @@ with st.sidebar:
         else:
             st.caption("🐢 صفحة واحدة في كل مرة — فحص 350 صفحة يأخذ تقريباً 10 إلى 15 دقيقة.")
     eng.set_connection_mode(conn_choice)
+    platform_choice = st.selectbox(
+        "منصة المتجر", ["تلقائي (موصى به)", "زد", "شوبيفاي", "سلة"], index=0,
+        help="التلقائي يكتشف المنصة من صفحة المتجر. اختر المنصة يدوياً فقط إذا أخطأ الاكتشاف.")
+    platform_hint = {"زد": "zid", "شوبيفاي": "shopify", "سلة": "salla"}.get(platform_choice)
     use_cache = st.checkbox(
         "استكمال من الفحص السابق (آخر 24 ساعة)", value=True,
         help="كل صفحة تُفحص تُحفظ فوراً. عند إعادة فحص نفس المتجر تؤخذ الصفحات الناجحة "
@@ -316,7 +320,7 @@ if nav == "🔍 فحص متجر جديد":
                                    do_sitemap_check, progress,
                                    sitemap_uploads=uploads or None,
                                    sitemap_inputs=inputs or None,
-                                   use_cache=use_cache)
+                                   use_cache=use_cache, platform_hint=platform_hint)
             status.update(label="اكتمل الفحص", state="complete", expanded=False)
 
         df = result['df']
