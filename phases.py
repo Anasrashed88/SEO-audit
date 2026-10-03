@@ -207,9 +207,8 @@ def whatsapp_message(client_name, store, phase, i, n, number, total, iban, bank,
 رقم الفاتورة: {number}
 
 بيانات التحويل:
-{bank}
-الآيبان: {iban}
-
+الآيبان (البنك الأهلي السعودي): {iban}
+STC Bank: 0553541890
 يبدأ العمل فور التحويل، وبعد التسليم لديكم 3 أيام عمل لإبداء أي ملاحظات.
 
 شاكر لكم ثقتكم،
