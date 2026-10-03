@@ -706,7 +706,13 @@ def norm_host(netloc):
 # بادئات اللغة: /ar و /en وغيرها — الصفحة نفسها بلغة أخرى لا تُحسب صفحة جديدة
 LANG_CODES = {'ar', 'en', 'fr', 'ur', 'tr', 'es', 'de', 'it', 'id', 'fa', 'hi', 'bn', 'ru', 'zh'}
 
-PLATFORM_ID_RE = re.compile(r'^(p|c|a|page|tag|category|product|brand)-?(\d{4,})$', re.I)
+# ========== قواعد المنصات: كل منصة في ملفها (platform_*.py) ==========
+import platform_salla as P_SALLA
+import platform_zid as P_ZID
+import platform_shopify as P_SHOPIFY
+PLATFORM_MODULES = (P_SALLA, P_ZID, P_SHOPIFY)
+from platform_salla import (PLATFORM_ID_RE, PRODUCT_ID_RE, CATEGORY_ID_RE,  # noqa: E402
+                            INFO_ID_RE, BRAND_ID_RE, ARTICLE_ID_RE)
 
 
 def is_lang_segment(seg):
@@ -743,13 +749,10 @@ def url_key(url):
     host = norm_host(p.netloc)
     segs = url_segments(url)
     if segs:
-        mo = PLATFORM_ID_RE.match(segs[-1])
-        if mo:
-            return f"{host}/#{mo.group(1).lower()}{mo.group(2)}"
-        # زد: /categories/1689986/ و/categories/1689986/اسم-القسم = نفس القسم برقمه الثابت
-        low = [x.lower() for x in segs]
-        if len(low) >= 2 and low[0] in ('categories', 'category') and low[1].isdigit():
-            return f"{host}/#cat{low[1]}"
+        for mod in PLATFORM_MODULES:          # قواعد كل منصة في ملفها
+            k = mod.url_key(segs, host)
+            if k:
+                return k
     return f"{host}/{'/'.join(segs)}".rstrip('/').lower()
 
 
@@ -828,7 +831,16 @@ def is_crawlable(url, base_netloc):
         return False
     if '/cdn-cgi/' in path or '/email-protection' in path:
         return False
+    if is_product_subpage(url):
+        return False
     return True
+
+
+# صفحات فرعية تصنعها المنصة لكل منتج (مراجعات، تقييمات، أسئلة): ليست منتجات،
+# والتاجر لا يتحكم في عناوينها. مثال زد: /products/<رقم>/reviews
+def is_product_subpage(url):
+    segs = url_segments(url)
+    return any(mod.is_product_subpage(segs) for mod in PLATFORM_MODULES)
 
 
 def image_format(url):
@@ -1141,11 +1153,6 @@ INFO_ROOT_SEGMENTS = ('pages', 'policies', 'page')
 ARCHIVE_PARENT_SEGMENTS = ('tag', 'tags', 'author', 'authors', 'archive', 'وسم', 'وسوم')
 
 # سلة: /اسم-المنتج/p123 ، /اسم-التصنيف/c123 ، /اسم-الصفحة/page-123
-PRODUCT_ID_RE = re.compile(r'^p-?\d{3,}$', re.I)
-CATEGORY_ID_RE = re.compile(r'^c-?\d{3,}$', re.I)
-INFO_ID_RE = re.compile(r'^page-?\d+$', re.I)
-BRAND_ID_RE = re.compile(r'^brand-?\d+$', re.I)       # سلة: /اسم-الماركة/brand-123
-ARTICLE_ID_RE = re.compile(r'^a-?\d{4,}$', re.I)      # سلة: /blog/عنوان-المقال/a-123
 ARCHIVE_LAST_RE = re.compile(r'^(tag|author|category|archive)-?\d*$', re.I)
 
 _POLICY_NORM = None
@@ -2808,14 +2815,11 @@ def _is_sitemap_loc(loc):
 SITEMAP_PAUSE = 0.3   # مهلة قصيرة بين ملفات الخريطة فقط (لا بين الصفحات)
 # أسماء ملفات الخريطة المعروفة لكل منصة: تُجرَّب دائماً، لأن المتجر قد لا يعلنها في robots.txt
 # (زد: sitemap_products.xml بلا رقم، وشوبيفاي: sitemap_products_1.xml)
-KNOWN_SITEMAP_NAMES = [
-    'sitemap_products.xml', 'sitemap_categories.xml', 'sitemap_pages.xml', 'sitemap_blogs.xml',
-    'sitemap_products_1.xml', 'sitemap_collections_1.xml', 'sitemap_pages_1.xml', 'sitemap_blogs_1.xml',
-    'sitemap-products.xml', 'sitemap-categories.xml', 'sitemap-pages.xml', 'sitemap-blogs.xml',
-    'product-sitemap.xml', 'category-sitemap.xml',
-    # زد تضع خرائط المدونة والماركات في مجلدات فرعية
-    'blog/sitemap.xml', 'blogs/sitemap.xml', 'brands/sitemap.xml', 'pages/sitemap.xml',
-]
+KNOWN_SITEMAP_NAMES = list(dict.fromkeys(
+    [n for mod in PLATFORM_MODULES for n in mod.SITEMAP_NAMES] +
+    # أسماء عامة شائعة في المنصات الأخرى
+    ['sitemap-products.xml', 'sitemap-categories.xml', 'sitemap-pages.xml', 'sitemap-blogs.xml',
+     'product-sitemap.xml', 'category-sitemap.xml']))
 
 
 class SitemapCollector:
@@ -2836,7 +2840,8 @@ class SitemapCollector:
     # ---------- أدوات ----------
     def add(self, u):
         u = clean_url(u)
-        if not u or norm_host(urlparse(u).netloc) != norm_host(self.base_netloc) or is_tag_url(u):
+        if not u or norm_host(urlparse(u).netloc) != norm_host(self.base_netloc) or is_tag_url(u) \
+                or is_product_subpage(u):
             return
         k = url_key(u)
         self.found[k] = prefer_url(self.found[k], u) if k in self.found else u
@@ -3090,17 +3095,15 @@ def decisive_type(url):
     segs = [x.lower() for x in url_segments(str(url))]
     if not segs:
         return ''
-    last, first = segs[-1], segs[0]
-    if PRODUCT_ID_RE.match(last):
-        return T_PRODUCT
-    if BRAND_ID_RE.match(last) or CATEGORY_ID_RE.match(last):
-        return T_CATEGORY
-    if INFO_ID_RE.match(last):
-        return T_INFO
-    if ARTICLE_ID_RE.match(last) or (first in BLOG_SEGMENTS and len(segs) >= 2
-                                     and not any(x in ('tag', 'tags', 'category', 'categories', 'author')
-                                                 for x in segs[1:-1] + [segs[1]])):
-        return T_BLOG if len(segs) >= 2 else ''
+    types = {'product': T_PRODUCT, 'category': T_CATEGORY, 'info': T_INFO, 'blog': T_BLOG}
+    for mod in PLATFORM_MODULES:              # قواعد كل منصة في ملفها
+        t = mod.decisive_type(segs, types)
+        if t:
+            return t
+    first = segs[0]
+    if first in BLOG_SEGMENTS and len(segs) >= 2 \
+            and not any(x in ('tag', 'tags', 'category', 'categories', 'author') for x in segs[1:-1] + [segs[1]]):
+        return T_BLOG
     if first in ('products', 'product') and len(segs) >= 2:
         return T_PRODUCT
     if first in ('categories', 'category', 'collections') and len(segs) >= 2:
@@ -4155,7 +4158,7 @@ def _retryable(code):
 
 
 def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progress=None,
-                       sitemap_uploads=None, sitemap_inputs=None):
+                       sitemap_uploads=None, sitemap_inputs=None, platform_hint=None):
     base_url = normalize_url(base_url)
     if progress:
         progress('sitemap_read')
@@ -4163,7 +4166,9 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
     # 1. كشف المنصة عبر الصفحة الرئيسية
     home_res = safe_get(base_url)
     platform = 'unknown'
-    if is_ok(home_res):
+    if platform_hint:
+        platform = platform_hint          # المنصة اختارها المستخدم يدوياً
+    elif is_ok(home_res):
         platform = detect_platform(home_res.text, dict(home_res.headers), base_url)
 
     # 2. قراءة كل خرائط الموقع (مع الملفات والروابط التي أعطاها المستخدم)
@@ -4217,7 +4222,8 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
                 images.extend(res['images_data'])
 
                 if res.get('platform_html') and platform == 'unknown':
-                    platform = detect_platform(res['platform_html'], res.get('platform_headers'), base_url)
+                    if not platform_hint:
+                        platform = detect_platform(res['platform_html'], res.get('platform_headers'), base_url)
                     if platform == 'shopify':
                         for su in harvest_shopify_all(base_url):
                             k = url_key(su)
@@ -4374,7 +4380,7 @@ def pagination_needed(pages, sm_report):
 
 def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
                   do_pagination=True, do_sitemap_check=True, progress=None,
-                  sitemap_uploads=None, sitemap_inputs=None, use_cache=True):
+                  sitemap_uploads=None, sitemap_inputs=None, use_cache=True, platform_hint=None):
     def say(stage, **kw):
         if progress:
             try:
@@ -4394,7 +4400,7 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     say('discover_start')
     pages, imgs, crawl_meta, platform = discover_and_audit(
         target, max_pages, workers, (lambda st, **k: say(st, **k)),
-        sitemap_uploads=sitemap_uploads, sitemap_inputs=sitemap_inputs)
+        sitemap_uploads=sitemap_uploads, sitemap_inputs=sitemap_inputs, platform_hint=platform_hint)
     cat_products = crawl_meta.setdefault('cat_products', {})
     sitemap_keys = crawl_meta.get('sitemap_keys', set())
     linked_keys = crawl_meta.get('linked_keys', set())
@@ -4553,6 +4559,9 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     # تقرير التحويلات و404 يُبنى قبل إزالة التكرار حتى لا تضيع الروابط القديمة
     redirects = build_redirect_report(pages)
 
+    # صفحات المراجعات الفرعية قد تأتي من الحفظ أو من روابط قديمة: لا تدخل النتائج
+    pages = [r for r in pages if not is_product_subpage(r.get('_req_url') or r['الرابط'])
+             and not is_product_subpage(r['الرابط'])]
     df = regrade_saved(regrade_lengths(dedupe_pages(pd.DataFrame(pages))), target)
     images_df = pd.DataFrame(imgs)
     if not images_df.empty:
