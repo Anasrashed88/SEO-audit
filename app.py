@@ -438,7 +438,7 @@ if nav == "🔍 فحص متجر جديد":
 
         tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "🧾 البيانات المعلنة",
                         "📄 الصفحات", "🖼️ الصور", "🗺️ خريطة الموقع",
-                        "🔬 التحقق اليدوي", "📥 التصدير"])
+                        "🔬 التحقق اليدوي", "📥 التصدير", "💳 المراحل والفواتير"])
 
         # ---------------- نظرة عامة ----------------
         with tabs[0]:
@@ -1036,6 +1036,79 @@ if nav == "🔍 فحص متجر جديد":
                     st.dataframe(vres.drop(columns=['ناجح']), use_container_width=True,
                                  hide_index=True)
 
+
+        # ---------------- المراحل والفواتير ----------------
+        with tabs[8]:
+            import phases as ph
+            from datetime import date, timedelta
+            st.markdown("#### تقسيم المشروع إلى مراحل")
+            st.caption("لكل مرحلة: ملف مهام مستقل تعمل عليه، وفاتورة مستقلة بتاريخها، ورسالة واتساب جاهزة. "
+                       "عرض السعر في تبويب التصدير يبقى للمشروع كاملاً.")
+            cn1, cn2 = st.columns(2)
+            client_name = cn1.text_input("اسم العميل الكامل", key="ph_name")
+            client_phone = cn2.text_input("جوال العميل", key="ph_phone", placeholder="+9665xxxxxxxx")
+            cp1, cp2, cp3 = st.columns(3)
+            n_ph = cp1.number_input("عدد المراحل", 1, 5, 2, 1, key="ph_n")
+            mode_lbl = cp2.radio("طريقة التقسيم", ["حسب الأولوية (الأهم أولاً)", "حسب نوع العمل"], key="ph_mode",
+                                 help="الأولوية: كل خدمة تُقسم على المراحل والأهم في الأولى. "
+                                      "نوع العمل: العناوين والأوصاف في مرحلة، والصور في أخرى.")
+            ph_lang = 'ar' if cp3.radio("لغة الفاتورة", ["العربية", "English"], horizontal=True,
+                                        key="ph_lang") == "العربية" else 'en'
+            try:
+                ph_tables = ph.work_tables(build_filtered_exports(df, images_df, 'ar', platform))
+                plist = ph.split_phases(ph_tables, n_ph, 'type' if 'نوع' in mode_lbl else 'priority')
+                order_no = ph.order_number(DB_FILE, st.session_state.current_url)
+            except Exception as e:
+                plist, order_no = [], 0
+                st.error(f"تعذّر تجهيز المراحل: {e}")
+            prices_ph = {'meta_title': locals().get('p_title', DEFAULT_PRICES['meta_title']),
+                         'meta_desc': locals().get('p_desc', DEFAULT_PRICES['meta_desc']),
+                         'image_alt': locals().get('p_alt', DEFAULT_PRICES['image_alt']),
+                         'broken_link_fix': locals().get('p_broken', DEFAULT_PRICES['broken_link_fix'])}
+            disc_ph = (locals().get('disc_pct', 0) / 100) if locals().get('use_disc') else 0.0
+            if plist:
+                st.caption(f"رقم الطلب: **{order_no}** — ثابت لهذا المتجر في كل فواتيره. "
+                           "الأسعار والخصم من تبويب التصدير.")
+            netloc_ph = urlparse(st.session_state.current_url).netloc or "store"
+            grand = 0.0
+            n_real = len(plist)
+            for i, pdata in enumerate(plist):
+                with st.container(border=True):
+                    st.markdown(f"##### {ph.phase_title(i, n_real)}")
+                    cnt = ph.phase_counts(pdata)
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("عناوين", cnt['titles'])
+                    k2.metric("أوصاف", cnt['descs'])
+                    k3.metric("صور", cnt['images'])
+                    k4.metric("روابط معطلة", cnt['broken'])
+                    q_ph = build_quote(ph.phase_summary(pdata, platform), prices_ph, discount_rate=disc_ph)
+                    grand += q_ph['total']
+                    d1, d2 = st.columns([1, 2])
+                    inv_date = d1.date_input("تاريخ الفاتورة", value=date.today() + timedelta(days=14 * i),
+                                             key=f"ph_date_{i}",
+                                             help="عدّل تاريخ كل مرحلة يدوياً عند حلول وقتها.")
+                    number = f"{order_no}-P{i + 1}" if n_real > 1 else f"{order_no}"
+                    d2.metric("المستحق لهذه المرحلة", f"{q_ph['total']:,.0f} ريال")
+                    phase_info = {'title': ph.phase_title(i, n_real, ph_lang), 'number': number,
+                                  'date': inv_date.strftime('%Y-%m-%d'), 'client_name': client_name,
+                                  'client_phone': client_phone, 'phase_label': ph.phase_name(i, n_real, ph_lang)}
+                    b1, b2 = st.columns(2)
+                    b1.download_button(f"📋 ملف مهام المرحلة {i + 1}", ph.task_file(pdata, i + 1, n_real),
+                                       f"Task_Phase_{i + 1}_{netloc_ph}.xlsx", use_container_width=True,
+                                       key=f"ph_task_{i}")
+                    try:
+                        inv_ph = generate_invoice_pdf(st.session_state.current_url, q_ph, ph_lang, phase=phase_info)
+                        b2.download_button(f"🧾 فاتورة المرحلة {i + 1} (PDF)", inv_ph,
+                                           f"Invoice_{number}_{netloc_ph}.pdf", "application/pdf",
+                                           use_container_width=True, key=f"ph_inv_{i}")
+                    except Exception as e:
+                        b2.error(f"تعذّر إنشاء الفاتورة: {e}")
+                    st.markdown("**رسالة واتساب جاهزة** (اضغط أيقونة النسخ أعلى المربع):")
+                    st.code(ph.whatsapp_message(client_name, netloc_ph, pdata, i, n_real, number, q_ph['total'],
+                                                generate_invoice_pdf.__globals__['PAYMENT']['iban'], 'STC Bank'),
+                            language=None)
+            if n_real > 1:
+                st.info(f"إجمالي المراحل: {grand:,.0f} ريال")
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
     st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على "
