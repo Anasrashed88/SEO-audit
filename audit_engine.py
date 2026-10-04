@@ -2179,6 +2179,8 @@ def _fetch_and_audit(url, base_url, source):
             'وصف الميتا': meta_desc, 'طول الوصف': desc_len, 'حالة الوصف': desc_status,
             'إجمالي الصور': total_img, 'صور بدون Alt': 0, 'صور Alt ضعيف': 0,
             'عدد الكلمات': words, 'حالة المحتوى': content_status,
+            # مقتطف من نص الصفحة: يعتمد عليه الذكاء الاصطناعي ليكتب من حقائق المنتج لا من اسمه فقط
+            '_excerpt': re.sub(r'\s+', ' ', body_text).strip()[:600],
             'حالة الكانونيكال': canon_status,
             'الرابط الكانوني': unquote(canonical) if canon_status == 'canon_diff' else '',
             '_raw_url': final_url, '_req_url': req,
