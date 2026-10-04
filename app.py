@@ -438,7 +438,7 @@ if nav == "🔍 فحص متجر جديد":
 
         tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "🧾 البيانات المعلنة",
                         "📄 الصفحات", "🖼️ الصور", "🗺️ خريطة الموقع",
-                        "🔬 التحقق اليدوي", "📥 التصدير", "💳 المراحل والفواتير"])
+                        "🔬 التحقق اليدوي", "📥 التصدير", "💳 المراحل والفواتير", "🤖 الذكاء الاصطناعي"])
 
         # ---------------- نظرة عامة ----------------
         with tabs[0]:
@@ -1127,6 +1127,77 @@ if nav == "🔍 فحص متجر جديد":
                     st.info(f"إجمالي المراحل: {sum(x['total'] for x in res_ph['items']):,.0f} ريال")
             else:
                 st.info("اختر الإعدادات ثم اضغط «تجهيز المراحل والفواتير».")
+
+        # ---------------- الذكاء الاصطناعي ----------------
+        with tabs[9]:
+            import ai_writer as ai
+            from export_utils import to_xlsx_chunked
+            st.markdown("#### اقتراح العناوين والأوصاف بالذكاء الاصطناعي")
+            st.caption("يكتب Gemini عنواناً ووصفاً لكل صفحة تحتاجهما، من بيانات الصفحة فقط، ثم تتحقق الأداة "
+                       "من كل اقتراح: الطول، والتكرار، وعدم اختراع أرقام. أنت تراجع وتعتمد.")
+            api_key = ai.load_key(eng.BASE_DIR)
+            if not api_key:
+                st.info("أدخل مفتاح Gemini مرة واحدة. يُحفظ على جهازك فقط، ولا يُرفع إلى GitHub.")
+                kc1, kc2 = st.columns([3, 1])
+                new_key = kc1.text_input("مفتاح Gemini", type="password", key="gem_key_in")
+                if kc2.button("حفظ المفتاح", use_container_width=True) and new_key.strip():
+                    ai.save_key(eng.BASE_DIR, new_key)
+                    st.rerun()
+            else:
+                kc1, kc2, kc3 = st.columns([2, 1, 1])
+                kc1.success("مفتاح Gemini محفوظ على جهازك ✓")
+                if kc2.button("اختبار المفتاح", use_container_width=True):
+                    try:
+                        st.session_state.gem_model = ai.test_key(api_key)
+                        st.success(f"المفتاح يعمل. النموذج المستخدم: {st.session_state.gem_model}")
+                    except Exception as e:
+                        st.error(f"المفتاح لا يعمل: {e}")
+                if kc3.button("تغيير المفتاح", use_container_width=True):
+                    ai.key_path(eng.BASE_DIR).unlink(missing_ok=True)
+                    st.rerun()
+
+                exports_ai = build_filtered_exports(df, images_df, 'ar', platform)
+                items_ai = ai.items_from_scan(df, exports_ai)
+                cache_ai = ai.load_cache(eng.BASE_DIR, st.session_state.current_url)
+                done_ai = sum(1 for it in items_ai if it['id'] in cache_ai)
+                m1, m2, m3 = st.columns(3)
+                m1.metric("صفحات تحتاج عنواناً أو وصفاً", f"{len(items_ai):,}")
+                m2.metric("وُلّدت اقتراحاتها", f"{done_ai:,}")
+                m3.metric("الطلبات المتوقعة", f"~{-(-max(len(items_ai) - done_ai, 0) // ai.BATCH)}",
+                          help="20 صفحة في كل طلب. الحصة المجانية اليومية محدودة؛ ما يتبقى يُكمل لاحقاً.")
+                g1, g2 = st.columns([2, 1])
+                limit_ai = g1.number_input("عدد الصفحات في هذه الجولة (0 = الكل)", 0, 10000, 0, 20, key="ai_limit")
+                regen_ai = g2.checkbox("إعادة توليد ما وُلّد سابقاً", value=False, key="ai_regen")
+                if st.button("🤖 توليد الاقتراحات", type="primary", use_container_width=True):
+                    bar = st.progress(0.0, text="جارٍ التوليد...")
+                    try:
+                        cache_ai, info_ai = ai.generate(
+                            items_ai, api_key, st.session_state.get('brand') or '', eng.BASE_DIR,
+                            st.session_state.current_url, regenerate=regen_ai, max_items=limit_ai or None,
+                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0),
+                                                               text=f"وُلّدت {d} من {t}"))
+                        bar.progress(1.0, text="انتهى")
+                        if info_ai['stopped']:
+                            st.warning(f"{info_ai['stopped']} أُنجز {info_ai['done']} من {info_ai['requested']}.")
+                        else:
+                            st.success(f"وُلّدت اقتراحات {info_ai['done']} صفحة بنموذج {info_ai['model']}.")
+                    except Exception as e:
+                        st.error(f"تعذّر التوليد: {e}")
+                if cache_ai:
+                    files_ai = ai.before_after(exports_ai, cache_ai)
+                    ok_n = sum(1 for v in cache_ai.values() if v.get('status') == ai.STATUS_OK)
+                    st.caption(f"مطابق للقواعد: {ok_n:,} — يحتاج مراجعتك: {len(cache_ai) - ok_n:,}")
+                    dcols = st.columns(len(files_ai) or 1)
+                    for ci, (k_, (fname_, table_)) in enumerate(files_ai.items()):
+                        dcols[ci].download_button(f"📥 {fname_.replace('_', ' ').replace('.xlsx', '')}",
+                                                  to_xlsx_chunked(table_, fname_[:20]), fname_,
+                                                  use_container_width=True, key=f"ai_dl_{k_}")
+                    prev = files_ai.get('titles')
+                    if prev:
+                        cols_p = [c for c in ('عنوان الميتا الحالي', 'العنوان المقترح', 'طول العنوان المقترح',
+                                              'حالة الاقتراح') if c in prev[1].columns]
+                        st.dataframe(prev[1][prev[1]['العنوان المقترح'] != ''][cols_p].head(15),
+                                     use_container_width=True, hide_index=True)
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
     st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على "
