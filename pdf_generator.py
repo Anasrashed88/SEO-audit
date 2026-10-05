@@ -1709,8 +1709,7 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
     px_ = (M + box_w + 6) if rtl else M
     y = y0
     if quote.get('package'):
-        rows_ = [(('القيمة بالتسعير الفردي' if rtl else 'Value at itemised prices'), quote['reference']),
-                 (quote['package']['label'], quote['package']['price'])]
+        rows_ = [(quote['package']['label'], quote['package']['price'])]
     else:
         rows_ = [(T['subtotal'], quote['subtotal'])]
     if quote['discount']:
