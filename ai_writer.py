@@ -43,10 +43,8 @@ def save_key(base_dir, key):
 _MODEL_CACHE = {}
 
 
-def pick_model(key, session=None):
-    """يختار تلقائياً أحدث نموذج Flash-Lite متاح (أعلى حصة مجانية يومية)، ثم Flash."""
-    if key in _MODEL_CACHE:
-        return _MODEL_CACHE[key]
+def list_models(key, session=None):
+    """النماذج المتاحة لهذا المفتاح للكتابة، بلا Lite (جودته أقل)، الأحدث أولاً."""
     http = session or requests
     r = http.get(f'{API}/models', params={'key': key, 'pageSize': 200}, timeout=20)
     if r.status_code in (400, 401, 403):
@@ -54,21 +52,30 @@ def pick_model(key, session=None):
     r.raise_for_status()
     names = [m['name'].split('/', 1)[-1] for m in r.json().get('models', [])
              if 'generateContent' in m.get('supportedGenerationMethods', [])]
+    bad = ('lite', 'preview', 'exp', 'tts', 'image', 'live', 'audio', 'embedding', 'gemma', 'learnlm')
+    names = [n for n in names if n.startswith('gemini') and not any(b in n for b in bad)]
 
     def version(n):
         nums = re.findall(r'\d+(?:\.\d+)?', n)
         return float(nums[0]) if nums else 0.0
+    return sorted(set(names), key=lambda n: (version(n), 'pro' in n, -len(n)), reverse=True)
 
-    for pref in ('flash-lite', 'flash'):
-        cands = [n for n in names if pref in n and 'preview' not in n and 'exp' not in n
-                 and 'tts' not in n and 'image' not in n and 'live' not in n and 'audio' not in n]
-        if pref == 'flash':
-            cands = [n for n in cands if 'lite' not in n]
-        if cands:
-            best = sorted(cands, key=lambda n: (version(n), len(n)), reverse=True)[0]
-            _MODEL_CACHE[key] = best
-            return best
-    raise ValueError('لم يُعثر على نموذج Gemini مناسب لهذا المفتاح.')
+
+def default_model(models):
+    """الافتراضي: أحدث Flash (جودة عالية بحصة يومية معقولة)."""
+    flash = [m for m in models if 'flash' in m]
+    return (flash or models or [''])[0]
+
+
+def pick_model(key, session=None):
+    """(للتوافق) أحدث Flash متاح، بلا Lite."""
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key]
+    best = default_model(list_models(key, session))
+    if not best:
+        raise ValueError('لم يُعثر على نموذج Gemini مناسب لهذا المفتاح.')
+    _MODEL_CACHE[key] = best
+    return best
 
 
 def _generate(key, model, prompt, session=None):
@@ -114,51 +121,120 @@ def test_key(key, session=None):
     return model
 
 
+# ---------------- اسم المتجر في العناوين ----------------
+_SEP_RE = re.compile(r'\s+[|\-–—]\s+')
+
+
+def detect_title_suffix(titles):
+    """يكتشف العبارة التي تنتهي بها عناوين المتجر (« | مدهال عود»).
+    يعيد (العبارة بفاصلها، الوضع): 'auto' = المنصة تضيفها تلقائياً (90% من العناوين أو أكثر)،
+    'add' = يكتبها التاجر فنضيفها نحن، None = لا عبارة."""
+    tails = []
+    for t in titles:
+        parts = _SEP_RE.split(str(t or '').strip())
+        if len(parts) >= 2 and 2 <= len(parts[-1]) <= 40:
+            m = list(_SEP_RE.finditer(str(t).strip()))[-1]
+            tails.append(str(t).strip()[m.start():])
+    valid = [t for t in titles if str(t or '').strip()]
+    if not tails or not valid:
+        return '', None
+    from collections import Counter
+    top, cnt = Counter(tails).most_common(1)[0]
+    share = cnt / len(valid)
+    if share >= 0.9:
+        return top, 'auto'
+    if share >= 0.3:
+        return top, 'add'
+    return '', None
+
+
+def title_budget(suffix):
+    """طول الجزء الذي يكتبه النموذج، ليكتمل العنوان كاملاً بين 50 و60 مع اسم المتجر."""
+    n = len(suffix or '')
+    return TITLE_MIN - n, TITLE_MAX - n
+
+
 # ---------------- الكتابة ----------------
-RULES_AR = f"""أنت كاتب سيو محترف لمتاجر إلكترونية سعودية. اكتب لكل صفحة في المدخلات:
-- "title": عنوان ميتا بين {TITLE_MIN} و{TITLE_MAX} حرفاً (المسافات والرموز محسوبة).
+TYPE_GUIDE = {
+    'صفحة منتج': 'منتج: صف المنتج نفسه وما يميزه.',
+    'صفحة تصنيف': 'قسم: صف مجموعة المنتجات في هذا القسم ولمن تناسب، لا منتجاً واحداً.',
+    'صفحة رئيسية': 'الصفحة الرئيسية: عرّف بالمتجر وتخصصه وأهم ما يقدمه.',
+    'صفحة مدونة': 'مقال: لخّص موضوع المقال وفائدته للقارئ.',
+    'صفحة تعريفية': 'صفحة تعريفية أو سياسة: وضّح محتواها بدقة ووضوح.',
+}
+
+
+def rules_text(t_min, t_max):
+    return f"""أنت كاتب سيو محترف لمتاجر إلكترونية سعودية. اكتب لكل صفحة في المدخلات:
+- "title": الجزء الوصفي من عنوان الميتا، بين {t_min} و{t_max} حرفاً بالضبط (المسافات محسوبة). لا تكتب اسم المتجر فيه: الأداة تضيفه.
 - "description": وصف ميتا بين {DESC_MIN} و{DESC_MAX} حرفاً.
 القواعد:
-1. استخدم فقط الحقائق الموجودة في بيانات الصفحة نفسها (الاسم، المقتطف، العنوان والوصف الحاليان). لا تخترع مقاساً أو مادة أو رقماً أو سعراً أو عرضاً.
-2. ابدأ العنوان بالكلمة التي يبحث بها الزبون عن هذا المنتج أو القسم، ثم ما يميزه، واختمه باسم المتجر بعد « | » إن اتسع الطول.
-3. الوصف يشرح ما يجده الزبون في الصفحة بلغة طبيعية مقنعة، وينتهي بدعوة لطيفة للتصفح أو الشراء.
-4. اكتب بلغة بيانات الصفحة نفسها (عربية فصحى سهلة، أو إنجليزية إن كانت الصفحة إنجليزية).
-5. كل عنوان ووصف مختلف عن غيره. لا رموز تعبيرية، ولا علامات تنصيص، ولا حروف كبيرة كاملة.
-6. أعد JSON فقط بالشكل: [{{"id": "...", "title": "...", "description": "..."}}]"""
+1. افهم المنتج أو الصفحة من "product_description" و"category" و"excerpt" أولاً، ثم اكتب. استخدم فقط الحقائق الموجودة فيها؛ لا تخترع مقاساً أو مادة أو رقماً.
+2. لا سعر ولا خصم ولا عرض ولا كوبون في العنوان أو الوصف: الأسعار والعروض تتغير.
+3. ابدأ العنوان بالعبارة التي يبحث بها الزبون عن هذا المنتج أو القسم، ثم ما يميزه.
+4. لا تنسخ العنوان أو الوصف الحالي: اكتب صياغة جديدة أفضل.
+5. اكتب بلغة الصفحة نفسها (عربية فصحى سهلة، أو إنجليزية إن كانت الصفحة إنجليزية). لا رموز تعبيرية ولا علامات تنصيص.
+6. كل عنوان ووصف مختلف عن غيره.
+7. حسب نوع الصفحة: {' '.join(TYPE_GUIDE.values())}
+أعد JSON فقط بالشكل: [{{"id": "...", "title": "...", "description": "..."}}]"""
 
 
-def _item_payload(it, store_name):
+def _item_payload(it):
     return {'id': it['id'], 'type': it.get('type', ''), 'name': it.get('name', ''),
+            'category': it.get('category', ''), 'brand': it.get('brand', ''),
+            'product_description': (it.get('pdesc') or '')[:1200],
             'current_title': it.get('title', ''), 'current_description': it.get('desc', ''),
-            'excerpt': (it.get('excerpt') or '')[:500], 'store': store_name}
+            'excerpt': (it.get('excerpt') or '')[:400]}
 
 
 def _numbers(text):
     return set(re.findall(r'\d+(?:[.,]\d+)?', str(text or '').translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))))
 
 
-def check(item, title, desc, seen_titles, seen_descs, need):
-    """يعيد (الحالة، الملاحظات). need: الحقول المطلوبة من هذه الصفحة."""
-    notes = []
-    source = ' '.join(str(item.get(k, '')) for k in ('name', 'title', 'desc', 'excerpt'))
+_PROMO_RE = re.compile(r'\d+\s*(?:ريال|ر\.?\s?س|sar|﷼)|خصم|كوبون|تخفيض|عرض خاص|عروض|discount|coupon|% ?off', re.I)
+
+
+def _norm(t):
+    return re.sub(r'[\W_]+', '', str(t or '')).lower()
+
+
+def _same(a, b):
+    from difflib import SequenceMatcher
+    na, nb = _norm(a), _norm(b)
+    return bool(na) and bool(nb) and (na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.9)
+
+
+def check(item, title_full, desc, seen_titles, seen_descs, need):
+    """يعيد (حالة، ملاحظات العنوان، ملاحظات الوصف). title_full: العنوان كما سيظهر في جوجل."""
+    t_notes, d_notes = [], []
+    source = ' '.join(str(item.get(k, '')) for k in ('name', 'title', 'desc', 'excerpt', 'pdesc', 'category'))
     allowed = _numbers(source)
     if 'title' in need:
-        n = len(title or '')
+        n = len(title_full or '')
         if not (TITLE_MIN <= n <= TITLE_MAX):
-            notes.append(f'طول العنوان {n} (المطلوب {TITLE_MIN}–{TITLE_MAX})')
-        if title and title.strip() in seen_titles:
-            notes.append('العنوان مكرر مع صفحة أخرى')
-        if _numbers(title) - allowed:
-            notes.append('في العنوان رقم غير موجود في بيانات الصفحة')
+            t_notes.append(f'طول العنوان {n} (المطلوب {TITLE_MIN}–{TITLE_MAX})')
+        if title_full and title_full.strip() in seen_titles:
+            t_notes.append('مكرر مع صفحة أخرى')
+        if _numbers(title_full) - allowed:
+            t_notes.append('فيه رقم غير موجود في بيانات الصفحة')
+        if _same(title_full, item.get('title')):
+            t_notes.append('منسوخ من العنوان الحالي')
+        if _PROMO_RE.search(title_full or ''):
+            t_notes.append('فيه سعر أو عرض')
     if 'desc' in need:
         n = len(desc or '')
         if not (DESC_MIN <= n <= DESC_MAX):
-            notes.append(f'طول الوصف {n} (المطلوب {DESC_MIN}–{DESC_MAX})')
+            d_notes.append(f'طول الوصف {n} (المطلوب {DESC_MIN}–{DESC_MAX})')
         if desc and desc.strip() in seen_descs:
-            notes.append('الوصف مكرر مع صفحة أخرى')
+            d_notes.append('مكرر مع صفحة أخرى')
         if _numbers(desc) - allowed:
-            notes.append('في الوصف رقم غير موجود في بيانات الصفحة')
-    return (STATUS_OK if not notes else STATUS_REVIEW), notes
+            d_notes.append('فيه رقم غير موجود في بيانات الصفحة')
+        if _same(desc, item.get('desc')):
+            d_notes.append('منسوخ من الوصف الحالي')
+        if _PROMO_RE.search(desc or ''):
+            d_notes.append('فيه سعر أو عرض')
+    status = STATUS_OK if not (t_notes or d_notes) else STATUS_REVIEW
+    return status, t_notes, d_notes
 
 
 def _parse(text):
@@ -195,41 +271,102 @@ def save_cache(base_dir, store_url, data):
     cache_file(base_dir, store_url).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding='utf-8')
 
 
-def generate(items, key, store_name, base_dir, store_url, need=('title', 'desc'), regenerate=False,
-             progress=None, session=None, max_items=None):
-    """items: [{'id': رابط الصفحة, 'type', 'name', 'title', 'desc', 'excerpt', 'need': {'title','desc'}}]
-    يعيد {الرابط: {'title', 'description', 'status', 'notes'}} — ويحفظ كل دفعة فور إنجازها."""
+def suggestions(cache):
+    return {k: v for k, v in cache.items() if not k.startswith('__')}
+
+
+def store_model(cache):
+    """النموذج الثابت لهذا المتجر (يُحدد مع أول توليد)."""
+    return (cache.get('__meta__') or {}).get('model', '')
+
+
+# ---------------- عدّاد الطلبات اليومي ----------------
+def _pacific_day():
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d')
+    except Exception:
+        from datetime import timedelta, timezone
+        return datetime.now(timezone(timedelta(hours=-8))).strftime('%Y-%m-%d')
+
+
+def usage_today(base_dir, model):
+    f = Path(base_dir) / 'ai_cache' / '_usage.json'
+    try:
+        data = json.loads(f.read_text(encoding='utf-8')) if f.exists() else {}
+    except Exception:
+        data = {}
+    return int(data.get(_pacific_day(), {}).get(model, 0))
+
+
+def _count_request(base_dir, model):
+    d = Path(base_dir) / 'ai_cache'
+    d.mkdir(exist_ok=True)
+    f = d / '_usage.json'
+    try:
+        data = json.loads(f.read_text(encoding='utf-8')) if f.exists() else {}
+    except Exception:
+        data = {}
+    day = _pacific_day()
+    data = {day: data.get(day, {})}                 # نحتفظ باليوم الحالي فقط
+    data[day][model] = int(data[day].get(model, 0)) + 1
+    f.write_text(json.dumps(data), encoding='utf-8')
+
+
+def generate(items, key, store_name, base_dir, store_url, model, need=('title', 'desc'), regenerate=False,
+             progress=None, session=None, max_items=None, suffix='', suffix_mode=None):
+    """items: [{'id': رابط الصفحة, 'type', 'name', 'title', 'desc', 'excerpt', 'pdesc', 'category', 'brand', 'need'}]
+    model: نموذج ثابت لهذا المتجر. suffix/suffix_mode: اسم المتجر في العناوين (detect_title_suffix).
+    يعيد (المحفوظ كاملاً، معلومات الجولة) — ويحفظ كل دفعة فور إنجازها."""
     cache = load_cache(base_dir, store_url)
-    todo = [it for it in items if regenerate or it['id'] not in cache
-            or any(f not in cache[it['id']] for f in ('title', 'description'))]
+    locked = store_model(cache)
+    if locked and locked != model and not regenerate:
+        raise ValueError(f'هذا المتجر بدأ بنموذج {locked}. أكمل به حتى لا تتفاوت الجودة، '
+                         'أو اختر «إعادة توليد الكل» لتبدأ من جديد بالنموذج الجديد.')
+    if regenerate:
+        cache = {}
+    cache['__meta__'] = {'model': model, 'suffix': suffix, 'suffix_mode': suffix_mode}
+    sugg = suggestions(cache)
+    todo = [it for it in items if it['id'] not in sugg]
     if max_items:
         todo = todo[:max_items]
-    model = pick_model(key, session)
-    seen_t = {v.get('title', '').strip() for v in cache.values()}
-    seen_d = {v.get('description', '').strip() for v in cache.values()}
-    done, stopped = 0, None
+    t_min, t_max = title_budget(suffix if suffix_mode in ('add', 'auto') else '')
+    rules = rules_text(t_min, t_max)
+    full = (lambda core: f"{core}{suffix}" if suffix_mode in ('add', 'auto') and core else core)
+    seen_t = {v.get('title_full', v.get('title', '')).strip() for v in sugg.values()}
+    seen_d = {v.get('description', '').strip() for v in sugg.values()}
+    done, stopped, run_ids = 0, None, []
+
+    def call(prompt):
+        _count_request(base_dir, model)
+        return _parse(_generate(key, model, prompt, session))
+
     for start in range(0, len(todo), BATCH):
         batch = todo[start:start + BATCH]
-        prompt = RULES_AR + '\n\nبيانات الصفحات:\n' + json.dumps(
-            [_item_payload(it, store_name) for it in batch], ensure_ascii=False)
         try:
-            out = _parse(_generate(key, model, prompt, session))
-            # إعادة كتابة المخالف مرة واحدة، مع ذكر سبب المخالفة
+            out = call(rules + '\n\nبيانات الصفحات:\n' + json.dumps([_item_payload(it) for it in batch],
+                                                                      ensure_ascii=False))
             retry = []
             for it in batch:
                 d = out.get(str(it['id']))
                 if not d:
                     retry.append((it, ['لم يُكتب']))
                     continue
-                st, notes = check(it, d.get('title', ''), d.get('description', ''), seen_t, seen_d,
-                                  it.get('need', need))
-                if st != STATUS_OK:
-                    retry.append((it, notes))
+                st_, tn, dn = check(it, full(d.get('title', '').strip()), d.get('description', ''),
+                                    seen_t, seen_d, it.get('need', need))
+                if st_ != STATUS_OK:
+                    core_len = len(d.get('title', '').strip())
+                    hint = []
+                    if any('طول العنوان' in x for x in tn):
+                        hint.append(f'الجزء الوصفي طوله {core_len}؛ المطلوب بين {t_min} و{t_max} حرفاً')
+                    if any('طول الوصف' in x for x in dn):
+                        hint.append(f'الوصف طوله {len(d.get("description", ""))}؛ المطلوب بين {DESC_MIN} و{DESC_MAX}')
+                    retry.append((it, tn + dn + hint))
             if retry:
-                fix_prompt = RULES_AR + '\n\nأعد كتابة هذه الصفحات فقط، وتجنب المخالفات المذكورة لكل صفحة:\n' + \
-                    json.dumps([{**_item_payload(it, store_name), 'problems': notes} for it, notes in retry],
-                               ensure_ascii=False)
-                out.update(_parse(_generate(key, model, fix_prompt, session)))
+                out.update(call(rules + '\n\nأعد كتابة هذه الصفحات فقط، وتجنب المخالفات المذكورة لكل صفحة:\n' +
+                                json.dumps([{**_item_payload(it), 'problems': notes} for it, notes in retry],
+                                           ensure_ascii=False)))
         except QuotaExhausted as q:
             stopped = str(q)
             break
@@ -237,17 +374,22 @@ def generate(items, key, store_name, base_dir, store_url, need=('title', 'desc')
             d = out.get(str(it['id']))
             if not d:
                 continue
-            t, de = (d.get('title') or '').strip(), (d.get('description') or '').strip()
-            st, notes = check(it, t, de, seen_t, seen_d, it.get('need', need))
-            cache[it['id']] = {'title': t, 'description': de, 'status': st, 'notes': '، '.join(notes),
-                               'model': model}
-            seen_t.add(t)
+            core = (d.get('title') or '').strip()
+            de = (d.get('description') or '').strip()
+            tf = full(core)
+            st_, tn, dn = check(it, tf, de, seen_t, seen_d, it.get('need', need))
+            # العنوان المقترح: ما تكتبه في خانة المنصة. إن كانت المنصة تضيف الاسم تلقائياً، لا نكتبه
+            title_out = core if suffix_mode == 'auto' else tf
+            cache[it['id']] = {'title': title_out, 'title_full': tf, 'description': de, 'status': st_,
+                               'title_notes': '، '.join(tn), 'desc_notes': '، '.join(dn), 'model': model}
+            seen_t.add(tf)
             seen_d.add(de)
+            run_ids.append(it['id'])
         save_cache(base_dir, store_url, cache)
         done += len(batch)
         if progress:
             progress(done, len(todo))
-    return cache, {'requested': len(todo), 'done': done, 'stopped': stopped, 'model': model}
+    return cache, {'requested': len(todo), 'done': done, 'stopped': stopped, 'model': model, 'run_ids': run_ids}
 
 
 # ---------------- من نتائج الفحص إلى عناصر، ومن الاقتراحات إلى ملفات قبل/بعد ----------------
@@ -263,27 +405,35 @@ def items_from_scan(df, exports):
     items = []
     for url, fields in need.items():
         r = rows.loc[url] if rows is not None and url in rows.index else None
-        if r is not None and hasattr(r, 'iloc') and getattr(r, 'ndim', 1) > 1:
+        if r is not None and getattr(r, 'ndim', 1) > 1:
             r = r.iloc[0]
         g = (lambda c: '' if r is None or str(r.get(c, '')) == 'nan' else str(r.get(c, '') or ''))
         items.append({'id': url, 'type': g('نوع الصفحة'), 'name': g('اسم منظم') or g('اسم المنتج المعروض'),
                       'title': g('عنوان الميتا'), 'desc': g('وصف الميتا'), 'excerpt': g('_excerpt'),
-                      'need': fields})
+                      'pdesc': g('_pdesc'), 'category': g('_category'), 'brand': g('_brand'), 'need': fields})
     return items
 
 
-def before_after(exports, cache):
-    """ملفات العمل نفسها، ومعها أعمدة الاقتراح."""
+def before_after(exports, cache, only_ids=None):
+    """ملفات العمل نفسها مع أعمدة الاقتراح. only_ids: صفوف هذه الجولة فقط."""
+    sugg = suggestions(cache)
     out = {}
-    for key, field, label in (('titles', 'title', 'العنوان'), ('descs', 'description', 'الوصف')):
+    for key, field, label, notes_key in (('titles', 'title', 'العنوان', 'title_notes'),
+                                         ('descs', 'description', 'الوصف', 'desc_notes')):
         v = exports.get(key)
         if not v:
             continue
         t = v[1].copy()
-        sug = t['الرابط'].map(lambda u: (cache.get(str(u)) or {}).get(field, ''))
-        t[f'{label} المقترح'] = sug
-        t[f'طول {label} المقترح'] = sug.map(lambda s: len(s) if s else '')
-        t['حالة الاقتراح'] = t['الرابط'].map(lambda u: (cache.get(str(u)) or {}).get('status', 'لم يُولَّد بعد'))
-        t['ملاحظات الاقتراح'] = t['الرابط'].map(lambda u: (cache.get(str(u)) or {}).get('notes', ''))
-        out[key] = (f"قبل_وبعد_{'العناوين' if key == 'titles' else 'الأوصاف'}.xlsx", t)
+        if only_ids is not None:
+            t = t[t['الرابط'].astype(str).isin(set(only_ids))]
+        else:
+            t = t[t['الرابط'].astype(str).isin(set(sugg))]
+        g = (lambda u, f, d='': (sugg.get(str(u)) or {}).get(f, d))
+        t[f'{label} المقترح'] = t['الرابط'].map(lambda u: g(u, field))
+        t[f'طول {label} المقترح'] = t['الرابط'].map(
+            lambda u: len(g(u, 'title_full' if field == 'title' else field)) if g(u, field) else '')
+        t['حالة الاقتراح'] = t['الرابط'].map(lambda u: 'مطابق للقواعد' if not g(u, notes_key) and g(u, field)
+                                              else ('يحتاج مراجعتك' if g(u, field) else 'لم يُولَّد بعد'))
+        t['ملاحظات الاقتراح'] = t['الرابط'].map(lambda u: g(u, notes_key))
+        out[key] = (f"قبل_وبعد_{'العناوين' if key == 'titles' else 'الأوصاف'}", t.reset_index(drop=True))
     return out
