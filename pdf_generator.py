@@ -1286,8 +1286,33 @@ def volume_discount(units):
     return 0.0
 
 
-def build_quote(summary, prices=None, discount_rate=0.0):
-    """بنود الفاتورة: ما يحتاج إصلاحاً فعلياً فقط، لا كل صفحات المتجر."""
+# ---------- الباقات: سعر ثابت حسب حجم المتجر (عدد الصفحات التي تعمل) ----------
+PACKAGES = [
+    {'key': 'small', 'max_pages': 100, 'price': 990.0,
+     'ar': 'باقة تهيئة المتجر الصغير', 'en': 'Small store optimisation package'},
+    {'key': 'medium', 'max_pages': 500, 'price': 1990.0,
+     'ar': 'باقة تهيئة المتجر المتوسط', 'en': 'Medium store optimisation package'},
+    {'key': 'large', 'max_pages': 1500, 'price': 3490.0,
+     'ar': 'باقة تهيئة المتجر الكبير', 'en': 'Large store optimisation package'},
+]
+PACKAGE_CUSTOM = {'key': 'custom', 'max_pages': None, 'price': None,
+                  'ar': 'باقة تهيئة المتجر الضخم', 'en': 'Enterprise store optimisation package'}
+SERVICE_KEYS = ('meta_title', 'meta_desc', 'image_alt', 'broken_link_fix')
+
+
+def package_for(pages):
+    """الباقة المناسبة لحجم المتجر. الأكبر من 1500 صفحة: «حسب الطلب» (السعر يُدخل يدوياً)."""
+    for p in PACKAGES:
+        if pages <= p['max_pages']:
+            return dict(p)
+    return dict(PACKAGE_CUSTOM)
+
+
+def build_quote(summary, prices=None, discount_rate=0.0, services=None, package=None):
+    """بنود الفاتورة: ما يحتاج إصلاحاً فعلياً فقط، لا كل صفحات المتجر.
+    services: الخدمات المطلوبة فقط (مثلاً النصوص البديلة وحدها)؛ None = الكل.
+    package: {'label', 'price'} — سعر ثابت للباقة، والبنود تُعرض «ضمن الباقة»
+    مع قيمتها بالتسعير الفردي مرجعاً."""
     pr = dict(DEFAULT_PRICES)
     pr.update(prices or {})
 
@@ -1311,15 +1336,25 @@ def build_quote(summary, prices=None, discount_rate=0.0):
     if broken:
         items.append({'key': 'broken_link_fix', 'qty': broken, 'unit': pr['broken_link_fix'],
                       'desc_key': 'broken_link_fix_d_zid' if zid else 'broken_link_fix_d'})
+    if services is not None:
+        items = [it for it in items if it['key'] in set(services)]
     for it in items:
         it['total'] = round(it['qty'] * it['unit'], 2)
 
-    subtotal = round(sum(i['total'] for i in items), 2)
-    units = titles + descs + alts + broken
+    reference = round(sum(i['total'] for i in items), 2)
+    units = sum(i['qty'] for i in items)
+    pkg = None
+    if package and package.get('price'):
+        pkg = {'label': package.get('label', ''), 'price': round(float(package['price']), 2)}
+        for it in items:
+            it['included'] = True
+        subtotal = pkg['price']
+    else:
+        subtotal = reference
     rate = max(0.0, min(float(discount_rate or 0.0), 0.9))
     disc = round(subtotal * rate, 2)
-    return {'items': items, 'subtotal': subtotal, 'units': units,
-            'discount_rate': rate, 'discount': disc,
+    return {'items': items, 'subtotal': subtotal, 'units': units, 'reference': reference,
+            'package': pkg, 'discount_rate': rate, 'discount': disc,
             'total': round(subtotal - disc, 2), 'prices': pr}
 
 
@@ -1641,8 +1676,18 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
         pdf.set_text_color(*C_INK)
         pdf.set_xy(qty_x + (wq - qw) / 2, y + 2.6)
         pdf.cell(qw, 6.5, qtxt, 0, 0, 'C')
-        money(it['unit'], unit_x, wu, y + 3.4, 10, False, C_MUTED)
-        money(it['total'], tot_x, wt, y + 3.4, 10.5, True, C_INK)
+        if it.get('included'):
+            pdf.set_font(FONT, "", 8.5)
+            pdf.set_text_color(*C_MUTED)
+            pdf.set_xy(unit_x, y + 3.4)
+            pdf.cell(wu, 5, "-", 0, 0, 'C')
+            pdf.set_text_color(*C_ACC)
+            pdf.set_font(FONT, B, 8.5)
+            pdf.set_xy(tot_x, y + 3.4)
+            pdf.cell(wt, 5, fmt('ضمن الباقة' if rtl else 'Included'), 0, 0, 'C')
+        else:
+            money(it['unit'], unit_x, wu, y + 3.4, 10, False, C_MUTED)
+            money(it['total'], tot_x, wt, y + 3.4, 10.5, True, C_INK)
         pdf.set_font(FONT, "", 8.5)
         pdf.set_text_color(*C_MUTED)
         yy = y + 10
@@ -1663,7 +1708,11 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
     bx = M if rtl else 210 - M - box_w
     px_ = (M + box_w + 6) if rtl else M
     y = y0
-    rows_ = [(T['subtotal'], quote['subtotal'])]
+    if quote.get('package'):
+        rows_ = [(('القيمة بالتسعير الفردي' if rtl else 'Value at itemised prices'), quote['reference']),
+                 (quote['package']['label'], quote['package']['price'])]
+    else:
+        rows_ = [(T['subtotal'], quote['subtotal'])]
     if quote['discount']:
         rows_.append((f"{T['discount']} {int(quote['discount_rate'] * 100)}%", -quote['discount']))
     for lbl, val in rows_:
@@ -1735,3 +1784,142 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
 
 
 # ==============================================================
+
+
+# ======================= عينة العميل: قبل / بعد =======================
+def sample_size(total):
+    """25% من كل خدمة، بحد أدنى 3 وأقصى 10 (ولا أكثر من المتاح)."""
+    if total <= 0:
+        return 0
+    return min(total, max(3, min(10, round(total * 0.25))))
+
+
+def generate_sample_pdf(domain, sections, lang='ar', total_items=0):
+    """sections: [(عنوان القسم، [(اسم الصفحة، الحالي، المقترح)])] — عينة أنيقة قبل/بعد للعميل."""
+    rtl = lang == 'ar'
+
+    def _latin(t):
+        return str(t).encode('latin-1', 'replace').decode('latin-1')
+    _base_fmt = (lambda t: str(t)) if (rtl and HAS_SHAPING) else (shape_ar if rtl else _latin)
+    fmt = (lambda t: _base_fmt(ar_counts(t))) if rtl else _latin
+    FONT = AR_FONT_NAME if rtl else "Helvetica"
+    B = "B" if (FONT_BOLD_PATH if rtl else True) else ""
+    ALIGN = "R" if rtl else "L"
+    M, W = 18, 174
+    dom = re.sub(r'^https?://(www\.)?', '', str(domain)).rstrip('/')
+
+    class _Sample(FPDF):
+        def footer(self):
+            self.set_y(-18)
+            self.set_draw_color(*C_LINE)
+            self.line(M, self.get_y(), 210 - M, self.get_y())
+            self.ln(3)
+            self.set_font(FONT, "", 9)
+            self.set_text_color(*C_MUTED)
+            self.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+
+    pdf = _Sample()
+    if rtl:
+        pdf.add_font(AR_FONT_NAME, "", str(FONT_PATH))
+        if FONT_BOLD_PATH:
+            pdf.add_font(AR_FONT_NAME, "B", str(FONT_BOLD_PATH))
+        if HAS_SHAPING:
+            pdf.set_text_shaping(True, direction="rtl")
+    pdf.set_auto_page_break(True, margin=24)
+    pdf.add_page()
+
+    def lines(text, width, size):
+        pdf.set_font(FONT, "", size)
+        return pdf.multi_cell(width, 5, fmt(text), align=ALIGN, dry_run=True, output="LINES") or ['']
+
+    # الترويسة
+    pdf.set_fill_color(*C_INK)
+    pdf.rect(0, 0, 210, 46, 'F')
+    pdf.set_fill_color(*C_ACC)
+    pdf.rect(0, 46, 210, 1.6, 'F')
+    if LOGO_PATH.exists():
+        lx = M if rtl else 210 - M - 40
+        pdf.set_fill_color(255, 255, 255)
+        pdf.rect(lx, 12, 40, 18, 'F', round_corners=True, corner_radius=3)
+        logo_centered(pdf, lx, 12, 40, 18, 12)
+    tx, tw = (M + 46, W - 46) if rtl else (M, W - 46)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font(FONT, B, 19)
+    pdf.set_xy(tx, 12)
+    pdf.cell(tw, 10, fmt('عينة من التحسينات المقترحة' if rtl else 'Sample of proposed improvements'), 0, 2, ALIGN)
+    pdf.set_font(FONT, "", 10)
+    pdf.set_text_color(203, 213, 225)
+    pdf.cell(tw, 6, dom, 0, 0, ALIGN)
+    pdf.set_y(56)
+    pdf.set_font(FONT, "", 9.5)
+    pdf.set_text_color(*C_MUTED)
+    intro = ('صفحات مختارة من متجركم، بعناوينها وأوصافها الحالية في نتائج البحث، وبجانبها الصياغة المقترحة.'
+             if rtl else 'Selected pages from your store: current search snippet text and the proposed version.')
+    for ln_ in lines(intro, W, 9.5):
+        pdf.set_x(M)
+        pdf.cell(W, 5, ln_, ln=True, align=ALIGN)
+    pdf.ln(3)
+
+    lbl_now = 'الحالي' if rtl else 'Current'
+    lbl_new = 'المقترح' if rtl else 'Proposed'
+    for title, rows in sections:
+        if not rows:
+            continue
+        if pdf.get_y() > 240:
+            pdf.add_page()
+        pdf.set_font(FONT, B, 13)
+        pdf.set_text_color(*C_INK)
+        pdf.set_x(M)
+        pdf.cell(W, 9, fmt(title), ln=True, align=ALIGN)
+        pdf.set_fill_color(*C_ACC)
+        pdf.rect((210 - M - 16) if rtl else M, pdf.get_y(), 16, 1, 'F')
+        pdf.ln(4)
+        for name, now, new in rows:
+            l_now = lines(now or ('(فارغ)' if rtl else '(empty)'), W - 34, 9)
+            l_new = lines(new, W - 34, 9.5)
+            h = 9 + (len(l_now) + len(l_new)) * 5 + 8
+            if pdf.get_y() + h > 270:
+                pdf.add_page()
+            y = pdf.get_y()
+            pdf.set_draw_color(*C_LINE)
+            pdf.set_fill_color(255, 255, 255)
+            pdf.rect(M, y, W, h, 'DF', round_corners=True, corner_radius=3)
+            pdf.set_font(FONT, B, 9.5)
+            pdf.set_text_color(*C_INK)
+            pdf.set_xy(M + 5, y + 2.5)
+            pdf.cell(W - 10, 6, fmt(name)[:90], 0, 0, ALIGN)
+            yy = y + 10
+            for label, ls, color, size in ((lbl_now, l_now, C_BAD, 9), (lbl_new, l_new, C_OK, 9.5)):
+                pdf.set_fill_color(*color)
+                px = (210 - M - 5 - 22) if rtl else (M + 5)
+                pdf.rect(px, yy + 0.3, 22, 5.2, 'F', round_corners=True, corner_radius=2.6)
+                pdf.set_font(FONT, B, 7.8)
+                pdf.set_text_color(255, 255, 255)
+                pdf.set_xy(px, yy + 0.3)
+                pdf.cell(22, 5.2, fmt(label), 0, 0, 'C')
+                pdf.set_font(FONT, "", size)
+                pdf.set_text_color(*(C_MUTED if color == C_BAD else C_INK))
+                for k_, ln_ in enumerate(ls):
+                    pdf.set_xy((M + 5) if rtl else (M + 31), yy + k_ * 5)
+                    pdf.cell(W - 36, 5, ln_, 0, 0, ALIGN)
+                yy += len(ls) * 5 + 3
+            pdf.set_y(y + h + 3)
+
+    # خاتمة
+    n_shown = sum(len(r) for _, r in sections)
+    if pdf.get_y() > 245:
+        pdf.add_page()
+    y = pdf.get_y() + 2
+    pdf.set_fill_color(*C_INK)
+    pdf.rect(M, y, W, 20, 'F', round_corners=True, corner_radius=3)
+    pdf.set_font(FONT, B, 10.5)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_xy(M + 6, y + 3.5)
+    msg = (f"هذه {n_shown} صفحة من أصل {total_items} تحتاج تحسيناً في متجركم." if rtl
+           else f"These are {n_shown} of {total_items} pages that need improvement in your store.")
+    pdf.cell(W - 12, 6, fmt(msg), 0, 2, ALIGN)
+    pdf.set_font(FONT, "", 9)
+    pdf.set_text_color(203, 213, 225)
+    pdf.cell(W - 12, 6, fmt('يسعدنا تنفيذها كاملة لمتجركم.' if rtl else 'We would be glad to complete them all for you.'),
+             0, 0, ALIGN)
+    return bytes(pdf.output())
