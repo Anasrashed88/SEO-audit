@@ -40,6 +40,19 @@ def work_tables(exports):
             'zid_redirects': get('zid_redirects')}
 
 
+# مفتاح الخدمة في عرض السعر → جداول ملفات العمل التي تخصها
+QUOTE_TO_TABLES = {'meta_title': ['titles'], 'meta_desc': ['descs'], 'image_alt': ['alt_missing', 'alt_weak'],
+                   'broken_link_fix': ['broken', 'zid_redirects']}
+
+
+def only_services(tables, services):
+    """يُبقي جداول الخدمات المختارة فقط (فاتورة للنصوص البديلة وحدها مثلاً)."""
+    if not services:
+        return tables
+    keep = {t for s in services for t in QUOTE_TO_TABLES.get(s, [])}
+    return {k: (v if k in keep else pd.DataFrame()) for k, v in tables.items()}
+
+
 def _chunks(df, n):
     """تقسيم بالتساوي مع الحفاظ على الترتيب (الأهم أولاً): 81 على مرحلتين = 41 ثم 40."""
     size, extra = divmod(len(df), n)
@@ -127,15 +140,17 @@ def phase_summary(phase, platform):
 
 
 def task_file(phase, phase_no, total):
-    """ملف مهام المرحلة: نفس ملفات التصدير بكل أعمدتها، كل ملف في ورقة، مرقّمة من 1 داخل المرحلة."""
-    from export_utils import write_chunked
+    """ملف مهام المرحلة (ZIP): نفس ملفات التصدير بكل أعمدتها، CSV لكل ملف، مقسّماً كل 500 صف،
+    مرقّماً من 1 داخل المرحلة. ملف تحويلات زد يبقى Excel لأن زد تستورده بهذه الصيغة."""
+    import zipfile
+    from export_utils import zip_write
     buf = io.BytesIO()
     c = phase_counts(phase)
-    with pd.ExcelWriter(buf, engine='openpyxl') as w:
-        pd.DataFrame([{'المرحلة': f"{phase_no} من {total}", 'عناوين': c['titles'], 'أوصاف': c['descs'],
-                       'صور': c['images'], 'روابط معطلة': c['broken']}]).to_excel(
-            w, index=False, sheet_name='ملخص المرحلة')
-        for key in ('titles', 'descs', 'alt_missing', 'alt_weak', 'broken', 'zid_redirects'):
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('0_ملخص_المرحلة.csv', pd.DataFrame([{
+            'المرحلة': f"{phase_no} من {total}", 'عناوين': c['titles'], 'أوصاف': c['descs'],
+            'صور': c['images'], 'روابط معطلة': c['broken']}]).to_csv(index=False).encode('utf-8-sig'))
+        for n, key in enumerate(('titles', 'descs', 'alt_missing', 'alt_weak', 'broken', 'zid_redirects'), 1):
             t = phase.get(key)
             if t is None or t.empty:
                 continue
@@ -143,7 +158,8 @@ def task_file(phase, phase_no, total):
             num_col = next((col for col in t.columns if str(col) in ('م', '#')), None)
             if num_col is not None:
                 t[num_col] = range(1, len(t) + 1)
-            write_chunked(w, t, SHEET_NAMES[key])       # كل 500 صف في ورقة
+            ext = 'xlsx' if key == 'zid_redirects' else 'csv'
+            zip_write(z, f"{n}_{SHEET_NAMES[key].replace(' ', '_')}.{ext}", t)
     return buf.getvalue()
 
 
