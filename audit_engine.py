@@ -1522,11 +1522,33 @@ def image_stem(u):
     return base
 
 
+def _clean_desc(text):
+    """وصف المنتج كنص عادي: بلا وسوم HTML ولا مسافات زائدة."""
+    t = re.sub(r'<[^>]+>', ' ', str(text or ''))
+    t = t.replace('&nbsp;', ' ').replace('&amp;', '&')
+    return re.sub(r'\s+', ' ', t).strip()
+
+
 def extract_product_facts(soup):
-    facts = {'name': '', 'images': [], 'sku': '', 'offers': False}
+    facts = {'name': '', 'images': [], 'sku': '', 'offers': False, 'description': '', 'brand': '',
+             'category': ''}
     for node in iter_jsonld(soup):
-        if 'Product' not in node_types(node):
-            continue
+        types_ = node_types(node)
+        if 'BreadcrumbList' in types_ and not facts['category']:
+            items_ = node.get('itemListElement') or []
+            names_ = [str((it.get('item') or {}).get('name') if isinstance(it.get('item'), dict) else it.get('name') or '')
+                      for it in items_ if isinstance(it, dict)]
+            names_ = [n for n in names_ if n.strip()]
+            if len(names_) >= 2:
+                facts['category'] = names_[-2].strip()      # القسم الذي يسبق المنتج في مسار التنقل
+        if 'Product' not in types_ or facts.get('_seen'):
+            continue            # المنتج الأول فقط: بيانات «منتجات مشابهة» في نفس الصفحة لا تختلط به
+        facts['_seen'] = True
+        if not facts['description']:
+            facts['description'] = _clean_desc(node.get('description'))[:1200]
+        br = node.get('brand')
+        if not facts['brand']:
+            facts['brand'] = (br.get('name') if isinstance(br, dict) else str(br or '')).strip()
         nm = node.get('name')
         if isinstance(nm, str) and nm.strip() and not facts['name']:
             facts['name'] = re.sub(r'\s+', ' ', nm).strip()
@@ -1541,8 +1563,12 @@ def extract_product_facts(soup):
             facts['sku'] = str(node['sku'])
         if node.get('offers'):
             facts['offers'] = True
-        break
+    facts.pop('_seen', None)
     facts['images'] = list(dict.fromkeys(facts['images']))
+    if not facts['description']:
+        og = soup.find('meta', attrs={'property': 'og:description'}) or soup.find('meta', attrs={'name': 'description'})
+        if og and og.get('content'):
+            facts['description'] = _clean_desc(og['content'])[:1200]
     return facts
 
 
@@ -2140,7 +2166,7 @@ def _fetch_and_audit(url, base_url, source):
             })
 
     jd = extract_product_facts(soup) if page_type == T_PRODUCT else \
-        {'name': '', 'images': [], 'sku': '', 'offers': False}
+        {'name': '', 'images': [], 'sku': '', 'offers': False, 'description': '', 'brand': '', 'category': ''}
     # المنصة (لا القالب) تكتب قائمة صور المنتج في بطاقة بياناته المنظمة: نعرف منها صور المنتج نفسه
     own_stems = {image_stem(u) for u in jd['images']} if jd['images'] else set()
     for im in page_images:
@@ -2181,6 +2207,8 @@ def _fetch_and_audit(url, base_url, source):
             'عدد الكلمات': words, 'حالة المحتوى': content_status,
             # مقتطف من نص الصفحة: يعتمد عليه الذكاء الاصطناعي ليكتب من حقائق المنتج لا من اسمه فقط
             '_excerpt': re.sub(r'\s+', ' ', body_text).strip()[:600],
+            # وصف المنتج الحقيقي من البيانات المنظمة التي تكتبها المنصة، مع القسم والماركة
+            '_pdesc': jd.get('description', ''), '_category': jd.get('category', ''), '_brand': jd.get('brand', ''),
             'حالة الكانونيكال': canon_status,
             'الرابط الكانوني': unquote(canonical) if canon_status == 'canon_diff' else '',
             '_raw_url': final_url, '_req_url': req,
