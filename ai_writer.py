@@ -22,7 +22,12 @@ STATUS_REVIEW = 'يحتاج مراجعتك'
 
 
 class QuotaExhausted(Exception):
-    """انتهت الحصة اليومية أو الدقيقة: نتوقف ونحفظ ما أُنجز."""
+    """انتهت الحصة اليومية أو الدقيقة، أو خوادم جوجل مشغولة طويلاً: نتوقف ونحفظ ما أُنجز."""
+
+
+def _hdr(key):
+    # المفتاح في الترويسة لا في الرابط: فلا يظهر أبداً في رسائل الخطأ
+    return {'x-goog-api-key': key}
 
 
 # ---------------- المفتاح (على جهازك فقط) ----------------
@@ -46,7 +51,7 @@ _MODEL_CACHE = {}
 def list_models(key, session=None):
     """النماذج المتاحة لهذا المفتاح للكتابة، بلا Lite (جودته أقل)، الأحدث أولاً."""
     http = session or requests
-    r = http.get(f'{API}/models', params={'key': key, 'pageSize': 200}, timeout=20)
+    r = http.get(f'{API}/models', params={'pageSize': 200}, headers=_hdr(key), timeout=20)
     if r.status_code in (400, 401, 403):
         raise ValueError('المفتاح غير صحيح أو غير مفعّل.')
     r.raise_for_status()
@@ -82,20 +87,30 @@ def _generate(key, model, prompt, session=None):
     http = session or requests
     body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
             'generationConfig': {'temperature': 0.5, 'responseMimeType': 'application/json'}}
-    for attempt in range(3):
-        r = http.post(f'{API}/models/{model}:generateContent', params={'key': key}, json=body, timeout=90)
+    busy_waits = [5, 15, 30, 60]          # خوادم جوجل مشغولة (500/503): ننتظر ونعيد، بفترات متزايدة
+    for attempt in range(len(busy_waits) + 1):
+        try:
+            r = http.post(f'{API}/models/{model}:generateContent', json=body, headers=_hdr(key), timeout=120)
+        except requests.exceptions.RequestException:
+            if attempt < len(busy_waits):
+                time.sleep(busy_waits[attempt])
+                continue
+            raise QuotaExhausted('تعذّر الاتصال بخوادم جوجل. تحقق من الإنترنت، ثم أكمل وسيُكمل من حيث توقف.')
         if r.status_code == 429:
             delay = _retry_delay(r)
-            if delay is None or delay > 70 or attempt == 2:
+            if delay is None or delay > 70 or attempt >= 2:
                 raise QuotaExhausted('انتهت الحصة المتاحة الآن. أكمل لاحقاً، وسيُكمل من حيث توقف.')
             time.sleep(delay + 1)
             continue
-        if r.status_code >= 500 and attempt < 2:
-            time.sleep(4)
-            continue
+        if r.status_code >= 500:
+            if attempt < len(busy_waits):
+                time.sleep(busy_waits[attempt])
+                continue
+            raise QuotaExhausted('خوادم جوجل مشغولة الآن (خطأ مؤقت منهم). حاول بعد دقائق، وسيُكمل من حيث توقف.')
         if r.status_code in (400, 401, 403):
             raise ValueError(f'رفض Gemini الطلب ({r.status_code}): تحقق من المفتاح.')
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise ValueError(f'رد Gemini بخطأ {r.status_code}.')
         data = r.json()
         try:
             return data['candidates'][0]['content']['parts'][0]['text']
