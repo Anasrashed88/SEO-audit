@@ -16,50 +16,50 @@ from audit_engine import (
 #  حزمة الملفات
 # ==============================================================
 ZIP_NAMES = {
-    'ar': {T_PRODUCT: "1_المنتجات.xlsx", T_CATEGORY: "2_التصنيفات.xlsx",
-           T_BLOG: "3_المدونة.xlsx", T_INFO: "4_الصفحات_التعريفية.xlsx",
-           T_HOME: "5_الصفحة_الرئيسية.xlsx", T_ARCHIVE: "6_صفحات_أرشيف.xlsx",
-           T_UNKNOWN: "7_غير_مصنفة.xlsx", T_BROKEN: "8_روابط_معطلة.xlsx",
-           'images': "9_تدقيق_الصور.xlsx",
-           'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.xlsx",
-           'orphan': "10_صفحات_يتيمة.xlsx",
-           'scroll': "15_منتجات_بالتمرير_فقط.xlsx",
-           'fix': "00_صفحات_تحتاج_إصلاح.xlsx",
-           'noalt': "00_صور_تحتاج_وصفاً.xlsx",
-           'alt_missing': "00_صور_بلا_وصف.xlsx",
-           'alt_weak': "00_صور_وصفها_غير_وصفي_أو_مكرر.xlsx",
-           'broken': "8_روابط_لا_تعمل_بلا_تحويل.xlsx",
+    'ar': {T_PRODUCT: "1_المنتجات.csv", T_CATEGORY: "2_التصنيفات.csv",
+           T_BLOG: "3_المدونة.csv", T_INFO: "4_الصفحات_التعريفية.csv",
+           T_HOME: "5_الصفحة_الرئيسية.csv", T_ARCHIVE: "6_صفحات_أرشيف.csv",
+           T_UNKNOWN: "7_غير_مصنفة.csv", T_BROKEN: "8_روابط_معطلة.csv",
+           'images': "9_تدقيق_الصور.csv",
+           'notidx': "9_منتجات_غير_مدرجة_في_الخريطة.csv",
+           'orphan': "10_صفحات_يتيمة.csv",
+           'scroll': "15_منتجات_بالتمرير_فقط.csv",
+           'fix': "00_صفحات_تحتاج_إصلاح.csv",
+           'noalt': "00_صور_تحتاج_وصفاً.csv",
+           'alt_missing': "00_صور_بلا_وصف.csv",
+           'alt_weak': "00_صور_وصفها_غير_وصفي_أو_مكرر.csv",
+           'broken': "8_روابط_لا_تعمل_بلا_تحويل.csv",
            'zid_redirects': "8_ملف_تحويلات_زد_للاستيراد.xlsx",
-           'titles': "00_عناوين_وروابط_تحتاج_إصلاح.xlsx",
-           'descs': "00_أوصاف_ميتا_تحتاج_إصلاح.xlsx",
+           'titles': "00_عناوين_وروابط_تحتاج_إصلاح.csv",
+           'descs': "00_أوصاف_ميتا_تحتاج_إصلاح.csv",
            'bundle': "ملفات_العمل.zip",
-           'redirect': "11_روابط_محذوفة_في_الخريطة.xlsx",
-           'imggap': "12_صفحات_صورها_ناقصة.xlsx",
-           'namegap': "13_اسم_معلن_مختلف.xlsx",
-           'catgap': "14_مقارنة_عدادات_الأقسام.xlsx",
-           'excel': "التقرير_الشامل.xlsx"},
-    'en': {T_PRODUCT: "1_products.xlsx", T_CATEGORY: "2_categories.xlsx",
-           T_BLOG: "3_blog.xlsx", T_INFO: "4_info_pages.xlsx",
-           T_HOME: "5_homepage.xlsx", T_ARCHIVE: "6_archive_pages.xlsx",
-           T_UNKNOWN: "7_unclassified.xlsx", T_BROKEN: "8_broken_links.xlsx",
-           'images': "9_image_alt_audit.xlsx",
-           'notidx': "9_products_missing_from_sitemap.xlsx",
-           'orphan': "10_orphan_pages.xlsx",
-           'scroll': "15_scroll_only_products.xlsx",
-           'fix': "00_pages_to_fix.xlsx",
-           'noalt': "00_images_needing_alt.xlsx",
-           'alt_missing': "00_images_missing_alt.xlsx",
-           'alt_weak': "00_images_weak_or_duplicate_alt.xlsx",
-           'broken': "8_broken_links_no_redirect.xlsx",
+           'redirect': "11_روابط_محذوفة_في_الخريطة.csv",
+           'imggap': "12_صفحات_صورها_ناقصة.csv",
+           'namegap': "13_اسم_معلن_مختلف.csv",
+           'catgap': "14_مقارنة_عدادات_الأقسام.csv",
+           'excel': "فحص_الصفحات_الكامل.csv"},
+    'en': {T_PRODUCT: "1_products.csv", T_CATEGORY: "2_categories.csv",
+           T_BLOG: "3_blog.csv", T_INFO: "4_info_pages.csv",
+           T_HOME: "5_homepage.csv", T_ARCHIVE: "6_archive_pages.csv",
+           T_UNKNOWN: "7_unclassified.csv", T_BROKEN: "8_broken_links.csv",
+           'images': "9_image_alt_audit.csv",
+           'notidx': "9_products_missing_from_sitemap.csv",
+           'orphan': "10_orphan_pages.csv",
+           'scroll': "15_scroll_only_products.csv",
+           'fix': "00_pages_to_fix.csv",
+           'noalt': "00_images_needing_alt.csv",
+           'alt_missing': "00_images_missing_alt.csv",
+           'alt_weak': "00_images_weak_or_duplicate_alt.csv",
+           'broken': "8_broken_links_no_redirect.csv",
            'zid_redirects': "8_zid_redirects_import.xlsx",
-           'titles': "00_titles_and_urls_to_fix.xlsx",
-           'descs': "00_meta_descriptions_to_fix.xlsx",
+           'titles': "00_titles_and_urls_to_fix.csv",
+           'descs': "00_meta_descriptions_to_fix.csv",
            'bundle': "work_files.zip",
-           'redirect': "11_dead_urls_in_sitemap.xlsx",
-           'imggap': "12_pages_with_missing_images.xlsx",
-           'namegap': "13_declared_name_mismatch.xlsx",
-           'catgap': "14_category_counter_comparison.xlsx",
-           'excel': "full_audit_report.xlsx"},
+           'redirect': "11_dead_urls_in_sitemap.csv",
+           'imggap': "12_pages_with_missing_images.csv",
+           'namegap': "13_declared_name_mismatch.csv",
+           'catgap': "14_category_counter_comparison.csv",
+           'excel': "full_pages_audit.csv"},
 }
 
 
@@ -391,6 +391,40 @@ def _sheet_base(fname):
     return stem
 
 
+def csv_chunks(table, fname, rows=ROWS_PER_SHEET):
+    """[(اسم الملف، المحتوى)]: ملف واحد حتى 500 صف، وإلا ملفات متتالية «_1-500»، «_501-1000» ...
+    الترقيم داخل الجداول مستمر، فلا يضيع صف ولا يتكرر."""
+    t = clickable_urls(table) if table is not None else pd.DataFrame()
+    stem = str(fname).rsplit('.', 1)[0]
+    if t is None or t.empty or len(t) <= rows:
+        return [(f"{stem}.csv", (t if t is not None else pd.DataFrame()).to_csv(index=False).encode('utf-8-sig'))]
+    return [(f"{stem}_{a + 1}-{min(a + rows, len(t))}.csv",
+             t.iloc[a:a + rows].to_csv(index=False).encode('utf-8-sig')) for a in range(0, len(t), rows)]
+
+
+def zip_write(z, fname, table):
+    """يكتب الجدول داخل ملف ZIP: CSV واحد أو أجزاء من 500 صف. ملف تحويلات زد يبقى Excel."""
+    if 'zid' in str(fname).lower() or 'زد' in str(fname):
+        z.writestr(fname, to_xlsx_bytes(table))
+        return
+    for name, data in csv_chunks(table, fname):
+        z.writestr(name, data)
+
+
+def table_payload(fname, table):
+    """(المحتوى، النوع، اسم الملف للتحميل): CSV إن كان 500 صف أو أقل، وإلا ZIP فيه أجزاء CSV."""
+    if 'zid' in str(fname).lower() or 'زد' in str(fname):
+        return to_xlsx_bytes(table), XLSX_MIME, fname
+    parts = csv_chunks(table, fname)
+    if len(parts) == 1:
+        return parts[0][1], 'text/csv', parts[0][0]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts:
+            z.writestr(name, data)
+    return buf.getvalue(), 'application/zip', str(fname).rsplit('.', 1)[0] + '.zip'
+
+
 def table_bytes(fname, table):
     """(المحتوى، نوع الملف). ملف تحويلات زد يبقى ورقة واحدة لأن زد تستورده كما هو."""
     if 'zid' in str(fname).lower() or 'زد' in str(fname):
@@ -403,7 +437,7 @@ def build_filtered_zip(filtered):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for fname, table in filtered.values():
-            z.writestr(fname, table_bytes(fname, table)[0])
+            zip_write(z, fname, table)
     return buf.getvalue()
 
 
@@ -421,26 +455,24 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
             label = PAGE_TYPE_LABEL[lang][tkey]
             sub = ldf[ldf[type_col] == label] if type_col in ldf.columns else pd.DataFrame()
             if not sub.empty:
-                fname = names.get(tkey, f"{tkey}.xlsx")
-                z.writestr(fname, to_xlsx_chunked(sub, _sheet_base(fname)))
+                fname = names.get(tkey, f"{tkey}.csv")
+                zip_write(z, fname, sub)
         if limg is not None and not limg.empty:
-            z.writestr(names['images'], to_xlsx_chunked(limg, _sheet_base(names['images'])))
+            zip_write(z, names['images'], limg)
 
         if coverage:
             for key, data in [('notidx', coverage.get('unlisted_pages')),
                               ('orphan', coverage.get('orphan_pages')),
                               ('scroll', coverage.get('scroll_only_products'))]:
                 if data:
-                    z.writestr(names[key],
-                               to_xlsx_chunked(localize_df(pd.DataFrame(data), lang), _sheet_base(names[key])))
+                    zip_write(z, names[key], localize_df(pd.DataFrame(data), lang))
 
         if structured:
             for key, data in [('imggap', structured.get('image_gap')),
                               ('namegap', structured.get('name_mismatch')),
                               ('catgap', structured.get('category_rows'))]:
                 if data:
-                    z.writestr(names[key],
-                               to_xlsx_chunked(localize_df(pd.DataFrame(data), lang), _sheet_base(names[key])))
+                    zip_write(z, names[key], localize_df(pd.DataFrame(data), lang))
 
         titles = build_titles_urls_list(df, lang, platform)
         descs = build_descs_list(df, lang)
@@ -454,31 +486,9 @@ def build_zip(df, images_df, coverage=None, lang='ar', structured=None, platform
                            ('alt_missing', alt_missing), ('alt_weak', alt_weak),
                            ('broken', broken)):
             if table is not None and not table.empty:
-                z.writestr(names[key], to_xlsx_chunked(table, _sheet_base(names[key])))
+                zip_write(z, names[key], table)
 
-        xbuf = io.BytesIO()
-        with pd.ExcelWriter(xbuf, engine='openpyxl') as w:
-            clickable_urls(ldf).to_excel(w, index=False,
-                         sheet_name='Pages Audit' if lang == 'en' else 'فحص الصفحات')
-            if limg is not None and not limg.empty:
-                clickable_urls(limg).to_excel(w, index=False,
-                              sheet_name='Images Audit' if lang == 'en' else 'فحص الصور')
-            if titles is not None and not titles.empty:
-                clickable_urls(titles).to_excel(w, index=False,
-                                sheet_name='Titles & URLs' if lang == 'en' else 'عناوين وروابط')
-            if descs is not None and not descs.empty:
-                clickable_urls(descs).to_excel(w, index=False,
-                               sheet_name='Meta Descriptions' if lang == 'en' else 'أوصاف الميتا')
-            if alt_missing is not None and not alt_missing.empty:
-                clickable_urls(alt_missing).to_excel(w, index=False,
-                                     sheet_name='Missing Alt' if lang == 'en' else 'صور بلا وصف')
-            if alt_weak is not None and not alt_weak.empty:
-                clickable_urls(alt_weak).to_excel(w, index=False,
-                                  sheet_name='Weak Alt' if lang == 'en' else 'صور وصفها ضعيف')
-            if broken is not None and not broken.empty:
-                clickable_urls(broken).to_excel(w, index=False,
-                                sheet_name='Broken Links' if lang == 'en' else 'روابط لا تعمل')
-        z.writestr(names['excel'], xbuf.getvalue())
+        zip_write(z, names['excel'], ldf)
     return buf.getvalue()
 
 
