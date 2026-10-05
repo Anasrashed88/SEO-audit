@@ -22,7 +22,7 @@ from audit_engine import (
     url_key, build_broken_links, build_zid_redirects, verify_redirects,
 )
 from pdf_generator import generate_client_pdf, generate_invoice_pdf, build_quote, DEFAULT_PRICES
-from export_utils import (build_zip, build_filtered_exports, to_csv_bytes, build_filtered_zip,
+from export_utils import (build_zip, build_filtered_exports, to_csv_bytes, build_filtered_zip, table_payload,
                           table_bytes)
 
 st.set_page_config(page_title="مركز عمليات السيو | أنس راشد",
@@ -905,6 +905,22 @@ if nav == "🔍 فحص متجر جديد":
 
             st.markdown("---")
             st.markdown("##### 💰 عرض السعر")
+            from pdf_generator import package_for
+            SERVICE_LABELS = {'meta_title': 'العناوين والروابط', 'meta_desc': 'أوصاف الميتا',
+                              'image_alt': 'النصوص البديلة للصور', 'broken_link_fix': 'الروابط المعطلة'}
+            pm1, pm2 = st.columns([1, 2])
+            price_mode = pm1.radio("طريقة التسعير", ["باقة شاملة", "خدمات منفردة"], key="price_mode",
+                                   help="الباقة: سعر ثابت حسب حجم المتجر. الخدمات المنفردة: بسعر القطعة.")
+            sel_services = pm2.multiselect("الخدمات المشمولة في عرض السعر والفواتير",
+                                           list(SERVICE_LABELS), default=list(SERVICE_LABELS),
+                                           format_func=lambda k: SERVICE_LABELS[k], key="price_services")
+            live_n = int(summary.get('live_pages', summary.get('total_pages', 0)) or 0)
+            pkg_def = package_for(live_n)
+            pkg_lbl = pkg_def['ar'] if lang == 'ar' else pkg_def['en']
+            pkg_price = st.number_input(
+                f"سعر {pkg_def['ar']} ({live_n:,} صفحة)" + (" — حسب الطلب" if not pkg_def['price'] else ""),
+                0.0, 1_000_000.0, float(pkg_def['price'] or 0.0), 10.0, key="pkg_price",
+                help="الباقات: حتى 100 صفحة 990، حتى 500 صفحة 1,990، حتى 1,500 صفحة 3,490، والأكبر حسب الطلب.")
             pc1, pc2, pc3, pc4 = st.columns(4)
             with pc1:
                 p_title = st.number_input("سعر عنوان الميتا + الرابط (ريال)",
@@ -926,10 +942,20 @@ if nav == "🔍 فحص متجر جديد":
             with dc2:
                 disc_pct = st.slider("نسبة الخصم %", 0, 50, 10,
                                      disabled=not use_disc)
-            quote = build_quote(summary,
-                                {'meta_title': p_title, 'meta_desc': p_desc,
-                                 'image_alt': p_alt, 'broken_link_fix': p_broken},
-                                discount_rate=(disc_pct / 100 if use_disc else 0.0))
+            prices_now = {'meta_title': p_title, 'meta_desc': p_desc, 'image_alt': p_alt, 'broken_link_fix': p_broken}
+            disc_now = (disc_pct / 100 if use_disc else 0.0)
+            pkg_now = ({'label': pkg_lbl, 'price': pkg_price}
+                       if price_mode == "باقة شاملة" and pkg_price > 0 else None)
+            if price_mode == "باقة شاملة" and not pkg_price:
+                st.warning("هذا المتجر أكبر من 1,500 صفحة: أدخل سعر الباقة يدوياً أعلاه.")
+            quote = build_quote(summary, prices_now, discount_rate=disc_now,
+                                services=sel_services or None, package=pkg_now)
+            # الإعدادات نفسها تُستخدم في تبويب المراحل والفواتير
+            st.session_state.pricing = {'prices': prices_now, 'disc': disc_now, 'services': sel_services,
+                                        'package': pkg_now, 'pkg_label': pkg_lbl}
+            if price_mode == "خدمات منفردة" and pkg_def['price'] and quote['total'] > pkg_def['price']:
+                st.info(f"💡 سعر الخدمات المختارة ({quote['total']:,.0f}) أعلى من {pkg_def['ar']} "
+                        f"({pkg_def['price']:,.0f}) التي تشمل كل شيء. اعرض الباقة على العميل.")
             qc = st.columns(5)
             qc[0].metric("عناوين وروابط",
                          f"{summary.get('fix_titles_urls', summary.get('bad_titles', 0))}")
@@ -938,7 +964,8 @@ if nav == "🔍 فحص متجر جديد":
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
             qc[3].metric("روابط تحتاج معالجة", f"{summary.get('broken_actionable', 0)}")
-            qc[4].metric("الإجمالي المستحق", f"{quote['total']:,.0f}")
+            qc[4].metric("الإجمالي المستحق", f"{quote['total']:,.0f}",
+                         help=(f"القيمة بالتسعير الفردي: {quote['reference']:,.0f}" if quote.get('package') else None))
             if quote['discount']:
                 st.caption(f"شمل خصماً {int(quote['discount_rate'] * 100)}% "
                            f"({quote['discount']:,.0f}) · الأسعار غير شاملة "
@@ -999,9 +1026,9 @@ if nav == "🔍 فحص متجر جديد":
                     label = lbl_ar if lang == 'ar' else lbl_en
                     if key in filtered:
                         fname, table = filtered[key]
-                        data, mime = table_bytes(fname, table)
+                        data, mime, out_name = table_payload(fname, table)
                         st.download_button(f"{label} ({len(table)})", data,
-                                           f"{netloc}_{fname}", mime,
+                                           f"{netloc}_{out_name}", mime,
                                            use_container_width=True, key=f"dl_{key}_{lang}")
                     else:
                         st.button(f"{label} (0)", disabled=True, use_container_width=True,
@@ -1054,11 +1081,14 @@ if nav == "🔍 فحص متجر جديد":
                                       "نوع العمل: العناوين والأوصاف في مرحلة، والصور في أخرى.")
             ph_lang = 'ar' if cp3.radio("لغة الفاتورة", ["العربية", "English"], horizontal=True,
                                         key="ph_lang") == "العربية" else 'en'
-            prices_ph = {'meta_title': locals().get('p_title', DEFAULT_PRICES['meta_title']),
-                         'meta_desc': locals().get('p_desc', DEFAULT_PRICES['meta_desc']),
-                         'image_alt': locals().get('p_alt', DEFAULT_PRICES['image_alt']),
-                         'broken_link_fix': locals().get('p_broken', DEFAULT_PRICES['broken_link_fix'])}
-            disc_ph = (locals().get('disc_pct', 0) / 100) if locals().get('use_disc') else 0.0
+            pricing_ph = st.session_state.get('pricing') or {}
+            prices_ph = pricing_ph.get('prices') or dict(DEFAULT_PRICES)
+            disc_ph = pricing_ph.get('disc', 0.0)
+            services_ph = pricing_ph.get('services') or list(prices_ph)
+            package_ph = pricing_ph.get('package')
+            st.caption("طريقة التسعير والخدمات المشمولة والأسعار تؤخذ من تبويب التصدير" +
+                       (f" — {package_ph['label']}: {package_ph['price']:,.0f} ريال تُقسم على المراحل بنسبة العمل في كل مرحلة."
+                        if package_ph else "."))
 
             # التواريخ داخل نموذج: لا يُبنى شيء حتى الضغط على «تجهيز»
             with st.form("ph_form"):
@@ -1069,18 +1099,32 @@ if nav == "🔍 فحص متجر جديد":
                 go = st.form_submit_button("⚙️ تجهيز المراحل والفواتير", type="primary", use_container_width=True)
 
             sig = (st.session_state.current_url, n_ph, mode_lbl, ph_lang, client_name, client_phone,
-                   tuple(str(d) for d in dates_ph), tuple(sorted(prices_ph.items())), disc_ph)
+                   tuple(str(d) for d in dates_ph), tuple(sorted(prices_ph.items())), disc_ph,
+                   tuple(services_ph), str(package_ph))
             if go:
                 with st.spinner("جارٍ تجهيز ملفات المهام والفواتير..."):
                     try:
-                        tables_ph = ph.work_tables(build_filtered_exports(df, images_df, 'ar', platform))
+                        tables_ph = ph.only_services(ph.work_tables(build_filtered_exports(df, images_df, 'ar', platform)),
+                                                     services_ph)
                         plist = ph.split_phases(tables_ph, n_ph, 'type' if 'نوع' in mode_lbl else 'priority')
                         order_no = ph.order_number(DB_FILE, st.session_state.current_url)
                         netloc_ph = urlparse(st.session_state.current_url).netloc or "store"
                         n_real = len(plist)
                         items_ph = []
+                        # الباقة: سعرها يُقسم على المراحل بنسبة قيمة العمل في كل مرحلة
+                        refs = [build_quote(ph.phase_summary(pd_, platform), prices_ph,
+                                            services=services_ph)['reference'] for pd_ in plist]
+                        ref_total = sum(refs) or 1.0
                         for i, pdata in enumerate(plist):
-                            q_ph = build_quote(ph.phase_summary(pdata, platform), prices_ph, discount_rate=disc_ph)
+                            pkg_i = None
+                            if package_ph:
+                                share = round(package_ph['price'] * refs[i] / ref_total, 0)
+                                if i == len(plist) - 1:     # آخر مرحلة تأخذ الباقي حتى يطابق المجموع سعر الباقة
+                                    share = round(package_ph['price'] - sum(
+                                        round(package_ph['price'] * r / ref_total, 0) for r in refs[:-1]), 0)
+                                pkg_i = {'label': package_ph['label'], 'price': share}
+                            q_ph = build_quote(ph.phase_summary(pdata, platform), prices_ph, discount_rate=disc_ph,
+                                               services=services_ph, package=pkg_i)
                             number = f"{order_no}-P{i + 1}" if n_real > 1 else f"{order_no}"
                             d_ = dates_ph[i] if i < len(dates_ph) else dates_ph[-1]
                             info = {'title': ph.phase_title(i, n_real, ph_lang), 'number': number,
@@ -1116,7 +1160,7 @@ if nav == "🔍 فحص متجر جديد":
                         k5.metric("المستحق", f"{it['total']:,.0f} ريال")
                         b1, b2 = st.columns(2)
                         b1.download_button(f"📋 ملف مهام المرحلة {i + 1}", it['task'],
-                                           f"Task_Phase_{i + 1}_{res_ph['netloc']}.xlsx", use_container_width=True,
+                                           f"Task_Phase_{i + 1}_{res_ph['netloc']}.zip", use_container_width=True,
                                            key=f"ph_task_{i}")
                         b2.download_button(f"🧾 فاتورة المرحلة {i + 1} (PDF)", it['invoice'],
                                            f"Invoice_{it['number']}_{res_ph['netloc']}.pdf", "application/pdf",
@@ -1131,7 +1175,7 @@ if nav == "🔍 فحص متجر جديد":
         # ---------------- الذكاء الاصطناعي ----------------
         with tabs[9]:
             import ai_writer as ai
-            from export_utils import to_xlsx_chunked
+            netloc_ai = urlparse(st.session_state.current_url).netloc or "store"
             st.markdown("#### اقتراح العناوين والأوصاف بالذكاء الاصطناعي")
             st.caption("يكتب Gemini عنواناً ووصفاً لكل صفحة تحتاجهما، من بيانات الصفحة فقط، ثم تتحقق الأداة "
                        "من كل اقتراح: الطول، والتكرار، وعدم اختراع أرقام. أنت تراجع وتعتمد.")
@@ -1152,6 +1196,7 @@ if nav == "🔍 فحص متجر جديد":
                         st.success(f"المفتاح يعمل. النموذج المستخدم: {st.session_state.gem_model}")
                     except Exception as e:
                         st.error(f"المفتاح لا يعمل: {e}")
+                    st.session_state.pop('gem_models', None)
                 if kc3.button("تغيير المفتاح", use_container_width=True):
                     ai.key_path(eng.BASE_DIR).unlink(missing_ok=True)
                     st.rerun()
@@ -1159,45 +1204,133 @@ if nav == "🔍 فحص متجر جديد":
                 exports_ai = build_filtered_exports(df, images_df, 'ar', platform)
                 items_ai = ai.items_from_scan(df, exports_ai)
                 cache_ai = ai.load_cache(eng.BASE_DIR, st.session_state.current_url)
-                done_ai = sum(1 for it in items_ai if it['id'] in cache_ai)
+                sugg_ai = ai.suggestions(cache_ai)
+                locked_ai = ai.store_model(cache_ai)
+
+                # النموذج: تختاره مرة، ويثبت لهذا المتجر حتى آخر اقتراح (لا تتفاوت الجودة)
+                if 'gem_models' not in st.session_state:
+                    try:
+                        st.session_state.gem_models = ai.list_models(api_key)
+                    except Exception as e:
+                        st.session_state.gem_models = []
+                        st.error(f"تعذّر جلب النماذج: {e}")
+                models_ai = st.session_state.gem_models or ([locked_ai] if locked_ai else [])
+                if locked_ai:
+                    model_ai = locked_ai
+                    st.info(f"النموذج الثابت لهذا المتجر: **{locked_ai}**. يكمل به كل الاقتراحات حتى لا تتفاوت الجودة.")
+                elif models_ai:
+                    dm = ai.default_model(models_ai)
+                    model_ai = st.selectbox("النموذج (يثبت لهذا المتجر من أول توليد)", models_ai,
+                                            index=models_ai.index(dm) if dm in models_ai else 0, key="ai_model")
+                else:
+                    model_ai = ''
+
+                # اسم المتجر في العناوين: تكتشفه الأداة وتحسب طوله
+                live_titles = df[df['متاحة'] == True]['عنوان الميتا'].astype(str).tolist()  # noqa: E712
+                sfx, smode = ai.detect_title_suffix(live_titles)
+                if smode == 'add':
+                    if not st.checkbox(f"إضافة «{sfx.strip(' |-–—')}» لنهاية كل عنوان (والعنوان كاملاً بين 50 و60 حرفاً)",
+                                       value=True, key="ai_sfx"):
+                        smode = None
+                elif smode == 'auto':
+                    st.caption(f"المنصة تضيف «{sfx.strip(' |-–—')}» لنهاية العناوين تلقائياً: لن نكتبه، "
+                               "لكن نحسب طوله حتى يبقى العنوان في جوجل بين 50 و60 حرفاً.")
+
+                if model_ai:
+                    st.caption(f"طلبات اليوم بنموذج {model_ai}: {ai.usage_today(eng.BASE_DIR, model_ai)} — "
+                               "تتجدد يومياً الساعة 10 صباحاً بتوقيت الرياض (11 صباحاً في الشتاء).")
+                done_ai = sum(1 for it in items_ai if it['id'] in sugg_ai)
                 m1, m2, m3 = st.columns(3)
                 m1.metric("صفحات تحتاج عنواناً أو وصفاً", f"{len(items_ai):,}")
                 m2.metric("وُلّدت اقتراحاتها", f"{done_ai:,}")
-                m3.metric("الطلبات المتوقعة", f"~{-(-max(len(items_ai) - done_ai, 0) // ai.BATCH)}",
-                          help="20 صفحة في كل طلب. الحصة المجانية اليومية محدودة؛ ما يتبقى يُكمل لاحقاً.")
+                m3.metric("الطلبات المتوقعة للباقي", f"~{-(-max(len(items_ai) - done_ai, 0) // ai.BATCH) * 2}",
+                          help="20 صفحة في كل طلب، وقد يُضاف طلب لإعادة كتابة ما خالف القواعد.")
                 g1, g2 = st.columns([2, 1])
-                limit_ai = g1.number_input("عدد الصفحات في هذه الجولة (0 = الكل)", 0, 10000, 0, 20, key="ai_limit")
-                regen_ai = g2.checkbox("إعادة توليد ما وُلّد سابقاً", value=False, key="ai_regen")
-                if st.button("🤖 توليد الاقتراحات", type="primary", use_container_width=True):
+                limit_ai = g1.number_input("عدد الصفحات في هذه الجولة (0 = الكل)", 0, 10000, 0, 10, key="ai_limit")
+                regen_ai = g2.checkbox("إعادة توليد الكل من جديد", value=False, key="ai_regen",
+                                       help="يحذف الاقتراحات السابقة لهذا المتجر ويبدأ من جديد، ويسمح بتغيير النموذج.")
+                if st.button("🤖 توليد الاقتراحات", type="primary", use_container_width=True, disabled=not model_ai):
                     bar = st.progress(0.0, text="جارٍ التوليد...")
                     try:
                         cache_ai, info_ai = ai.generate(
                             items_ai, api_key, st.session_state.get('brand') or '', eng.BASE_DIR,
-                            st.session_state.current_url, regenerate=regen_ai, max_items=limit_ai or None,
-                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0),
-                                                               text=f"وُلّدت {d} من {t}"))
+                            st.session_state.current_url, model_ai, regenerate=regen_ai,
+                            max_items=limit_ai or None, suffix=sfx, suffix_mode=smode,
+                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"وُلّدت {d} من {t}"))
+                        sugg_ai = ai.suggestions(cache_ai)
+                        st.session_state.ai_last_run = {'url': st.session_state.current_url, 'ids': info_ai['run_ids']}
                         bar.progress(1.0, text="انتهى")
                         if info_ai['stopped']:
-                            st.warning(f"{info_ai['stopped']} أُنجز {info_ai['done']} من {info_ai['requested']}.")
+                            st.warning(f"{info_ai['stopped']} أُنجز {len(info_ai['run_ids'])} من {info_ai['requested']}.")
                         else:
-                            st.success(f"وُلّدت اقتراحات {info_ai['done']} صفحة بنموذج {info_ai['model']}.")
+                            st.success(f"وُلّدت اقتراحات {len(info_ai['run_ids'])} صفحة بنموذج {info_ai['model']}.")
                     except Exception as e:
                         st.error(f"تعذّر التوليد: {e}")
-                if cache_ai:
-                    files_ai = ai.before_after(exports_ai, cache_ai)
-                    ok_n = sum(1 for v in cache_ai.values() if v.get('status') == ai.STATUS_OK)
-                    st.caption(f"مطابق للقواعد: {ok_n:,} — يحتاج مراجعتك: {len(cache_ai) - ok_n:,}")
-                    dcols = st.columns(len(files_ai) or 1)
-                    for ci, (k_, (fname_, table_)) in enumerate(files_ai.items()):
-                        dcols[ci].download_button(f"📥 {fname_.replace('_', ' ').replace('.xlsx', '')}",
-                                                  to_xlsx_chunked(table_, fname_[:20]), fname_,
-                                                  use_container_width=True, key=f"ai_dl_{k_}")
-                    prev = files_ai.get('titles')
-                    if prev:
-                        cols_p = [c for c in ('عنوان الميتا الحالي', 'العنوان المقترح', 'طول العنوان المقترح',
-                                              'حالة الاقتراح') if c in prev[1].columns]
-                        st.dataframe(prev[1][prev[1]['العنوان المقترح'] != ''][cols_p].head(15),
-                                     use_container_width=True, hide_index=True)
+
+                if sugg_ai:
+                    st.markdown("---")
+                    last = st.session_state.get('ai_last_run') or {}
+                    has_last = last.get('url') == st.session_state.current_url and last.get('ids')
+                    v1, v2 = st.columns([2, 2])
+                    view_ai = v1.radio("المعاينة", ["العناوين", "الأوصاف", "الصور"], horizontal=True, key="ai_view")
+                    scope_ai = v2.radio("الصفوف", ["آخر جولة توليد", "كل ما وُلّد"], horizontal=True, key="ai_scope",
+                                        index=0 if has_last else 1, disabled=not has_last)
+                    only = last['ids'] if (has_last and scope_ai == "آخر جولة توليد") else None
+                    files_ai = ai.before_after(exports_ai, cache_ai, only)
+                    if view_ai == "الصور":
+                        st.info("النصوص البديلة للصور بالذكاء الاصطناعي في المرحلة التالية.")
+                    else:
+                        k_ = 'titles' if view_ai == "العناوين" else 'descs'
+                        if k_ in files_ai and not files_ai[k_][1].empty:
+                            fname_, table_ = files_ai[k_]
+                            lbl_ = 'العنوان' if k_ == 'titles' else 'الوصف'
+                            cur_ = 'عنوان الميتا الحالي' if k_ == 'titles' else 'وصف الميتا الحالي'
+                            cols_p = [c for c in ('الرابط', cur_, f'{lbl_} المقترح', f'طول {lbl_} المقترح',
+                                                  'حالة الاقتراح', 'ملاحظات الاقتراح') if c in table_.columns]
+                            st.dataframe(table_[cols_p], use_container_width=True, hide_index=True,
+                                         height=min(700, 38 * (len(table_) + 1)))
+                            data_, mime_, name_ = table_payload(f"{fname_}.csv", table_)
+                            st.download_button(f"📥 تحميل {fname_.replace('_', ' ')} ({len(table_)})", data_,
+                                               f"{netloc_ai}_{name_}", mime_, use_container_width=True, key=f"ai_dl_{k_}")
+                        else:
+                            st.caption("لا توجد صفوف في هذا الاختيار.")
+
+                    # عينة العميل: 25% من كل خدمة، بحد أدنى 3 وأقصى 10، من أهم الصفحات
+                    st.markdown("---")
+                    st.markdown("##### 📄 عينة العميل (قبل / بعد)")
+                    from pdf_generator import generate_sample_pdf, sample_size
+                    s_lang = 'ar' if st.radio("لغة العينة", ["العربية", "English"], horizontal=True,
+                                              key="ai_sample_lang") == "العربية" else 'en'
+                    all_files = ai.before_after(exports_ai, cache_ai, None)
+                    sections_s, total_need = [], len(items_ai)
+                    for k_, title_ar, title_en, cur_, fld in (('titles', 'عناوين الميتا', 'Meta titles', 'عنوان الميتا الحالي', 'title_full'),
+                                                              ('descs', 'أوصاف الميتا', 'Meta descriptions', 'وصف الميتا الحالي', 'description')):
+                        full_tbl = exports_ai.get(k_)
+                        need_n = len(full_tbl[1]) if full_tbl else 0
+                        n_ = sample_size(need_n)
+                        rows_s = []
+                        if k_ in all_files:
+                            t_ = all_files[k_][1]
+                            t_ = t_[t_['حالة الاقتراح'] == 'مطابق للقواعد']
+                            for _, r_ in t_.head(n_).iterrows():
+                                v_ = sugg_ai.get(str(r_['الرابط'])) or {}
+                                nm_ = str(r_.get('اسم المنتج المعروض') or '') or unquote(urlparse(str(r_['الرابط'])).path)
+                                rows_s.append((nm_ if nm_ != 'nan' else unquote(urlparse(str(r_['الرابط'])).path),
+                                               '' if str(r_.get(cur_, '')) == 'nan' else str(r_.get(cur_, '')),
+                                               v_.get(fld) or v_.get('title', '')))
+                        if rows_s:
+                            sections_s.append((title_ar if s_lang == 'ar' else title_en, rows_s))
+                        if len(rows_s) < n_:
+                            st.caption(f"{title_ar}: العينة تحتاج {n_} اقتراحاً مطابقاً للقواعد، والمتوفر {len(rows_s)}. "
+                                       "ولّد المزيد لتكتمل.")
+                    if sections_s:
+                        try:
+                            st.download_button("📄 تحميل عينة العميل (PDF)",
+                                               generate_sample_pdf(st.session_state.current_url, sections_s, s_lang, total_need),
+                                               f"Sample_{netloc_ai}_{s_lang}.pdf", "application/pdf",
+                                               use_container_width=True, key="ai_sample_dl")
+                        except Exception as e:
+                            st.error(f"تعذّر إنشاء العينة: {e}")
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
     st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على "
