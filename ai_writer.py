@@ -185,6 +185,10 @@ def rules_text(t_min, t_max):
 - "description": وصف ميتا بين {DESC_MIN} و{DESC_MAX} حرفاً.
 القواعد:
 1. افهم المنتج أو الصفحة من "product_description" و"category" و"excerpt" أولاً، ثم اكتب. استخدم فقط الحقائق الموجودة فيها؛ لا تخترع مقاساً أو مادة أو رقماً.
+1-ب. في الوصف: اذكر حقيقتين محددتين على الأقل من بيانات الصفحة (المادة، الاستخدام، المكونات، الرائحة، الحجم، طريقة الصنع، المنشأ...). الوصف الذي يصلح لأي منتج آخر مرفوض.
+1-ج. تجنب الحشو العام: «بكل سهولة»، «تجربة شراء مميزة»، «بجودة عالية»، «لا تفوت الفرصة»، «أنيق وفاخر» بلا سبب.
+مثال وصف مرفوض: «مبخرة خشبية بتصميم أنيق تناسب المجالس، تسوق الآن بكل سهولة وجودة عالية.»
+مثال وصف جيد: «مبخرة خشبية صغيرة مصنوعة يدوياً بنقش هندسي ملون، مناسبة لتبخير العود والبخور في المجلس والضيافة. اطلبها الآن من المتجر.»
 2. لا سعر ولا خصم ولا عرض ولا كوبون في العنوان أو الوصف: الأسعار والعروض تتغير.
 3. ابدأ العنوان بالعبارة التي يبحث بها الزبون عن هذا المنتج أو القسم، ثم ما يميزه.
 4. لا تنسخ العنوان أو الوصف الحالي: اكتب صياغة جديدة أفضل.
@@ -216,7 +220,8 @@ def _norm(t):
 def _same(a, b):
     from difflib import SequenceMatcher
     na, nb = _norm(a), _norm(b)
-    return bool(na) and bool(nb) and (na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.9)
+    # 0.8: تغيير كلمة أو كلمتين في نص الحالي يُعد نسخاً، ويُطلب صياغة جديدة فعلاً
+    return bool(na) and bool(nb) and (na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.8)
 
 
 def check(item, title_full, desc, seen_titles, seen_descs, need):
@@ -224,7 +229,9 @@ def check(item, title_full, desc, seen_titles, seen_descs, need):
     t_notes, d_notes = [], []
     source = ' '.join(str(item.get(k, '')) for k in ('name', 'title', 'desc', 'excerpt', 'pdesc', 'category'))
     allowed = _numbers(source)
-    if 'title' in need:
+    if 'title' in need and item.get('fixed_title'):
+        pass                                     # صفحة ثابتة: عنوانها اسمها المعروف، لا 50–60
+    elif 'title' in need:
         n = len(title_full or '')
         if not (TITLE_MIN <= n <= TITLE_MAX):
             t_notes.append(f'طول العنوان {n} (المطلوب {TITLE_MIN}–{TITLE_MAX})')
@@ -287,7 +294,8 @@ def save_cache(base_dir, store_url, data):
 
 
 def suggestions(cache):
-    return {k: v for k, v in cache.items() if not k.startswith('__')}
+    """الاقتراحات الحالية فقط: ما كُتب بالنسخة القديمة (بلا title_notes) يُعامل كأنه لم يُولّد."""
+    return {k: v for k, v in cache.items() if not k.startswith('__') and isinstance(v, dict) and 'title_notes' in v}
 
 
 def store_model(cache):
@@ -344,6 +352,7 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
     cache['__meta__'] = {'model': model, 'suffix': suffix, 'suffix_mode': suffix_mode}
     sugg = suggestions(cache)
     todo = [it for it in items if it['id'] not in sugg]
+    run_ids = []
     if max_items:
         todo = todo[:max_items]
     t_min, t_max = title_budget(suffix if suffix_mode in ('add', 'auto') else '')
@@ -351,12 +360,20 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
     full = (lambda core: f"{core}{suffix}" if suffix_mode in ('add', 'auto') and core else core)
     seen_t = {v.get('title_full', v.get('title', '')).strip() for v in sugg.values()}
     seen_d = {v.get('description', '').strip() for v in sugg.values()}
-    done, stopped, run_ids = 0, None, []
+    done, stopped = 0, None
 
     def call(prompt):
         _count_request(base_dir, model)
         return _parse(_generate(key, model, prompt, session))
 
+    # صفحات ثابتة تحتاج عنواناً فقط: لا حاجة للنموذج أصلاً
+    for it in [x for x in todo if x.get('fixed_title') and set(x.get('need', need)) == {'title'}]:
+        cache[it['id']] = {'title': it['fixed_title'], 'title_full': it['fixed_title'], 'description': '',
+                           'status': STATUS_OK, 'title_notes': '', 'desc_notes': '', 'model': 'ثابت'}
+        run_ids.append(it['id'])
+    todo = [x for x in todo if not (x.get('fixed_title') and set(x.get('need', need)) == {'title'})]
+    if not todo:
+        save_cache(base_dir, store_url, cache)
     for start in range(0, len(todo), BATCH):
         batch = todo[start:start + BATCH]
         try:
@@ -392,9 +409,11 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
             core = (d.get('title') or '').strip()
             de = (d.get('description') or '').strip()
             tf = full(core)
+            if it.get('fixed_title'):
+                core = tf = it['fixed_title']
             st_, tn, dn = check(it, tf, de, seen_t, seen_d, it.get('need', need))
             # العنوان المقترح: ما تكتبه في خانة المنصة. إن كانت المنصة تضيف الاسم تلقائياً، لا نكتبه
-            title_out = core if suffix_mode == 'auto' else tf
+            title_out = core if (suffix_mode == 'auto' or it.get('fixed_title')) else tf
             cache[it['id']] = {'title': title_out, 'title_full': tf, 'description': de, 'status': st_,
                                'title_notes': '، '.join(tn), 'desc_notes': '، '.join(dn), 'model': model}
             seen_t.add(tf)
@@ -423,7 +442,9 @@ def items_from_scan(df, exports):
         if r is not None and getattr(r, 'ndim', 1) > 1:
             r = r.iloc[0]
         g = (lambda c: '' if r is None or str(r.get(c, '')) == 'nan' else str(r.get(c, '') or ''))
-        items.append({'id': url, 'type': g('نوع الصفحة'), 'name': g('اسم منظم') or g('اسم المنتج المعروض'),
+        from audit_engine import fixed_page_title
+        fixed = fixed_page_title(url, g('عنوان الميتا'), g('نوع الصفحة')) if 'title' in fields else ''
+        items.append({'id': url, 'fixed_title': fixed, 'type': g('نوع الصفحة'), 'name': g('اسم منظم') or g('اسم المنتج المعروض'),
                       'title': g('عنوان الميتا'), 'desc': g('وصف الميتا'), 'excerpt': g('_excerpt'),
                       'pdesc': g('_pdesc'), 'category': g('_category'), 'brand': g('_brand'), 'need': fields})
     return items
