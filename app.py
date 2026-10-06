@@ -1215,9 +1215,10 @@ if nav == "🔍 فحص متجر جديد":
                         st.session_state.gem_models = []
                         st.error(f"تعذّر جلب النماذج: {e}")
                 models_ai = st.session_state.gem_models or ([locked_ai] if locked_ai else [])
-                if locked_ai:
+                if locked_ai and not st.session_state.get('ai_regen'):
                     model_ai = locked_ai
-                    st.info(f"النموذج الثابت لهذا المتجر: **{locked_ai}**. يكمل به كل الاقتراحات حتى لا تتفاوت الجودة.")
+                    st.info(f"النموذج الثابت لهذا المتجر: **{locked_ai}**. يكمل به كل الاقتراحات حتى لا تتفاوت الجودة. "
+                            "لتغييره: فعّل «إعادة توليد الكل من جديد» بالأسفل، فتظهر قائمة النماذج.")
                 elif models_ai:
                     dm = ai.default_model(models_ai)
                     model_ai = st.selectbox("النموذج (يثبت لهذا المتجر من أول توليد)", models_ai,
@@ -1276,24 +1277,25 @@ if nav == "🔍 فحص متجر جديد":
                     scope_ai = v2.radio("الصفوف", ["آخر جولة توليد", "كل ما وُلّد"], horizontal=True, key="ai_scope",
                                         index=0 if has_last else 1, disabled=not has_last)
                     only = last['ids'] if (has_last and scope_ai == "آخر جولة توليد") else None
-                    files_ai = ai.before_after(exports_ai, cache_ai, only)
                     if view_ai == "الصور":
                         st.info("النصوص البديلة للصور بالذكاء الاصطناعي في المرحلة التالية.")
                     else:
-                        k_ = 'titles' if view_ai == "العناوين" else 'descs'
-                        if k_ in files_ai and not files_ai[k_][1].empty:
-                            fname_, table_ = files_ai[k_]
-                            lbl_ = 'العنوان' if k_ == 'titles' else 'الوصف'
-                            cur_ = 'عنوان الميتا الحالي' if k_ == 'titles' else 'وصف الميتا الحالي'
-                            cols_p = [c for c in ('الرابط', cur_, f'{lbl_} المقترح', f'طول {lbl_} المقترح',
-                                                  'حالة الاقتراح', 'ملاحظات الاقتراح') if c in table_.columns]
-                            st.dataframe(table_[cols_p], use_container_width=True, hide_index=True,
-                                         height=min(700, 38 * (len(table_) + 1)))
-                            data_, mime_, name_ = table_payload(f"{fname_}.csv", table_)
-                            st.download_button(f"📥 تحميل {fname_.replace('_', ' ')} ({len(table_)})", data_,
-                                               f"{netloc_ai}_{name_}", mime_, use_container_width=True, key=f"ai_dl_{k_}")
-                        else:
+                        kind_ = 'titles' if view_ai == "العناوين" else 'descs'
+                        prev_ = ai.compact_file(exports_ai, cache_ai, df, kind_, only, with_note=True)
+                        if prev_.empty:
                             st.caption("لا توجد صفوف في هذا الاختيار.")
+                        else:
+                            st.dataframe(prev_.drop(columns=['الرابط']), use_container_width=True, hide_index=True,
+                                         height=min(700, 38 * (len(prev_) + 1)))
+                    # ملف مستقل لكل نوع، بأعمدة مختصرة: اسم المنتج ← الرابط ← الحالي ← الجديد
+                    dl1, dl2 = st.columns(2)
+                    for col_, kind_, fname_ in ((dl1, 'titles', 'العناوين_الجديدة'), (dl2, 'descs', 'الأوصاف_الجديدة')):
+                        f_ = ai.compact_file(exports_ai, cache_ai, df, kind_, only)
+                        if not f_.empty:
+                            data_, mime_, name_ = table_payload(f"{fname_}.csv", f_)
+                            col_.download_button(f"📥 {fname_.replace('_', ' ')} (الصفحات: {len(f_)})", data_,
+                                                 f"{netloc_ai}_{name_}", mime_, use_container_width=True,
+                                                 key=f"ai_dl_{kind_}")
 
                     # عينة العميل: 25% من كل خدمة، بحد أدنى 3 وأقصى 10، من أهم الصفحات
                     st.markdown("---")
