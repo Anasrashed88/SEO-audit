@@ -3045,6 +3045,42 @@ def _avail_series(df):
         else pd.Series(True, index=df.index)
 
 
+# ---------- الصفحات الثابتة: عنوانها اسمها المعروف في كل المتاجر، لا 50–60 حرفاً ----------
+# (كلمات في الرابط أو العنوان الحالي، العنوان الثابت). الترتيب مهم: الأدق أولاً.
+FIXED_PAGE_TITLES = [
+    (('privacy', 'الخصوصية', 'الخصوصيه'), 'سياسة الخصوصية'),
+    (('return', 'refund', 'exchange', 'الاستبدال', 'الاسترجاع', 'استبدال', 'استرجاع'), 'الاستبدال والاسترجاع'),
+    (('shipping', 'delivery', 'الشحن', 'التوصيل'), 'الشحن والتوصيل'),
+    (('contact', 'تواصل', 'اتصل', 'اتصال'), 'تواصل معنا'),
+    (('terms', 'conditions', 'الشروط', 'الأحكام', 'الاحكام'), 'الشروط والأحكام'),
+    (('faq', 'faqs', 'الأسئلة', 'الاسئلة'), 'الأسئلة الشائعة'),
+    (('complaint', 'الشكاوى', 'الشكاوي', 'المقترحات'), 'الشكاوى والمقترحات'),
+    (('about', 'من-نحن', 'من نحن', 'about-us'), 'من نحن'),
+]
+BLOG_INDEX_TITLE = 'المدونة'
+
+
+def fixed_page_title(url, title='', page_type=''):
+    """العنوان الثابت لصفحات النظام والسياسات والمدونة، أو '' لغيرها."""
+    if page_type in (T_PRODUCT, T_CATEGORY, T_HOME, T_BLOG):
+        return ''
+    segs = [x.lower() for x in url_segments(url)]
+    if len(segs) == 1 and segs[0] in BLOG_SEGMENTS:
+        return BLOG_INDEX_TITLE
+    hay = ' '.join(segs) + ' ' + unquote(str(url)).lower() + ' ' + str(title or '').lower()
+    for words, fixed in FIXED_PAGE_TITLES:
+        if any(w in hay for w in words):
+            return fixed
+    return ''
+
+
+def _title_meaningless(row):
+    """عنوان بلا معنى: رموز، أو فارغ، أو قيمة قالب، أو اسم المتجر وحده."""
+    t = str(row.get('عنوان الميتا', '') or '')
+    letters = re.sub(r'[\W\d_]+', '', t)
+    return len(letters) < 3 or row.get('جودة العنوان') in ('q_symbols', 'q_placeholder', 'q_brand_only')
+
+
 def title_url_fix_mask(df):
     """صفحات يحتاج عنوانها أو رابطها إصلاحاً: طول غير مثالي، أو عنوان مكرر/رموز/اسم المتجر فقط،
     أو رابط بصياغة سيئة. نفس التعريف يُحسب به بند «العناوين والروابط» في عرض السعر."""
@@ -3059,6 +3095,11 @@ def title_url_fix_mask(df):
         counts = vals[vals != ''].value_counts()
         shared = set(counts[counts >= 2].index)
         m |= df['عنوان الميتا'].map(lambda x: str(x or '').strip() in shared)
+    # الصفحات الثابتة (الشحن، الخصوصية، المدونة...): تُصلح فقط إن كان عنوانها بلا معنى
+    fixed = df.apply(lambda r: bool(fixed_page_title(r['الرابط'], r.get('عنوان الميتا', ''), r.get('نوع الصفحة', ''))),
+                     axis=1)
+    meaningless = df.apply(_title_meaningless, axis=1)
+    m = (m & ~fixed) | (fixed & meaningless)
     return _avail_series(df) & m
 
 
