@@ -1861,7 +1861,8 @@ def generate_sample_pdf(domain, sections, lang='ar', total_items=0):
 
     lbl_now = 'الحالي' if rtl else 'Current'
     lbl_new = 'المقترح' if rtl else 'Proposed'
-    for title, rows in sections:
+    last_sec = max((i for i, (_, r) in enumerate(sections) if r), default=-1)
+    for sec_i, (title, rows) in enumerate(sections):
         if not rows:
             continue
         if pdf.get_y() > 240:
@@ -1873,11 +1874,13 @@ def generate_sample_pdf(domain, sections, lang='ar', total_items=0):
         pdf.set_fill_color(*C_ACC)
         pdf.rect((210 - M - 16) if rtl else M, pdf.get_y(), 16, 1, 'F')
         pdf.ln(4)
-        for name, now, new in rows:
+        for row_i, (name, now, new) in enumerate(rows):
             l_now = lines(now or ('(فارغ)' if rtl else '(empty)'), W - 34, 9)
             l_new = lines(new, W - 34, 9.5)
             h = 9 + (len(l_now) + len(l_new)) * 5 + 8
-            if pdf.get_y() + h > 270:
+            # آخر بطاقة تنتقل مع الخاتمة إن لم تتسعا معاً، فلا تبقى الخاتمة وحدها في صفحة
+            tail = 26 if (sec_i == last_sec and row_i == len(rows) - 1) else 0
+            if pdf.get_y() + h + tail > 270:
                 pdf.add_page()
             y = pdf.get_y()
             pdf.set_draw_color(*C_LINE)
@@ -1906,7 +1909,7 @@ def generate_sample_pdf(domain, sections, lang='ar', total_items=0):
 
     # خاتمة
     n_shown = sum(len(r) for _, r in sections)
-    if pdf.get_y() > 245:
+    if pdf.get_y() > 248:
         pdf.add_page()
     y = pdf.get_y() + 2
     pdf.set_fill_color(*C_INK)
