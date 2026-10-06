@@ -1268,17 +1268,77 @@ if nav == "🔍 فحص متجر جديد":
                     except Exception as e:
                         st.error(f"تعذّر التوليد: {e}")
 
-                if sugg_ai:
+                if sugg_ai or ai.items_from_images(exports_ai, df):
                     st.markdown("---")
                     last = st.session_state.get('ai_last_run') or {}
                     has_last = last.get('url') == st.session_state.current_url and last.get('ids')
                     v1, v2 = st.columns([2, 2])
-                    view_ai = v1.radio("المعاينة", ["العناوين", "الأوصاف", "الصور"], horizontal=True, key="ai_view")
+                    view_ai = v1.radio("المعاينة", ["العناوين", "الأوصاف", "الصور", "الروابط"], horizontal=True, key="ai_view")
                     scope_ai = v2.radio("الصفوف", ["آخر جولة توليد", "كل ما وُلّد"], horizontal=True, key="ai_scope",
                                         index=0 if has_last else 1, disabled=not has_last)
                     only = last['ids'] if (has_last and scope_ai == "آخر جولة توليد") else None
-                    if view_ai == "الصور":
-                        st.info("النصوص البديلة للصور بالذكاء الاصطناعي في المرحلة التالية.")
+                    if view_ai == "الروابط":
+                        st.caption("روابط منتجات تحتاج تغييراً واضحاً فقط: منسوخة (copy-of)، أو رموز بلا كلمات، "
+                                   "أو تحمل اسم منتج آخر، أو برقم مكرر من النسخ. الرابط الجديد عربي من العنوان الجديد.")
+                        ch_ = ai.url_changes(df, cache_ai, platform)
+                        if ch_.empty:
+                            st.success("لا توجد روابط تحتاج تغييراً في هذا المتجر.")
+                        else:
+                            show_ = ch_.copy()
+                            for c_ in ('الرابط الحالي', 'الرابط الجديد'):
+                                show_[c_] = show_[c_].map(lambda u: unquote(urlparse(str(u)).path))
+                            st.dataframe(show_, use_container_width=True, hide_index=True,
+                                         height=min(700, 38 * (len(show_) + 1)))
+                            l1, l2 = st.columns(2)
+                            data_, mime_, name_ = table_payload("الروابط_الجديدة.csv", ch_)
+                            l1.download_button(f"📥 الروابط الجديدة (الصفحات: {len(ch_)})", data_, f"{netloc_ai}_{name_}",
+                                               mime_, use_container_width=True, key="ai_dl_urls")
+                            if platform == 'zid':
+                                zr_ = ai.zid_url_redirects(ch_)
+                                data_, mime_, name_ = table_payload("تحويلات_زد_للروابط_الجديدة.xlsx", zr_)
+                                l2.download_button("📥 تحويلات زد للروابط الجديدة", data_, f"{netloc_ai}_{name_}", mime_,
+                                                   use_container_width=True, key="ai_dl_url_redirects",
+                                                   help="ارفعه في زد بعد تغيير روابط المنتجات: يحوّل كل رابط قديم للجديد.")
+                            elif platform == 'salla':
+                                l2.info("في سلة يتحول الرابط القديم تلقائياً عند تغيير الاسم، فلا يلزم ملف تحويلات.")
+                    elif view_ai == "الصور":
+                        img_items = ai.items_from_images(exports_ai, df)
+                        alts_done = ai.alt_suggestions(cache_ai)
+                        i1, i2 = st.columns(2)
+                        i1.metric("صور تحتاج نصاً بديلاً", f"{len(img_items):,}")
+                        i2.metric("وُلّدت نصوصها", f"{sum(1 for it in img_items if it['id'] in alts_done):,}")
+                        lim_img = st.number_input("عدد الصور في هذه الجولة (0 = الكل)", 0, 20000, 0, 6, key="ai_img_limit",
+                                                  help="6 صور في كل طلب: يرى النموذج كل صورة ويصف ما فيها.")
+                        if st.button("🖼️ توليد النصوص البديلة", type="primary", use_container_width=True,
+                                     disabled=not (model_ai and img_items)):
+                            bar_i = st.progress(0.0, text="جارٍ تحميل الصور وتوليد نصوصها...")
+                            try:
+                                cache_ai, info_i = ai.generate_alts(
+                                    img_items, api_key, eng.BASE_DIR, st.session_state.current_url, model_ai,
+                                    regenerate=regen_ai, max_items=lim_img or None,
+                                    progress=lambda d, t: bar_i.progress(min(d / max(t, 1), 1.0), text=f"{d} من {t}"))
+                                st.session_state.ai_last_img = {'url': st.session_state.current_url, 'ids': info_i['run_ids']}
+                                bar_i.progress(1.0, text="انتهى")
+                                if info_i['stopped']:
+                                    st.warning(f"{info_i['stopped']} أُنجزت {len(info_i['run_ids'])} صورة.")
+                                else:
+                                    st.success(f"وُلّدت نصوص {len(info_i['run_ids'])} صورة.")
+                            except Exception as e:
+                                st.error(f"تعذّر التوليد: {e}")
+                        last_i = st.session_state.get('ai_last_img') or {}
+                        only_i = (last_i['ids'] if (last_i.get('url') == st.session_state.current_url and last_i.get('ids')
+                                                    and scope_ai == "آخر جولة توليد") else None)
+                        prev_i = ai.compact_alt_file(exports_ai, cache_ai, df, only_i, with_note=True)
+                        if prev_i.empty:
+                            st.caption("لم تُولّد نصوص بديلة بعد.")
+                        else:
+                            st.dataframe(prev_i.drop(columns=['الرابط']), use_container_width=True, hide_index=True,
+                                         height=min(700, 38 * (len(prev_i) + 1)),
+                                         column_config={'رابط الصورة': st.column_config.ImageColumn('الصورة')})
+                            f_i = ai.compact_alt_file(exports_ai, cache_ai, df, only_i)
+                            data_, mime_, name_ = table_payload("النصوص_البديلة_الجديدة.csv", f_i)
+                            st.download_button(f"📥 النصوص البديلة الجديدة (الصور: {len(f_i)})", data_,
+                                               f"{netloc_ai}_{name_}", mime_, use_container_width=True, key="ai_dl_alts")
                     else:
                         kind_ = 'titles' if view_ai == "العناوين" else 'descs'
                         prev_ = ai.compact_file(exports_ai, cache_ai, df, kind_, only, with_note=True)
@@ -1314,8 +1374,17 @@ if nav == "🔍 فحص متجر جديد":
                         if k_ in all_files:
                             t_ = all_files[k_][1]
                             t_ = t_[t_['حالة الاقتراح'] == 'مطابق للقواعد']
-                            for _, r_ in t_.head(n_).iterrows():
+                            seen_names, seen_txt = set(), []
+                            for _, r_ in t_.iterrows():
+                                if len(rows_s) >= n_:
+                                    break
                                 v_ = sugg_ai.get(str(r_['الرابط'])) or {}
+                                txt_ = v_.get(fld) or v_.get('title', '')
+                                nm_key = str(r_.get('اسم المنتج المعروض') or r_['الرابط'])
+                                if nm_key in seen_names or any(ai._same(txt_, o) for o in seen_txt):
+                                    continue
+                                seen_names.add(nm_key)
+                                seen_txt.append(txt_)
                                 nm_ = str(r_.get('اسم المنتج المعروض') or '') or unquote(urlparse(str(r_['الرابط'])).path)
                                 rows_s.append((nm_ if nm_ != 'nan' else unquote(urlparse(str(r_['الرابط'])).path),
                                                '' if str(r_.get(cur_, '')) == 'nan' else str(r_.get(cur_, '')),
@@ -1325,6 +1394,15 @@ if nav == "🔍 فحص متجر جديد":
                         if len(rows_s) < n_:
                             st.caption(f"{title_ar}: العينة تحتاج {n_} اقتراحاً مطابقاً للقواعد، والمتوفر {len(rows_s)}. "
                                        "ولّد المزيد لتكتمل.")
+                    alts_s = ai.compact_alt_file(exports_ai, cache_ai, df)
+                    if not alts_s.empty:
+                        st_ok = {k for k, v in ai.alt_suggestions(cache_ai).items() if v.get('status') == ai.STATUS_OK}
+                        alts_s = alts_s[alts_s['رابط الصورة'].isin(st_ok)]
+                        n_alt = sample_size(len(ai.items_from_images(exports_ai, df)))
+                        rows_alt = [(r_['اسم المنتج'], r_['النص البديل الحالي'], r_['النص البديل الجديد'])
+                                    for _, r_ in alts_s.head(n_alt).iterrows()]
+                        if rows_alt:
+                            sections_s.append(('النصوص البديلة للصور' if s_lang == 'ar' else 'Image alt texts', rows_alt))
                     if sections_s:
                         try:
                             st.download_button("📄 تحميل عينة العميل (PDF)",
