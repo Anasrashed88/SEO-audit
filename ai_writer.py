@@ -83,9 +83,9 @@ def pick_model(key, session=None):
     return best
 
 
-def _generate(key, model, prompt, session=None):
+def _generate(key, model, prompt, session=None, extra_parts=None):
     http = session or requests
-    body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
+    body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}] + list(extra_parts or [])}],
             'generationConfig': {'temperature': 0.5, 'responseMimeType': 'application/json'}}
     busy_waits = [5, 15, 30, 60]          # خوادم جوجل مشغولة (500/503): ننتظر ونعيد، بفترات متزايدة
     for attempt in range(len(busy_waits) + 1):
@@ -499,9 +499,180 @@ def compact_file(exports, cache, df, kind='titles', only_ids=None, with_note=Fal
         if r is not None and getattr(r, 'ndim', 1) > 1:
             r = r.iloc[0]
         g = (lambda c: '' if r is None or str(r.get(c, '')) in ('nan', 'None') else str(r.get(c, '') or ''))
-        name = g('اسم منظم') or g('اسم المنتج المعروض') or unquote(urlparse(u).path).strip('/').split('/')[-1] or 'الرئيسية'
+        name = page_name(u, g)
         row = {'اسم المنتج': name, 'الرابط': u, f'{label} الحالي': g(cur_col), f'{label} الجديد': sugg[u][field]}
         if with_note:
             row['ملاحظة'] = sugg[u].get(notes_key, '')
+        out.append(row)
+    return pd.DataFrame(out, columns=cols)
+
+
+
+def page_name(url, g):
+    """اسم الصفحة في الملفات: اسم المنتج، أو «الصفحة الرئيسية»، أو آخر جزء من الرابط."""
+    from urllib.parse import unquote, urlparse
+    if g('نوع الصفحة') == 'home' or not urlparse(str(url)).path.strip('/'):
+        return 'الصفحة الرئيسية'
+    return g('اسم منظم') or g('اسم المنتج المعروض') or unquote(urlparse(str(url)).path).strip('/').split('/')[-1]
+
+
+# ======================= النصوص البديلة للصور (ALT) =======================
+ALT_BATCH = 6               # صور في الطلب الواحد (الصورة أثقل من النص)
+ALT_MIN, ALT_MAX = 10, 125
+IMG_TYPES = {'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'}
+
+
+def alt_rules():
+    return f"""أنت تكتب النص البديل (Alt) لصور متجر إلكتروني سعودي. لكل صورة في المدخلات:
+- "alt": وصف قصير دقيق لما يظهر في الصورة نفسها، بين {ALT_MIN} و{ALT_MAX} حرفاً.
+القواعد:
+1. انظر للصورة وصف ما تراه فعلاً: المنتج ولونه وشكله ومادته الظاهرة وزاوية التصوير أو التفصيل الظاهر.
+2. إن كانت الصورة لمنتج الصفحة، ابدأ بنوع المنتج أو اسمه بشكل طبيعي (من "product").
+3. لا تبدأ بكلمة «صورة» أو «image of»، ولا تذكر اسم المتجر، ولا سعراً ولا عرضاً.
+4. إن كانت بنراً أو إعلاناً فيه نص، اذكر رسالته الأساسية باختصار.
+5. صور المنتج الواحد المتعددة: اجعل وصف كل صورة مختلفاً بحسب ما يظهر فيها (زاوية، لون، تفصيل، استخدام).
+6. اكتب بلغة الصفحة (عربية فصحى سهلة، أو إنجليزية إن كانت الصفحة إنجليزية). لا رموز تعبيرية.
+أعد JSON فقط بالشكل: [{{"id": "...", "alt": "..."}}]"""
+
+
+def _fetch_image(url, session=None):
+    """تحميل الصورة من المتجر لإرسالها للنموذج. يعيد (نوعها، محتواها بترميز base64) أو None."""
+    import base64
+    http = session or requests
+    try:
+        r = http.get(str(url), timeout=25, headers={'User-Agent': 'Mozilla/5.0'})
+        if getattr(r, 'status_code', 0) != 200:
+            return None
+        data = r.content
+        mime = str(r.headers.get('Content-Type', '')).split(';')[0].strip().lower()
+        if mime not in IMG_TYPES:
+            ext = str(url).split('?')[0].rsplit('.', 1)[-1].lower()
+            mime = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}.get(ext, '')
+        if mime not in IMG_TYPES or not data or len(data) > 7_000_000:
+            return None
+        return mime, base64.b64encode(data).decode()
+    except Exception:
+        return None
+
+
+def check_alt(item, alt, siblings):
+    notes = []
+    n = len(alt or '')
+    if not (ALT_MIN <= n <= ALT_MAX):
+        notes.append(f'الطول {n} (المطلوب {ALT_MIN}–{ALT_MAX})')
+    if re.match(r'^\s*(صورة|صوره|image|photo|picture)\b', alt or '', re.I):
+        notes.append('يبدأ بكلمة «صورة»')
+    if _PROMO_RE.search(alt or ''):
+        notes.append('فيه سعر أو عرض')
+    if _same(alt, item.get('alt')):
+        notes.append('منسوخ من الوصف الحالي')
+    if alt and alt.strip() in siblings:
+        notes.append('مكرر مع صورة أخرى في نفس الصفحة')
+    return (STATUS_OK if not notes else STATUS_REVIEW), notes
+
+
+def alt_suggestions(cache):
+    return {k[5:]: v for k, v in cache.items() if k.startswith('img::') and isinstance(v, dict) and v.get('alt')}
+
+
+def items_from_images(exports, df):
+    """الصور التي تحتاج نصاً بديلاً (بلا وصف + وصف ضعيف أو مكرر)، مع اسم منتجها."""
+    rows = df.set_index('الرابط') if df is not None and 'الرابط' in df.columns else None
+    items, seen = [], set()
+    for key in ('alt_missing', 'alt_weak'):
+        v = exports.get(key)
+        if not v:
+            continue
+        for _, r in v[1].iterrows():
+            img = str(r.get('رابط الصورة', '') or '')
+            page = str(r.get('رابط الصفحة', '') or '')
+            if not img or img in seen:
+                continue
+            seen.add(img)
+            pr = rows.loc[page] if rows is not None and page in rows.index else None
+            if pr is not None and getattr(pr, 'ndim', 1) > 1:
+                pr = pr.iloc[0]
+            g = (lambda c: '' if pr is None or str(pr.get(c, '')) in ('nan', 'None') else str(pr.get(c, '') or ''))
+            cur = str(r.get('النص البديل الحالي (Alt)', '') or '')
+            items.append({'id': img, 'page': page, 'product': page_name(page, g), 'type': g('نوع الصفحة'),
+                          'alt': '' if cur in ('nan', 'لا يوجد (فارغ)') else cur})
+    return items
+
+
+def generate_alts(items, key, base_dir, store_url, model, regenerate=False, progress=None, session=None,
+                  max_items=None, fetch=None):
+    """يكتب النص البديل لكل صورة وهو يراها. يحفظ كل دفعة فور إنجازها، ويكمل من حيث توقف."""
+    fetch = fetch or (lambda u: _fetch_image(u, session))
+    cache = load_cache(base_dir, store_url)
+    locked = store_model(cache)
+    if locked and locked != model and not regenerate:
+        raise ValueError(f'هذا المتجر بدأ بنموذج {locked}. أكمل به حتى لا تتفاوت الجودة.')
+    if regenerate:
+        cache = {k: v for k, v in cache.items() if not k.startswith('img::')}
+    meta = cache.get('__meta__') or {}
+    meta['model'] = model
+    cache['__meta__'] = meta
+    done_alts = alt_suggestions(cache)
+    todo = [it for it in items if it['id'] not in done_alts]
+    if max_items:
+        todo = todo[:max_items]
+    rules = alt_rules()
+    run_ids, stopped, done = [], None, 0
+    by_page = {}
+    for img, v in done_alts.items():
+        by_page.setdefault(v.get('page', ''), set()).add(v['alt'].strip())
+    for start in range(0, len(todo), ALT_BATCH):
+        batch = todo[start:start + ALT_BATCH]
+        parts, sent = [], []
+        for it in batch:
+            got = fetch(it['id'])
+            if not got:
+                cache['img::' + it['id']] = {'alt': '', 'status': STATUS_REVIEW, 'alt_notes': 'تعذّر تحميل الصورة',
+                                              'page': it['page'], 'model': model}
+                continue
+            parts.append({'text': json.dumps({'id': it['id'], 'product': it['product'], 'page_type': it['type'],
+                                              'current_alt': it['alt']}, ensure_ascii=False)})
+            parts.append({'inline_data': {'mime_type': got[0], 'data': got[1]}})
+            sent.append(it)
+        if sent:
+            try:
+                _count_request(base_dir, model)
+                out = _parse(_generate(key, model, rules + '\n\nالصور (كل صورة بعد بياناتها):', session, parts))
+            except QuotaExhausted as q:
+                stopped = str(q)
+                break
+            for it in sent:
+                d = out.get(str(it['id'])) or {}
+                alt = (d.get('alt') or '').strip()
+                if not alt:
+                    continue
+                sib = by_page.setdefault(it['page'], set())
+                st_, notes = check_alt(it, alt, sib)
+                cache['img::' + it['id']] = {'alt': alt, 'status': st_, 'alt_notes': '، '.join(notes),
+                                              'page': it['page'], 'model': model}
+                sib.add(alt)
+                run_ids.append(it['id'])
+        save_cache(base_dir, store_url, cache)
+        done += len(batch)
+        if progress:
+            progress(done, len(todo))
+    return cache, {'requested': len(todo), 'done': done, 'stopped': stopped, 'model': model, 'run_ids': run_ids}
+
+
+def compact_alt_file(exports, cache, df, only_ids=None, with_note=False):
+    """ملف النصوص البديلة: اسم المنتج ← الرابط ← رابط الصورة ← النص البديل الحالي ← النص البديل الجديد."""
+    import pandas as pd
+    cols = ['اسم المنتج', 'الرابط', 'رابط الصورة', 'النص البديل الحالي', 'النص البديل الجديد'] + \
+        (['ملاحظة'] if with_note else [])
+    alts = alt_suggestions(cache)
+    keep = set(only_ids) if only_ids is not None else set(alts)
+    out = []
+    for it in items_from_images(exports, df):
+        if it['id'] not in keep or it['id'] not in alts:
+            continue
+        row = {'اسم المنتج': it['product'], 'الرابط': it['page'], 'رابط الصورة': it['id'],
+               'النص البديل الحالي': it['alt'], 'النص البديل الجديد': alts[it['id']]['alt']}
+        if with_note:
+            row['ملاحظة'] = alts[it['id']].get('alt_notes', '')
         out.append(row)
     return pd.DataFrame(out, columns=cols)
