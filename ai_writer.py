@@ -473,3 +473,35 @@ def before_after(exports, cache, only_ids=None):
         t['ملاحظات الاقتراح'] = t['الرابط'].map(lambda u: g(u, notes_key))
         out[key] = (f"قبل_وبعد_{'العناوين' if key == 'titles' else 'الأوصاف'}", t.reset_index(drop=True))
     return out
+
+
+def compact_file(exports, cache, df, kind='titles', only_ids=None, with_note=False):
+    """ملف مختصر لكل نوع: اسم المنتج ← الرابط ← الحالي ← الجديد.
+    kind: 'titles' أو 'descs'. with_note: عمود الملاحظة (للمعاينة في الأداة فقط)."""
+    from urllib.parse import unquote, urlparse
+    import pandas as pd
+    label = 'العنوان' if kind == 'titles' else 'الوصف'
+    field = 'title' if kind == 'titles' else 'description'
+    cur_col = 'عنوان الميتا' if kind == 'titles' else 'وصف الميتا'
+    notes_key = 'title_notes' if kind == 'titles' else 'desc_notes'
+    cols = ['اسم المنتج', 'الرابط', f'{label} الحالي', f'{label} الجديد'] + (['ملاحظة'] if with_note else [])
+    sugg = suggestions(cache)
+    v_ = exports.get(kind)
+    if not v_:
+        return pd.DataFrame(columns=cols)
+    keep = set(only_ids) if only_ids is not None else set(sugg)
+    rows = df.set_index('الرابط') if df is not None and 'الرابط' in df.columns else None
+    out = []
+    for u in dict.fromkeys(str(x) for x in v_[1]['الرابط']):
+        if u not in keep or u not in sugg or not sugg[u].get(field):
+            continue
+        r = rows.loc[u] if rows is not None and u in rows.index else None
+        if r is not None and getattr(r, 'ndim', 1) > 1:
+            r = r.iloc[0]
+        g = (lambda c: '' if r is None or str(r.get(c, '')) in ('nan', 'None') else str(r.get(c, '') or ''))
+        name = g('اسم منظم') or g('اسم المنتج المعروض') or unquote(urlparse(u).path).strip('/').split('/')[-1] or 'الرئيسية'
+        row = {'اسم المنتج': name, 'الرابط': u, f'{label} الحالي': g(cur_col), f'{label} الجديد': sugg[u][field]}
+        if with_note:
+            row['ملاحظة'] = sugg[u].get(notes_key, '')
+        out.append(row)
+    return pd.DataFrame(out, columns=cols)
