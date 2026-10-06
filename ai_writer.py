@@ -676,3 +676,107 @@ def compact_alt_file(exports, cache, df, only_ids=None, with_note=False):
             row['ملاحظة'] = alts[it['id']].get('alt_notes', '')
         out.append(row)
     return pd.DataFrame(out, columns=cols)
+
+
+# ======================= الروابط: كشف ما يحتاج تغييراً، ورابط عربي جديد =======================
+def _slug_seg(url):
+    """(أجزاء المسار، موضع جزء الاسم): في سلة الاسم قبل رقم المنتج (/اسم/p123)، وفي غيرها آخر جزء."""
+    from urllib.parse import unquote, urlparse
+    segs = [unquote(x) for x in urlparse(str(url)).path.strip('/').split('/') if x]
+    if not segs:
+        return segs, -1
+    from audit_engine import PLATFORM_ID_RE
+    idx = len(segs) - 2 if (len(segs) >= 2 and PLATFORM_ID_RE.match(segs[-1])) else len(segs) - 1
+    return segs, idx
+
+
+def _tokens(text):
+    from audit_engine import slug_tokens
+    return {t for t in slug_tokens(str(text or '')) if not t.isdigit()}
+
+
+def url_change_reason(url, name, other_names=()):
+    """سبب تغيير الرابط، أو '' إن كان مقبولاً. الحالات الواضحة فقط:
+    نسخة منسوخة، أو رموز بلا كلمات، أو اسم منتج آخر، أو رقم مكرر أضافته المنصة عند النسخ."""
+    segs, idx = _slug_seg(url)
+    if idx < 0:
+        return ''
+    seg = segs[idx]
+    if re.search(r'copy[-_ ]?of', seg, re.I) or 'نسخة' in seg:
+        return 'الرابط لمنتج منسوخ (copy-of)'
+    if re.fullmatch(r'[0-9a-f]{6,}|[0-9a-f\-]{20,}', seg, re.I) or not re.search(r'[A-Za-z\u0600-\u06FF]', seg):
+        return 'الرابط رموز بلا كلمات'
+    own = _tokens(name)
+    st = _tokens(seg)
+    if own and st:
+        mine = len(st & own) / len(st)
+        if mine <= 0.5:
+            for other in other_names:
+                ot = _tokens(other)
+                if ot and other != name and len(st & ot) / len(st) >= 0.7 and len(st & ot) / len(st) > mine:
+                    return f'الرابط يحمل اسم منتج آخر ({other})'
+    m = re.search(r'-(\d{1,2})$', seg)
+    if m and m.group(1) not in re.findall(r'\d+', str(name or '')):
+        return 'رقم مكرر في آخر الرابط (من نسخ المنتج)'
+    return ''
+
+
+def arabic_slug(text, max_words=6, max_len=60):
+    """رابط من العنوان نفسه، بلغته كما هي (لا ترجمة): كلمات يفصلها «-»، بلا رموز."""
+    t = str(text or '').split(' | ')[0]
+    t = re.sub(r'[^\w\s\u0600-\u06FF-]', ' ', t)
+    words = [w for w in re.split(r'[\s_\-]+', t) if w and not re.fullmatch(r'[ـ]+', w)]
+    words = [w.lower() if re.match(r'[A-Za-z]', w) else w for w in words]
+    out = []
+    for w in words[:max_words]:
+        if len('-'.join(out + [w])) > max_len:
+            break
+        out.append(w)
+    return '-'.join(out), words
+
+
+def url_changes(df, cache, platform='zid'):
+    """الروابط التي تحتاج تغييراً في صفحات المنتجات، والرابط العربي الجديد من العنوان الجديد (أو اسم المنتج)."""
+    import pandas as pd
+    from urllib.parse import quote
+    cols = ['اسم المنتج', 'الرابط الحالي', 'الرابط الجديد', 'سبب التغيير']
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+    sugg = suggestions(cache)
+    live = df[(df['متاحة'] == True) & (df['نوع الصفحة'] == 'product')]  # noqa: E712
+    names = {}
+    for _, r in live.iterrows():
+        names[str(r['الرابط'])] = str(r.get('اسم منظم') or r.get('اسم المنتج المعروض') or '').strip()
+    all_names = [n for n in names.values() if n]
+    taken = {(_slug_seg(u)[0][_slug_seg(u)[1]] if _slug_seg(u)[1] >= 0 else '').lower() for u in names}
+    rows = []
+    for u, nm in names.items():
+        reason = url_change_reason(u, nm, all_names)
+        if not reason:
+            continue
+        v = sugg.get(u) or {}
+        src = v.get('title_full') or v.get('title') or nm
+        slug, words = arabic_slug(src)
+        k = len(slug.split('-'))
+        while slug.lower() in taken and k < len(words):        # رابط فريد بلا أرقام: نضيف الكلمة التالية من العنوان
+            k += 1
+            slug = '-'.join(words[:k])
+        if not slug or slug.lower() in taken:
+            continue
+        taken.add(slug.lower())
+        segs, idx = _slug_seg(u)
+        new_segs = segs[:idx] + [slug] + segs[idx + 1:]
+        base = u.split('/', 3)
+        root = '/'.join(base[:3])
+        rows.append({'اسم المنتج': nm, 'الرابط الحالي': u,
+                     'الرابط الجديد': root + '/' + '/'.join(quote(x) for x in new_segs), 'سبب التغيير': reason})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def zid_url_redirects(changes):
+    """تحويلات زد للروابط الجديدة: من المسار القديم إلى الجديد (بصيغة ملف الاستيراد)."""
+    import pandas as pd
+    from audit_engine import ZID_REDIRECT_COLUMNS, _path_only
+    rows = [{'اسم إعادة التوجيه': f'seo-url-{i + 1}', 'التوجيه من': _path_only(r['الرابط الحالي']),
+             'التوجيه إلى': _path_only(r['الرابط الجديد'])} for i, (_, r) in enumerate(changes.iterrows())]
+    return pd.DataFrame(rows, columns=ZID_REDIRECT_COLUMNS)
