@@ -125,7 +125,15 @@ def _headers(t, store_id=''):
 def _get(base_dir, store_key, path, params=None, session=None, store_id=''):
     http = session or requests
     t, st = _tokens(base_dir, store_key)
-    r = http.get(f'{API}{path}', params=params or {}, headers=_headers(t, store_id or st.get('id', '')), timeout=40)
+    h = _headers(t, store_id or st.get('id', ''))
+    try:
+        scheme = json.loads((_tokens_dir(base_dir) / f'{store_key}.json').read_text(encoding='utf-8')).get('scheme')
+    except Exception:
+        scheme = None
+    for name, hdr in _schemes(t):
+        if name == scheme:
+            h.update(hdr)
+    r = http.get(f'{API}{path}', params=params or {}, headers=h, timeout=40)
     try:
         body = r.json()
     except Exception:
@@ -157,11 +165,54 @@ def _find_store(d):
     return None
 
 
+def _token_report(t):
+    """وجود كل حقل وطوله فقط — لا يكشف أي قيمة."""
+    return {k: (f"موجود ({len(str(v))} حرفاً)" if v else 'فارغ') for k, v in t.items() if k != 'obtained'}
+
+
+def _schemes(t):
+    """طرق إرسال المفتاحين لزد: نجرّبها بالترتيب ونعتمد أول طريقة تنجح."""
+    a, m = t.get('authorization') or '', t.get('access_token') or ''
+    out = []
+    if a and m:
+        out.append(('Bearer authorization + X-Manager-Token', {'Authorization': f'Bearer {a}', 'X-Manager-Token': m}))
+        out.append(('Bearer access_token + X-Manager-Token', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}))
+    if m and not a:
+        out.append(('Bearer access_token فقط', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}))
+    if a and not m:
+        out.append(('Bearer authorization فقط', {'Authorization': f'Bearer {a}'}))
+    return out
+
+
 def test_connection(base_dir, store_key, session=None):
-    """يختبر الاتصال: اسم المتجر من الملف الشخصي، وأول خمسة منتجات، وأسماء حقول المنتج."""
-    result = {'store': {}, 'products': [], 'product_fields': None, 'profile_status': None, 'products_status': None}
-    code, prof = _get(base_dir, store_key, '/managers/account/profile', session=session)
+    """يختبر الاتصال: يجرّب طرق إرسال المفاتيح، ثم اسم المتجر، وأول خمسة منتجات، وأسماء حقول المنتج."""
+    result = {'store': {}, 'products': [], 'product_fields': None, 'profile_status': None, 'products_status': None,
+              'tokens': {}, 'scheme': None, 'error_detail': ''}
+    t, _st = _tokens(base_dir, store_key)
+    result['tokens'] = _token_report(t)
+    http = session or requests
+    code, prof = None, {}
+    for name, hdr in _schemes(t):
+        r = http.get(f'{API}/managers/account/profile', params={},
+                     headers={**hdr, 'Accept-Language': 'ar', 'Accept': 'application/json'}, timeout=40)
+        code = r.status_code
+        try:
+            prof = r.json()
+        except Exception:
+            prof = {}
+        if code == 200:
+            result['scheme'] = name
+            f = _tokens_dir(base_dir) / f'{store_key}.json'
+            s = json.loads(f.read_text(encoding='utf-8'))
+            s['scheme'] = name
+            f.write_text(json.dumps(s), encoding='utf-8')
+            break
     result['profile_status'] = code
+    if code != 200 and isinstance(prof, dict):
+        det = prof.get('detail') or prof.get('message') or prof.get('error') or ''
+        if isinstance(det, dict):
+            det = det.get('description') or det.get('message') or ''
+        result['error_detail'] = str(det)[:160]
     st = _find_store(prof) or {}
     result['store'] = {'id': str(st.get('id', '') or ''), 'name': st.get('title') or st.get('name') or '',
                        'url': st.get('url') or st.get('domain') or ''}
