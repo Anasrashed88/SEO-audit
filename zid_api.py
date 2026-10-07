@@ -166,28 +166,47 @@ def _find_store(d):
 
 
 def _token_report(t):
-    """وجود كل حقل وطوله فقط — لا يكشف أي قيمة."""
-    return {k: (f"موجود ({len(str(v))} حرفاً)" if v else 'فارغ') for k, v in t.items() if k != 'obtained'}
+    """وجود كل حقل وطوله، وهل يبدأ بكلمة Bearer — لا يكشف أي قيمة."""
+    out = {}
+    for k, v in t.items():
+        if k == 'obtained':
+            continue
+        if not v:
+            out[k] = 'فارغ'
+            continue
+        sv = str(v).strip()
+        out[k] = f"موجود ({len(sv)} حرفاً)" + (' — يبدأ بكلمة Bearer' if sv.lower().startswith('bearer ') else '')
+    return out
+
+
+def _clean(v):
+    """بعض الردود تحفظ المفتاح ومعه كلمة Bearer في أوله: نزيلها حتى لا تُرسل مرتين."""
+    v = str(v or '').strip()
+    return v[7:].strip() if v.lower().startswith('bearer ') else v
 
 
 def _schemes(t):
-    """طرق إرسال المفتاحين لزد: نجرّبها بالترتيب ونعتمد أول طريقة تنجح."""
-    a, m = t.get('authorization') or '', t.get('access_token') or ''
+    """كل الطرق الممكنة لتقديم المفتاحين لزد. نجرّبها بالترتيب ونعتمد أول طريقة تنجح."""
+    a, m = _clean(t.get('authorization')), _clean(t.get('access_token'))
     out = []
     if a and m:
-        out.append(('Bearer authorization + X-Manager-Token', {'Authorization': f'Bearer {a}', 'X-Manager-Token': m}))
-        out.append(('Bearer access_token + X-Manager-Token', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}))
-    if m and not a:
-        out.append(('Bearer access_token فقط', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}))
-    if a and not m:
-        out.append(('Bearer authorization فقط', {'Authorization': f'Bearer {a}'}))
+        out += [('A: Bearer authorization + X-Manager-Token access_token', {'Authorization': f'Bearer {a}', 'X-Manager-Token': m}),
+                ('B: Bearer access_token + X-Manager-Token authorization', {'Authorization': f'Bearer {m}', 'X-Manager-Token': a}),
+                ('C: Bearer access_token + X-Manager-Token access_token', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}),
+                ('D: Bearer authorization + X-Manager-Token authorization', {'Authorization': f'Bearer {a}', 'X-Manager-Token': a}),
+                ('E: Bearer authorization فقط', {'Authorization': f'Bearer {a}'}),
+                ('F: Bearer access_token فقط', {'Authorization': f'Bearer {m}'})]
+    elif m:
+        out.append(('F: Bearer access_token فقط', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}))
+    elif a:
+        out.append(('E: Bearer authorization فقط', {'Authorization': f'Bearer {a}'}))
     return out
 
 
 def test_connection(base_dir, store_key, session=None):
     """يختبر الاتصال: يجرّب طرق إرسال المفاتيح، ثم اسم المتجر، وأول خمسة منتجات، وأسماء حقول المنتج."""
     result = {'store': {}, 'products': [], 'product_fields': None, 'profile_status': None, 'products_status': None,
-              'tokens': {}, 'scheme': None, 'error_detail': ''}
+              'tokens': {}, 'scheme': None, 'error_detail': '', 'attempts': {}}
     t, _st = _tokens(base_dir, store_key)
     result['tokens'] = _token_report(t)
     http = session or requests
@@ -196,6 +215,7 @@ def test_connection(base_dir, store_key, session=None):
         r = http.get(f'{API}/managers/account/profile', params={},
                      headers={**hdr, 'Accept-Language': 'ar', 'Accept': 'application/json'}, timeout=40)
         code = r.status_code
+        result['attempts'][name] = code
         try:
             prof = r.json()
         except Exception:
