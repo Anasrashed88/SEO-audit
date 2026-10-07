@@ -41,7 +41,15 @@ def _bridge_call(cfg, payload, session=None):
     try:
         data = r.json()
     except Exception:
-        raise ValueError('رد الخادم غير مفهوم. تأكد أن رابط الجسر صحيح وينتهي بـ /exec.')
+        final = str(getattr(r, 'url', '') or '')
+        text = (getattr(r, 'text', '') or '')[:3000].lower()
+        if 'accounts.google.com' in final or 'servicelogin' in text or 'accounts.google.com' in text:
+            raise ValueError('الجسر يطلب تسجيل دخول Google. في Apps Script: نشر ← إدارة عمليات النشر ← ✏️ ← '
+                             '«من يمكنه الوصول» = «أي شخص» (Anyone)، ثم إصدار جديد ونشر.')
+        if 'dopost' in text or 'script function not found' in text:
+            raise ValueError('الجسر لا يحتوي الكود كاملاً. الصق كود zid_bridge.gs كاملاً، ثم انشر إصداراً جديداً.')
+        raise ValueError(f'رد الخادم غير مفهوم (رمز {getattr(r, "status_code", "؟")}). '
+                         'تأكد أن رابط الجسر صحيح وينتهي بـ /exec، وأن النشر «أي شخص».')
     if not data.get('ok'):
         if data.get('error') == 'unauthorized':
             raise ValueError('كلمة السر (PICKUP_KEY) لا تطابق ما في خادمك.')
