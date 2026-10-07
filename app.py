@@ -1332,9 +1332,18 @@ if nav == "🔍 فحص متجر جديد":
                         if prev_i.empty:
                             st.caption("لم تُولّد نصوص بديلة بعد.")
                         else:
-                            st.dataframe(prev_i.drop(columns=['الرابط']), use_container_width=True, hide_index=True,
-                                         height=min(700, 38 * (len(prev_i) + 1)),
-                                         column_config={'رابط الصورة': st.column_config.ImageColumn('الصورة')})
+                            st.caption("✏️ اضغط على أي نص في عمود «النص البديل الجديد» لتعديله، ثم «حفظ التعديلات».")
+                            ed_i = st.data_editor(prev_i, use_container_width=True, hide_index=True,
+                                                  height=min(700, 38 * (len(prev_i) + 1)), key="ai_edit_alts",
+                                                  column_order=[c for c in prev_i.columns if c != 'الرابط'],
+                                                  disabled=[c for c in prev_i.columns if c != 'النص البديل الجديد'],
+                                                  column_config={'رابط الصورة': st.column_config.ImageColumn('الصورة')})
+                            if st.button("💾 حفظ التعديلات", key="ai_save_alts"):
+                                n_ = ai.apply_edits(eng.BASE_DIR, st.session_state.current_url, 'alts',
+                                                    list(zip(ed_i['رابط الصورة'], ed_i['النص البديل الجديد'])))
+                                st.success(f"حُفظت التعديلات: {n_}" if n_ else "لا توجد تعديلات جديدة.")
+                                if n_:
+                                    st.rerun()
                             f_i = ai.compact_alt_file(exports_ai, cache_ai, df, only_i)
                             data_, mime_, name_ = table_payload("النصوص_البديلة_الجديدة.csv", f_i)
                             st.download_button(f"📥 النصوص البديلة الجديدة (الصور: {len(f_i)})", data_,
@@ -1345,8 +1354,18 @@ if nav == "🔍 فحص متجر جديد":
                         if prev_.empty:
                             st.caption("لا توجد صفوف في هذا الاختيار.")
                         else:
-                            st.dataframe(prev_.drop(columns=['الرابط']), use_container_width=True, hide_index=True,
-                                         height=min(700, 38 * (len(prev_) + 1)))
+                            new_col = 'العنوان الجديد' if kind_ == 'titles' else 'الوصف الجديد'
+                            st.caption("✏️ اضغط على أي نص في عمود «" + new_col + "» لتعديله، ثم «حفظ التعديلات».")
+                            ed_ = st.data_editor(prev_, use_container_width=True, hide_index=True,
+                                                 height=min(700, 38 * (len(prev_) + 1)), key=f"ai_edit_{kind_}",
+                                                 column_order=[c for c in prev_.columns if c != 'الرابط'],
+                                                 disabled=[c for c in prev_.columns if c != new_col])
+                            if st.button("💾 حفظ التعديلات", key=f"ai_save_{kind_}"):
+                                n_ = ai.apply_edits(eng.BASE_DIR, st.session_state.current_url, kind_,
+                                                    list(zip(ed_['الرابط'], ed_[new_col])))
+                                st.success(f"حُفظت التعديلات: {n_}" if n_ else "لا توجد تعديلات جديدة.")
+                                if n_:
+                                    st.rerun()
                     # ملف مستقل لكل نوع، بأعمدة مختصرة: اسم المنتج ← الرابط ← الحالي ← الجديد
                     dl1, dl2 = st.columns(2)
                     for col_, kind_, fname_ in ((dl1, 'titles', 'العناوين_الجديدة'), (dl2, 'descs', 'الأوصاف_الجديدة')):
