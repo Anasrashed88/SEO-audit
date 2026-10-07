@@ -1470,7 +1470,13 @@ if nav == "🔍 فحص متجر جديد":
                             r_z = zapi.test_connection(eng.BASE_DIR, sz['key'])
                             if r_z['store'].get('name'):
                                 st.success(f"متصل بمتجر: {r_z['store']['name']} ({r_z['store'].get('url', '')})")
-                            st.caption(f"رد زد: الملف الشخصي {r_z['profile_status']}، المنتجات {r_z['products_status']}")
+                            st.caption(f"رد زد: الملف الشخصي {r_z['profile_status']}، المنتجات {r_z['products_status']}"
+                                       + (f" — طريقة الإرسال الناجحة: {r_z['scheme']}" if r_z.get('scheme') else ""))
+                            if r_z.get('error_detail'):
+                                st.warning(f"رسالة زد: {r_z['error_detail']}")
+                            if r_z['profile_status'] != 200:
+                                with st.expander("تشخيص المفاتيح المحفوظة (بلا قيم)"):
+                                    st.json(r_z.get('tokens') or {})
                             if r_z['products']:
                                 st.markdown("**أول المنتجات:**")
                                 st.dataframe(r_z['products'], use_container_width=True, hide_index=True)
