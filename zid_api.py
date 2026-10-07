@@ -8,6 +8,8 @@ from pathlib import Path
 import requests
 
 API = 'https://api.zid.sa/v1'
+# وثائق تطبيقات زد تستخدم عنواناً آخر أحياناً: نجرّب الاثنين ونحفظ ما ينجح
+API_BASES = ['https://api.zid.sa/v1', 'https://api.zid.dev/app/v1']
 
 
 # ---------------- إعدادات الجسر (على جهازك فقط) ----------------
@@ -127,13 +129,13 @@ def _get(base_dir, store_key, path, params=None, session=None, store_id=''):
     t, st = _tokens(base_dir, store_key)
     h = _headers(t, store_id or st.get('id', ''))
     try:
-        scheme = json.loads((_tokens_dir(base_dir) / f'{store_key}.json').read_text(encoding='utf-8')).get('scheme')
+        saved = json.loads((_tokens_dir(base_dir) / f'{store_key}.json').read_text(encoding='utf-8'))
     except Exception:
-        scheme = None
+        saved = {}
     for name, hdr in _schemes(t):
-        if name == scheme:
+        if name == saved.get('scheme'):
             h.update(hdr)
-    r = http.get(f'{API}{path}', params=params or {}, headers=h, timeout=40)
+    r = http.get(f"{saved.get('api_base') or API}{path}", params=params or {}, headers=h, timeout=40)
     try:
         body = r.json()
     except Exception:
@@ -195,7 +197,8 @@ def _schemes(t):
                 ('C: Bearer access_token + X-Manager-Token access_token', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}),
                 ('D: Bearer authorization + X-Manager-Token authorization', {'Authorization': f'Bearer {a}', 'X-Manager-Token': a}),
                 ('E: Bearer authorization فقط', {'Authorization': f'Bearer {a}'}),
-                ('F: Bearer access_token فقط', {'Authorization': f'Bearer {m}'})]
+                ('F: Bearer access_token فقط', {'Authorization': f'Bearer {m}'}),
+                ('G: authorization بلا Bearer + X-Manager-Token access_token', {'Authorization': a, 'X-Manager-Token': m})]
     elif m:
         out.append(('F: Bearer access_token فقط', {'Authorization': f'Bearer {m}', 'X-Manager-Token': m}))
     elif a:
@@ -211,10 +214,12 @@ def test_connection(base_dir, store_key, session=None):
     result['tokens'] = _token_report(t)
     http = session or requests
     code, prof = None, {}
-    for name, hdr in _schemes(t):
-        r = http.get(f'{API}/managers/account/profile', params={},
+    tries = [(base, name, hdr) for base in API_BASES for name, hdr in _schemes(t)]
+    for base, name, hdr in tries:
+        r = http.get(f'{base}/managers/account/profile', params={},
                      headers={**hdr, 'Accept-Language': 'ar', 'Accept': 'application/json'}, timeout=40)
         code = r.status_code
+        name = f"{base.split('//')[1]} | {name}"
         result['attempts'][name] = code
         try:
             prof = r.json()
@@ -224,7 +229,8 @@ def test_connection(base_dir, store_key, session=None):
             result['scheme'] = name
             f = _tokens_dir(base_dir) / f'{store_key}.json'
             s = json.loads(f.read_text(encoding='utf-8'))
-            s['scheme'] = name
+            s['scheme'] = name.split(' | ', 1)[1]
+            s['api_base'] = base
             f.write_text(json.dumps(s), encoding='utf-8')
             break
     result['profile_status'] = code
