@@ -1475,8 +1475,8 @@ if nav == "🔍 فحص متجر جديد":
                             if r_z.get('error_detail'):
                                 st.warning(f"رسالة زد: {r_z['error_detail']}")
                             if r_z['profile_status'] != 200:
-                                with st.expander("تشخيص المفاتيح المحفوظة (بلا قيم)"):
-                                    st.json(r_z.get('tokens') or {})
+                                with st.expander("تشخيص المفاتيح المحفوظة (بلا قيم)", expanded=True):
+                                    st.json({'المفاتيح': r_z.get('tokens') or {}, 'نتيجة كل طريقة': r_z.get('attempts') or {}})
                             if r_z['products']:
                                 st.markdown("**أول المنتجات:**")
                                 st.dataframe(r_z['products'], use_container_width=True, hide_index=True)
