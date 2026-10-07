@@ -438,7 +438,7 @@ if nav == "🔍 فحص متجر جديد":
 
         tabs = st.tabs(["📊 نظرة عامة", "🛡️ فحص الثقة", "🧾 البيانات المعلنة",
                         "📄 الصفحات", "🖼️ الصور", "🗺️ خريطة الموقع",
-                        "🔬 التحقق اليدوي", "📥 التصدير", "💳 المراحل والفواتير", "🤖 الذكاء الاصطناعي"])
+                        "🔬 التحقق اليدوي", "📥 التصدير", "💳 المراحل والفواتير", "🤖 الذكاء الاصطناعي", "🔗 ربط المتجر"])
 
         # ---------------- نظرة عامة ----------------
         with tabs[0]:
@@ -1411,6 +1411,63 @@ if nav == "🔍 فحص متجر جديد":
                                                use_container_width=True, key="ai_sample_dl")
                         except Exception as e:
                             st.error(f"تعذّر إنشاء العينة: {e}")
+
+        # ---------------- ربط المتجر (زد) ----------------
+        with tabs[10]:
+            import zid_api as zapi
+            st.markdown("#### ربط متجر زد")
+            st.caption("المتاجر التي فعّلت تطبيقك تُحفظ مفاتيحها في خادمك (جسر زد)، وتسحبها الأداة إلى جهازك فقط. "
+                       "لا تظهر أي مفاتيح هنا.")
+            cfg_z = zapi.load_bridge(eng.BASE_DIR)
+            with st.expander("⚙️ إعدادات الجسر" + (" ✓" if cfg_z.get('url') and cfg_z.get('key') else ""),
+                             expanded=not (cfg_z.get('url') and cfg_z.get('key'))):
+                bz1, bz2 = st.columns([3, 2])
+                z_url = bz1.text_input("رابط الجسر (ينتهي بـ /exec)", value=cfg_z.get('url', ''), key="z_url")
+                z_key = bz2.text_input("كلمة السر (PICKUP_KEY)", value=cfg_z.get('key', ''), type="password",
+                                       key="z_key")
+                if st.button("حفظ الإعدادات", key="z_save"):
+                    if z_url.strip().endswith('/exec') and len(z_key.strip()) >= 16:
+                        zapi.save_bridge(eng.BASE_DIR, z_url, z_key)
+                        st.success("حُفظت الإعدادات على جهازك.")
+                    else:
+                        st.error("الرابط يجب أن ينتهي بـ /exec، وكلمة السر 16 حرفاً على الأقل.")
+            if st.button("🔄 سحب المتاجر المربوطة", type="primary", use_container_width=True, key="z_pull"):
+                try:
+                    pulled = zapi.pull_stores(eng.BASE_DIR)
+                    st.success(f"المتاجر المربوطة: {len(pulled)}")
+                except Exception as e:
+                    st.error(f"تعذّر السحب: {e}")
+            stores_z = zapi.local_stores(eng.BASE_DIR)
+            if not stores_z:
+                st.info("لا توجد متاجر مربوطة على جهازك بعد. بعد أن يفعّل التاجر تطبيقك، اضغط «سحب المتاجر المربوطة».")
+            for sz in stores_z:
+                with st.container(border=True):
+                    title_z = sz['name'] or sz['url'] or 'متجر مربوط (لم يُقرأ اسمه بعد)'
+                    st.markdown(f"**{title_z}**" + (f" — رقم المتجر {sz['id']}" if sz['id'] else ""))
+                    st.caption(f"تاريخ الربط: {sz['obtained'][:10] or '—'}")
+                    c1z, c2z = st.columns(2)
+                    if c1z.button("🧪 اختبار الاتصال", key=f"z_test_{sz['key']}", use_container_width=True):
+                        try:
+                            r_z = zapi.test_connection(eng.BASE_DIR, sz['key'])
+                            if r_z['store'].get('name'):
+                                st.success(f"متصل بمتجر: {r_z['store']['name']} ({r_z['store'].get('url', '')})")
+                            st.caption(f"رد زد: الملف الشخصي {r_z['profile_status']}، المنتجات {r_z['products_status']}")
+                            if r_z['products']:
+                                st.markdown("**أول المنتجات:**")
+                                st.dataframe(r_z['products'], use_container_width=True, hide_index=True)
+                            if r_z['product_fields'] is not None:
+                                with st.expander("أسماء حقول المنتج كما ترجعها زد (بلا قيم)"):
+                                    st.json(r_z['product_fields'])
+                        except Exception as e:
+                            st.error(f"تعذّر الاختبار: {e}")
+                    if c2z.button("🔌 إلغاء ربط المتجر", key=f"z_del_{sz['key']}", use_container_width=True):
+                        try:
+                            zapi.disconnect(eng.BASE_DIR, sz['key'])
+                            st.success("أُلغي الربط وحُذفت المفاتيح من خادمك ومن جهازك. "
+                                       "يُستحسن أن يحذف التاجر التطبيق من لوحة متجره أيضاً.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"تعذّر الإلغاء: {e}")
 else:
     st.markdown("### 📁 سجل المتاجر المفحوصة")
     st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على "
