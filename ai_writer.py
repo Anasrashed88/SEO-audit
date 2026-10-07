@@ -347,8 +347,8 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
     if locked and locked != model and not regenerate:
         raise ValueError(f'هذا المتجر بدأ بنموذج {locked}. أكمل به حتى لا تتفاوت الجودة، '
                          'أو اختر «إعادة توليد الكل» لتبدأ من جديد بالنموذج الجديد.')
-    if regenerate:
-        cache = {}
+    if regenerate:      # إعادة التوليد تحفظ ما عدّله المستخدم يدوياً، ولا تكتب فوقه
+        cache = {k: v for k, v in cache.items() if isinstance(v, dict) and v.get('edited')}
     cache['__meta__'] = {'model': model, 'suffix': suffix, 'suffix_mode': suffix_mode}
     sugg = suggestions(cache)
     todo = [it for it in items if it['id'] not in sugg]
@@ -780,3 +780,43 @@ def zid_url_redirects(changes):
     rows = [{'اسم إعادة التوجيه': f'seo-url-{i + 1}', 'التوجيه من': _path_only(r['الرابط الحالي']),
              'التوجيه إلى': _path_only(r['الرابط الجديد'])} for i, (_, r) in enumerate(changes.iterrows())]
     return pd.DataFrame(rows, columns=ZID_REDIRECT_COLUMNS)
+
+
+# ======================= التعديل اليدوي على الاقتراحات =======================
+def apply_edits(base_dir, store_url, kind, edited_rows):
+    """يحفظ ما عدّله المستخدم على الاقتراحات، ويعيد فحصه بالقواعد نفسها.
+    kind: 'titles' أو 'descs' أو 'alts'. edited_rows: [(الرابط أو رابط الصورة، النص الجديد)].
+    يعيد عدد ما تغيّر."""
+    cache = load_cache(base_dir, store_url)
+    meta = cache.get('__meta__') or {}
+    sfx, smode = meta.get('suffix', ''), meta.get('suffix_mode')
+    changed = 0
+    for key, text in edited_rows:
+        text = str(text or '').strip()
+        if kind == 'alts':
+            v = cache.get('img::' + key)
+            if not v or v.get('alt') == text:
+                continue
+            st_, notes = check_alt({'alt': ''}, text, set())
+            v.update({'alt': text, 'status': st_, 'alt_notes': '، '.join(notes), 'edited': True})
+            changed += 1
+            continue
+        v = cache.get(key)
+        if not v or 'title_notes' not in v:
+            continue
+        if kind == 'titles':
+            if v.get('title') == text:
+                continue
+            full = text if (smode != 'auto' or not sfx) else f'{text}{sfx}'
+            _, tn, _ = check({}, full, '', set(), set(), {'title'})
+            v.update({'title': text, 'title_full': full, 'title_notes': '، '.join(tn), 'edited': True})
+        else:
+            if v.get('description') == text:
+                continue
+            _, _, dn = check({}, '', text, set(), set(), {'desc'})
+            v.update({'description': text, 'desc_notes': '، '.join(dn), 'edited': True})
+        v['status'] = STATUS_OK if not (v.get('title_notes') or v.get('desc_notes')) else STATUS_REVIEW
+        changed += 1
+    if changed:
+        save_cache(base_dir, store_url, cache)
+    return changed
