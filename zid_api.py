@@ -37,7 +37,15 @@ def _tokens_dir(base_dir):
 def _bridge_call(cfg, payload, session=None):
     http = session or requests
     r = http.post(cfg['url'], data=json.dumps({**payload, 'key': cfg['key']}),
-                  headers={'Content-Type': 'application/json'}, timeout=40, allow_redirects=True)
+                  headers={'Content-Type': 'application/json'}, timeout=40, allow_redirects=False)
+    # Google Apps Script يرد على الإرسال بتحويل لعنوان فيه النتيجة، ويجب فتحه بطلب قراءة (GET) لا بإرسال آخر
+    hops = 0
+    while getattr(r, 'status_code', 200) in (301, 302, 303, 307, 308) and hops < 5:
+        loc = (getattr(r, 'headers', {}) or {}).get('Location') or (getattr(r, 'headers', {}) or {}).get('location')
+        if not loc:
+            break
+        r = http.get(loc, timeout=40, allow_redirects=True)
+        hops += 1
     try:
         data = r.json()
     except Exception:
