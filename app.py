@@ -149,7 +149,7 @@ render_brandbar()
 
 with st.sidebar:
     st.markdown("### 🧭 القائمة")
-    nav = st.radio("", ["🔍 فحص متجر جديد", "📁 سجل المتاجر"], label_visibility="collapsed")
+    nav = st.radio("", ["🔍 فحص متجر جديد", "📁 سجل المتاجر", "🗂️ المتاجر المربوطة"], label_visibility="collapsed")
     st.markdown("---")
     st.markdown("#### ⚙️ إعدادات الفحص")
     max_pages = st.number_input("الحد الأقصى للصفحات", 50, 5000, MAX_PAGES_DEFAULT, 50)
@@ -1493,7 +1493,7 @@ if nav == "🔍 فحص متجر جديد":
                             st.rerun()
                         except Exception as e:
                             st.error(f"تعذّر الإلغاء: {e}")
-else:
+elif nav == "📁 سجل المتاجر":
     st.markdown("### 📁 سجل المتاجر المفحوصة")
     st.caption("تنبيه: قاعدة البيانات محلية وقد تُفقد عند إعادة نشر التطبيق على "
                "Streamlit Cloud.")
@@ -1537,3 +1537,76 @@ else:
                 st.session_state.summary['platform_label'] = PLATFORM_LABEL.get(
                     row[4] or 'unknown', '—')
                 st.success("تم الاسترجاع. انتقل إلى (فحص متجر جديد) لعرض النتائج.")
+elif nav == "🗂️ المتاجر المربوطة":
+    import re
+    import zid_api as zapi
+    import ai_writer as ai
+    from export_utils import table_payload as _tp
+    st.markdown("### 🗂️ المتاجر المربوطة ومساحة العمل")
+    st.caption("كل متجر ربطته بالتطبيق أو ولّدت له اقتراحات، دون الحاجة لإعادة فحصه.")
+
+    # آخر فحص لكل متجر (المنصة والتاريخ) من سجل المتاجر
+    conn = sqlite3.connect(DB_FILE)
+    last = pd.read_sql_query("SELECT domain, scan_date, platform FROM audits ORDER BY id DESC", conn)
+    conn.close()
+    host_of = (lambda u: re.sub(r'^https?://(www\.)?', '', str(u or '')).split('/')[0].lower())
+    info = {}
+    for _, r in last.iterrows():
+        info.setdefault(host_of(r['domain']), (str(r['scan_date'])[:10], PLATFORM_LABEL.get(r['platform'] or 'unknown', '—')))
+
+    # المتاجر: من الربط بالتطبيق + من اقتراحات الذكاء الاصطناعي المحفوظة
+    stores = {}
+    for sz in zapi.local_stores(eng.BASE_DIR):
+        h = host_of(sz['url']) or sz['key']
+        stores[h] = {'host': h, 'name': sz['name'], 'linked': sz['obtained'][:10], 'zkey': sz['key']}
+    cache_dir = eng.BASE_DIR / 'ai_cache'
+    for f in (sorted(cache_dir.glob('*.json')) if cache_dir.exists() else []):
+        if f.name.startswith('_'):
+            continue
+        s_ = stores.setdefault(f.stem, {'host': f.stem, 'name': '', 'linked': '', 'zkey': ''})
+        s_['cache'] = f.stem
+
+    if not stores:
+        st.info("لا توجد متاجر مربوطة أو اقتراحات محفوظة بعد.")
+    for h, s_ in stores.items():
+        c_ = ai.load_cache(eng.BASE_DIR, 'https://' + s_['cache']) if s_.get('cache') else {}
+        sugg_ = ai.suggestions(c_)
+        alts_ = ai.alt_suggestions(c_)
+        n_t = sum(1 for v in sugg_.values() if v.get('title'))
+        n_d = sum(1 for v in sugg_.values() if v.get('description'))
+        scan_d, plat = info.get(h, ('—', '—'))
+        with st.container(border=True):
+            st.markdown(f"**{s_['name'] or h}**" + (f" — {h}" if s_['name'] else ""))
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("تاريخ الربط", s_['linked'] or "غير مربوط")
+            k2.metric("المنصة", plat)
+            k3.metric("آخر فحص", scan_d)
+            k4.metric("الاقتراحات", f"{n_t + n_d + len(alts_):,}")
+            k5.metric("نسبة التنفيذ", "—", help="تظهر بعد بناء التنفيذ على المتجر.")
+            b1, b2 = st.columns(2)
+            if b1.button("📂 عرض ما وُلّد", key=f"ws_open_{h}", use_container_width=True, disabled=not c_):
+                st.session_state.ws_store = h
+            if s_['zkey'] and b2.button("🔌 فك الربط", key=f"ws_del_{h}", use_container_width=True):
+                try:
+                    zapi.disconnect(eng.BASE_DIR, s_['zkey'])
+                    st.success("أُلغي الربط وحُذفت المفاتيح من خادمك ومن جهازك.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"تعذّر فك الربط: {e}")
+            if st.session_state.get('ws_store') == h and c_:
+                v_ = st.radio("المعروض", ["العناوين", "الأوصاف", "النصوص البديلة"], horizontal=True, key=f"ws_view_{h}")
+                if v_ == "النصوص البديلة":
+                    rows_ = [{'رابط الصورة': img, 'النص البديل الجديد': v['alt'], 'ملاحظة': v.get('alt_notes', '')}
+                             for img, v in alts_.items()]
+                else:
+                    fld, nts = ('title', 'title_notes') if v_ == "العناوين" else ('description', 'desc_notes')
+                    rows_ = [{'الرابط': u, f"{'العنوان' if fld == 'title' else 'الوصف'} الجديد": v.get(fld, ''),
+                              'ملاحظة': v.get(nts, '')} for u, v in sugg_.items() if v.get(fld)]
+                tbl_ = pd.DataFrame(rows_)
+                if tbl_.empty:
+                    st.caption("لا شيء وُلّد في هذا النوع بعد.")
+                else:
+                    st.dataframe(tbl_, use_container_width=True, hide_index=True,
+                                 height=min(600, 38 * (len(tbl_) + 1)))
+                    d_, m_, n_ = _tp(f"{h}_{v_.replace(' ', '_')}.csv", tbl_.drop(columns=['ملاحظة']))
+                    st.download_button(f"📥 تحميل {v_}", d_, n_, m_, key=f"ws_dl_{h}_{v_}")
