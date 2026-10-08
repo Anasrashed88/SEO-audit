@@ -1976,17 +1976,46 @@ def cache_open(base_url, enabled=True):
     if not enabled:
         return 0
     path = _CACHE['path']
+    cache_prune()
     if path.exists():
         now = time.time()
+        fresh, total = {}, 0
         with open(path, encoding='utf-8') as fh:
             for line in fh:
+                total += 1
                 try:
                     rec = json.loads(line)
                 except Exception:
                     continue
                 if now - rec.get('t', 0) <= CACHE_MAX_AGE:
-                    _CACHE['data'][rec['k']] = rec['r']
+                    fresh[rec['k']] = rec
+        _CACHE['data'] = {k: v['r'] for k, v in fresh.items()}
+        # تنظيف: إعادة كتابة الملف بالصالح فقط (كل إعادة فحص كانت تضيف للملف دون حذف القديم)
+        if total > len(fresh):
+            if fresh:
+                tmp = path.with_suffix('.tmp')
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    for rec in fresh.values():
+                        fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                tmp.replace(path)
+            else:
+                path.unlink()
     return len(_CACHE['data'])
+
+
+def cache_prune():
+    """يحذف ملفات حفظ الفحص التي لم تُستخدم منذ انتهاء صلاحيتها (لا شيء صالح فيها)."""
+    if not CACHE_DIR.exists():
+        return 0
+    now, n = time.time(), 0
+    for f in CACHE_DIR.glob('*.jsonl'):
+        try:
+            if now - f.stat().st_mtime > CACHE_MAX_AGE:
+                f.unlink()
+                n += 1
+        except Exception:
+            pass
+    return n
 
 
 def cache_count(base_url):
