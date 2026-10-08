@@ -92,7 +92,8 @@ def local_stores(base_dir):
             continue
         st = s.get('store') or {}
         out.append({'key': s.get('key', f.stem), 'id': st.get('id', ''), 'name': st.get('name', ''),
-                    'url': st.get('url', ''), 'obtained': (s.get('tokens') or {}).get('obtained', '')})
+                    'url': st.get('url', ''), 'obtained': (s.get('tokens') or {}).get('obtained', ''),
+                    'label': s.get('label', '')})
     return out
 
 
@@ -263,3 +264,13 @@ def test_connection(base_dir, store_key, session=None):
     elif body:
         result['product_fields'] = _shape(body)
     return result
+
+
+def set_label(base_dir, store_key, label):
+    """اسم تكتبه أنت للمتجر المربوط، يظهر حتى تقرأ الأداة اسمه الحقيقي من زد."""
+    f = _tokens_dir(base_dir) / f'{store_key}.json'
+    if not f.exists():
+        return
+    s = json.loads(f.read_text(encoding='utf-8'))
+    s['label'] = str(label or '').strip()
+    f.write_text(json.dumps(s), encoding='utf-8')
