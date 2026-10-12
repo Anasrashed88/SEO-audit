@@ -79,7 +79,7 @@ def pull_stores(base_dir, session=None):
         (_tokens_dir(base_dir) / f'{key}.json').write_text(json.dumps(s), encoding='utf-8')
         st = s.get('store') or {}
         out.append({'key': key, 'id': st.get('id', ''), 'name': st.get('name', ''), 'url': st.get('url', ''),
-                    'obtained': (s.get('tokens') or {}).get('obtained', '')})
+                    'obtained': (s.get('tokens') or {}).get('obtained', ''), 'platform': s.get('platform') or 'zid'})
     return out
 
 
@@ -93,7 +93,7 @@ def local_stores(base_dir):
         st = s.get('store') or {}
         out.append({'key': s.get('key', f.stem), 'id': st.get('id', ''), 'name': st.get('name', ''),
                     'url': st.get('url', ''), 'obtained': (s.get('tokens') or {}).get('obtained', ''),
-                    'label': s.get('label', '')})
+                    'label': s.get('label', ''), 'platform': s.get('platform') or 'zid'})
     return out
 
 
@@ -207,7 +207,54 @@ def _schemes(t):
     return out
 
 
+SALLA_API = 'https://api.salla.dev/admin/v2'
+
+
+def _test_salla(base_dir, store_key, session=None):
+    """سلة: مفتاح واحد (Bearer access_token). نقرأ بيانات التاجر وأول المنتجات وأسماء حقولها."""
+    http = session or requests
+    t, st = _tokens(base_dir, store_key)
+    h = {'Authorization': f"Bearer {_clean(t.get('access_token'))}", 'Accept': 'application/json'}
+    result = {'store': {'id': str(st.get('id', '')), 'name': st.get('name', ''), 'url': st.get('url', '')},
+              'products': [], 'product_fields': None, 'profile_status': None, 'products_status': None,
+              'tokens': _token_report(t), 'scheme': 'Bearer access_token (سلة)', 'error_detail': '', 'attempts': {}}
+    r = http.get('https://accounts.salla.sa/oauth2/user/info', headers=h, timeout=40)
+    result['profile_status'] = r.status_code
+    try:
+        m = (r.json().get('data') or {}).get('merchant') or {}
+    except Exception:
+        m = {}
+    if m:
+        result['store'] = {'id': str(m.get('id', '')), 'name': m.get('name') or m.get('username') or '',
+                           'url': m.get('domain') or m.get('url') or ''}
+        f = _tokens_dir(base_dir) / f'{store_key}.json'
+        s = json.loads(f.read_text(encoding='utf-8'))
+        s['store'] = {**(s.get('store') or {}), **{k: v for k, v in result['store'].items() if v}}
+        f.write_text(json.dumps(s), encoding='utf-8')
+    r = http.get(f'{SALLA_API}/products', params={'per_page': 5}, headers=h, timeout=40)
+    result['products_status'] = r.status_code
+    try:
+        body = r.json()
+    except Exception:
+        body = {}
+    items = body.get('data') or []
+    for p in items[:5]:
+        result['products'].append({'id': p.get('id'), 'name': p.get('name'), 'slug': p.get('url') or ''})
+    if items:
+        result['product_fields'] = _shape(items[0])
+    elif body:
+        result['product_fields'] = _shape(body)
+        err = body.get('error') or {}
+        result['error_detail'] = str((err.get('message') if isinstance(err, dict) else err) or '')[:160]
+    return result
+
+
 def test_connection(base_dir, store_key, session=None):
+    try:
+        if json.loads((_tokens_dir(base_dir) / f'{store_key}.json').read_text(encoding='utf-8')).get('platform') == 'salla':
+            return _test_salla(base_dir, store_key, session)
+    except FileNotFoundError:
+        raise ValueError('مفاتيح هذا المتجر غير موجودة على جهازك. اسحب المتاجر من جديد.')
     """يختبر الاتصال: يجرّب طرق إرسال المفاتيح، ثم اسم المتجر، وأول خمسة منتجات، وأسماء حقول المنتج."""
     result = {'store': {}, 'products': [], 'product_fields': None, 'profile_status': None, 'products_status': None,
               'tokens': {}, 'scheme': None, 'error_detail': '', 'attempts': {}}
