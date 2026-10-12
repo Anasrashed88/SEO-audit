@@ -1435,7 +1435,7 @@ if nav == "🔍 فحص متجر جديد":
         # ---------------- ربط المتجر (زد) ----------------
         with tabs[10]:
             import zid_api as zapi
-            st.markdown("#### ربط متجر زد")
+            st.markdown("#### ربط المتجر (زد وسلة)")
             st.caption("المتاجر التي فعّلت تطبيقك تُحفظ مفاتيحها في خادمك (جسر زد)، وتسحبها الأداة إلى جهازك فقط. "
                        "لا تظهر أي مفاتيح هنا.")
             cfg_z = zapi.load_bridge(eng.BASE_DIR)
@@ -1462,8 +1462,9 @@ if nav == "🔍 فحص متجر جديد":
                 st.info("لا توجد متاجر مربوطة على جهازك بعد. بعد أن يفعّل التاجر تطبيقك، اضغط «سحب المتاجر المربوطة».")
             for sz in stores_z:
                 with st.container(border=True):
-                    title_z = sz['name'] or sz['url'] or 'متجر مربوط (لم يُقرأ اسمه بعد)'
-                    st.markdown(f"**{title_z}**" + (f" — رقم المتجر {sz['id']}" if sz['id'] else ""))
+                    title_z = sz['name'] or sz.get('label') or sz['url'] or 'متجر مربوط (لم يُقرأ اسمه بعد)'
+                    st.markdown(f"**{title_z}** · {'سلة' if sz.get('platform') == 'salla' else 'زد'}"
+                                + (f" — رقم المتجر {sz['id']}" if sz['id'] else ""))
                     st.caption(f"تاريخ الربط: {sz['obtained'][:10] or '—'}")
                     c1z, c2z = st.columns(2)
                     if c1z.button("🧪 اختبار الاتصال", key=f"z_test_{sz['key']}", use_container_width=True):
@@ -1551,7 +1552,7 @@ elif nav == "🔗 المتاجر المربوطة":
             st.markdown(f"**{shown}**" + (f" — {sz['url']}" if sz['url'] else ""))
             k1, k2, k3 = st.columns(3)
             k1.metric("تاريخ الربط", sz['obtained'][:10] or '—')
-            k2.metric("المنصة", "زد")
+            k2.metric("المنصة", "سلة" if sz.get('platform') == 'salla' else "زد")
             k3.metric("نسبة التنفيذ", "—", help="تظهر بعد بناء التنفيذ على المتجر.")
             if not sz['name']:
                 l1, l2 = st.columns([3, 1])
