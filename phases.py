@@ -240,3 +240,14 @@ def fix_counts(text):
         return ar_counts(text)
     except Exception:
         return text
+
+
+def work_units(tables):
+    """حجم العمل: كل صفحة تحتاج عنواناً أو وصفاً (مرة واحدة)، وكل صورة، وكل رابط معطل."""
+    def ids(k):
+        t = tables.get(k)
+        return set() if t is None or t.empty or 'الرابط' not in t.columns else set(t['الرابط'].astype(str))
+    def n(k):
+        t = tables.get(k)
+        return 0 if t is None else len(t)
+    return len(ids('titles') | ids('descs')) + n('alt_missing') + n('alt_weak') + n('broken')
