@@ -451,7 +451,7 @@ def items_from_scan(df, exports):
             r = r.iloc[0]
         g = (lambda c: '' if r is None or str(r.get(c, '')) == 'nan' else str(r.get(c, '') or ''))
         from audit_engine import fixed_page_title
-        fixed = fixed_page_title(url, g('عنوان الميتا'), g('نوع الصفحة')) if 'title' in fields else ''
+        fixed = fixed_page_title(url, g('عنوان الميتا'), g('نوع الصفحة'), g('لغة الصفحة') or 'ar') if 'title' in fields else ''
         items.append({'id': url, 'fixed_title': fixed, 'type': g('نوع الصفحة'), 'name': g('اسم منظم') or g('اسم المنتج المعروض'),
                       'title': g('عنوان الميتا'), 'desc': g('وصف الميتا'), 'excerpt': g('_excerpt'),
                       'pdesc': g('_pdesc'), 'category': g('_category'), 'brand': g('_brand'), 'need': fields})
