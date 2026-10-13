@@ -1769,6 +1769,12 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
     pdf.set_text_color(*C_MUTED)
     if phase:
         terms = [t.format(phase=phase.get('phase_label', '')) for t in PT['terms']]
+        if phase.get('phase_label') in ('المشروع كاملاً', 'the full project'):     # فاتورة واحدة بلا مراحل
+            terms[1] = ('يبدأ العمل الفعلي فور تحويل المبلغ المستحق.' if rtl
+                        else 'Work begins once the amount due is transferred.')
+            terms[2] = terms[2].replace('تقرير المرحلة', 'التقرير النهائي').replace('إنجاز المرحلة', 'إنجاز العمل') \
+                .replace('the phase report', 'the final report').replace('of the phase', 'of the work')
+            terms[3] = terms[3].replace('مخرجات المرحلة', 'المخرجات').replace('the phase deliverables', 'the deliverables')
         pdf.set_font(FONT, "", 8)
         for k, t in enumerate(terms, 1):
             for j, line in enumerate(pdf.multi_cell(W, 4.2, fmt(f"{k}. {t}"), align=ALIGN, dry_run=True,
