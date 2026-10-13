@@ -189,7 +189,7 @@ def rules_text(t_min, t_max):
 1-ج. تجنب الحشو العام: «بكل سهولة»، «تجربة شراء مميزة»، «بجودة عالية»، «لا تفوت الفرصة»، «أنيق وفاخر» بلا سبب.
 مثال وصف مرفوض: «مبخرة خشبية بتصميم أنيق تناسب المجالس، تسوق الآن بكل سهولة وجودة عالية.»
 مثال وصف جيد: «مبخرة خشبية صغيرة مصنوعة يدوياً بنقش هندسي ملون، مناسبة لتبخير العود والبخور في المجلس والضيافة. اطلبها الآن من المتجر.»
-2. لا سعر ولا خصم ولا عرض ولا كوبون في العنوان أو الوصف: الأسعار والعروض تتغير.
+2. لا سعر ولا خصم ولا عرض ولا كوبون في العنوان أو الوصف: الأسعار والعروض تتغير. الاستثناء الوحيد: صفحة العروض أو التخفيضات نفسها، فاذكر أنها صفحة عروض دون أرقام أو نسب.
 3. ابدأ العنوان بالعبارة التي يبحث بها الزبون عن هذا المنتج أو القسم، ثم ما يميزه.
 4. لا تنسخ العنوان أو الوصف الحالي: اكتب صياغة جديدة أفضل.
 5. اكتب بلغة الصفحة نفسها (عربية فصحى سهلة، أو إنجليزية إن كانت الصفحة إنجليزية). لا رموز تعبيرية ولا علامات تنصيص.
@@ -224,9 +224,17 @@ def _same(a, b):
     return bool(na) and bool(nb) and (na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.8)
 
 
+_OFFER_PAGE_RE = re.compile(r'تخفيض|خصوم|عروض|العرض|sale|offers?|deals?|discount', re.I)
+
+
+def _is_offers_page(item):
+    return bool(_OFFER_PAGE_RE.search(' '.join(str(item.get(k, '')) for k in ('name', 'title', 'id'))))
+
+
 def check(item, title_full, desc, seen_titles, seen_descs, need):
     """يعيد (حالة، ملاحظات العنوان، ملاحظات الوصف). title_full: العنوان كما سيظهر في جوجل."""
     t_notes, d_notes = [], []
+    promo_ok = _is_offers_page(item)       # صفحة العروض نفسها: ذكر «العروض» مقبول (لا الأرقام)
     source = ' '.join(str(item.get(k, '')) for k in ('name', 'title', 'desc', 'excerpt', 'pdesc', 'category'))
     allowed = _numbers(source)
     if 'title' in need and item.get('fixed_title'):
@@ -241,7 +249,7 @@ def check(item, title_full, desc, seen_titles, seen_descs, need):
             t_notes.append('فيه رقم غير موجود في بيانات الصفحة')
         if _same(title_full, item.get('title')):
             t_notes.append('منسوخ من العنوان الحالي')
-        if _PROMO_RE.search(title_full or ''):
+        if _PROMO_RE.search(title_full or '') and not (promo_ok and not re.search(r'\d', title_full or '')):
             t_notes.append('فيه سعر أو عرض')
     if 'desc' in need:
         n = len(desc or '')
@@ -253,7 +261,7 @@ def check(item, title_full, desc, seen_titles, seen_descs, need):
             d_notes.append('فيه رقم غير موجود في بيانات الصفحة')
         if _same(desc, item.get('desc')):
             d_notes.append('منسوخ من الوصف الحالي')
-        if _PROMO_RE.search(desc or ''):
+        if _PROMO_RE.search(desc or '') and not (promo_ok and not re.search(r'\d+\s*(?:%|٪|ريال|ر\.?\s?س)', desc or '')):
             d_notes.append('فيه سعر أو عرض')
     status = STATUS_OK if not (t_notes or d_notes) else STATUS_REVIEW
     return status, t_notes, d_notes
@@ -532,6 +540,7 @@ def alt_rules():
 4. إن كانت بنراً أو إعلاناً فيه نص، اذكر رسالته الأساسية باختصار.
 5. صور المنتج الواحد المتعددة: اجعل وصف كل صورة مختلفاً بحسب ما يظهر فيها (زاوية، لون، تفصيل، استخدام).
 6. اكتب بلغة الصفحة (عربية فصحى سهلة، أو إنجليزية إن كانت الصفحة إنجليزية). لا رموز تعبيرية.
+7. لا تسمِّ نوع نبات أو زهرة أو شجرة أو صنف عسل أو طعام أو ماركة من الصورة وحدها: اذكره فقط إن ورد في "product". وإلا فصفه بما تراه بعبارة عامة صحيحة (زهرة صفراء صغيرة، شجرة خضراء كبيرة).
 أعد JSON فقط بالشكل: [{{"id": "...", "alt": "..."}}]"""
 
 
@@ -820,3 +829,12 @@ def apply_edits(base_dir, store_url, kind, edited_rows):
     if changed:
         save_cache(base_dir, store_url, cache)
     return changed
+
+
+
+def name_for(df, url):
+    """اسم الصفحة كما في الملفات (الصفحة الرئيسية، أو اسم المنتج، أو آخر جزء من الرابط)."""
+    rows = df[df['الرابط'] == url] if df is not None and 'الرابط' in df.columns else None
+    r = rows.iloc[0] if rows is not None and len(rows) else None
+    g = (lambda c: '' if r is None or str(r.get(c, '')) in ('nan', 'None') else str(r.get(c, '') or ''))
+    return page_name(url, g)
