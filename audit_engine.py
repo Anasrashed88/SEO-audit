@@ -711,6 +711,11 @@ import platform_salla as P_SALLA
 import platform_zid as P_ZID
 import platform_shopify as P_SHOPIFY
 PLATFORM_MODULES = (P_SALLA, P_ZID, P_SHOPIFY)
+_ACTIVE = {'mod': None}      # منصة المتجر الجاري فحصه: قواعدها الخاصة لا تمس فحص المنصات الأخرى
+
+
+def set_active_platform(platform):
+    _ACTIVE['mod'] = {'shopify': P_SHOPIFY}.get(platform)
 from platform_salla import (PLATFORM_ID_RE, PRODUCT_ID_RE, CATEGORY_ID_RE,  # noqa: E402
                             INFO_ID_RE, BRAND_ID_RE, ARTICLE_ID_RE)
 
@@ -832,6 +837,9 @@ def is_crawlable(url, base_netloc):
     if '/cdn-cgi/' in path or '/email-protection' in path:
         return False
     if is_product_subpage(url):
+        return False
+    mod = _ACTIVE['mod']
+    if mod is not None and hasattr(mod, 'skip_url') and mod.skip_url(url):
         return False
     return True
 
@@ -1519,6 +1527,9 @@ def image_stem(u):
     base = re.sub(r'\.(jpe?g|png|webp|avif|gif|bmp)$', '', base)
     base = re.sub(r'([-_@](\d{2,4}x\d{2,4}|\d{2,4}w|thumb(nail)?|small|medium|large|original|sm|md|lg|2x))+$',
                   '', base)
+    mod = _ACTIVE['mod']
+    if mod is not None and hasattr(mod, 'image_stem_extra'):
+        base = mod.image_stem_extra(base)
     return base
 
 
@@ -3087,19 +3098,24 @@ FIXED_PAGE_TITLES = [
     (('about', 'من-نحن', 'من نحن', 'about-us'), 'من نحن'),
 ]
 BLOG_INDEX_TITLE = 'المدونة'
+# للصفحات الإنجليزية: نفس الصفحات بأسمائها المعروفة بالإنجليزية (بنفس ترتيب القائمة العربية)
+FIXED_TITLES_EN = ['Privacy Policy', 'Refund Policy', 'Shipping Policy', 'Contact Us', 'Terms of Service', 'FAQ',
+                   'Complaints', 'About Us']
+BLOG_INDEX_TITLE_EN = 'Blog'
 
 
-def fixed_page_title(url, title='', page_type=''):
-    """العنوان الثابت لصفحات النظام والسياسات والمدونة، أو '' لغيرها."""
+def fixed_page_title(url, title='', page_type='', lang='ar'):
+    """العنوان الثابت لصفحات النظام والسياسات والمدونة، أو '' لغيرها. بالإنجليزية إن كانت الصفحة إنجليزية."""
+    en = str(lang or '').lower().startswith('en')
     if page_type in (T_PRODUCT, T_CATEGORY, T_HOME, T_BLOG):
         return ''
     segs = [x.lower() for x in url_segments(url)]
     if len(segs) == 1 and segs[0] in BLOG_SEGMENTS:
-        return BLOG_INDEX_TITLE
+        return BLOG_INDEX_TITLE_EN if en else BLOG_INDEX_TITLE
     hay = ' '.join(segs) + ' ' + unquote(str(url)).lower() + ' ' + str(title or '').lower()
-    for words, fixed in FIXED_PAGE_TITLES:
+    for i, (words, fixed) in enumerate(FIXED_PAGE_TITLES):
         if any(w in hay for w in words):
-            return fixed
+            return FIXED_TITLES_EN[i] if en else fixed
     return ''
 
 
@@ -3125,8 +3141,8 @@ def title_url_fix_mask(df):
         shared = set(counts[counts >= 2].index)
         m |= df['عنوان الميتا'].map(lambda x: str(x or '').strip() in shared)
     # الصفحات الثابتة (الشحن، الخصوصية، المدونة...): تُصلح فقط إن كان عنوانها بلا معنى
-    fixed = df.apply(lambda r: bool(fixed_page_title(r['الرابط'], r.get('عنوان الميتا', ''), r.get('نوع الصفحة', ''))),
-                     axis=1)
+    fixed = df.apply(lambda r: bool(fixed_page_title(r['الرابط'], r.get('عنوان الميتا', ''), r.get('نوع الصفحة', ''),
+                                                      r.get('لغة الصفحة', 'ar'))), axis=1)
     meaningless = df.apply(_title_meaningless, axis=1)
     m = (m & ~fixed) | (fixed & meaningless)
     return _avail_series(df) & m
@@ -4270,6 +4286,7 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
         platform = platform_hint          # المنصة اختارها المستخدم يدوياً
     elif is_ok(home_res):
         platform = detect_platform(home_res.text, dict(home_res.headers), base_url)
+    set_active_platform(platform)
 
     # 2. قراءة كل خرائط الموقع (مع الملفات والروابط التي أعطاها المستخدم)
     collector = SitemapCollector(base_url).run(sitemap_uploads, sitemap_inputs)
@@ -4324,6 +4341,7 @@ def discover_and_audit(base_url, max_pages=MAX_PAGES_DEFAULT, workers=4, progres
                 if res.get('platform_html') and platform == 'unknown':
                     if not platform_hint:
                         platform = detect_platform(res['platform_html'], res.get('platform_headers'), base_url)
+                        set_active_platform(platform)
                     if platform == 'shopify':
                         for su in harvest_shopify_all(base_url):
                             k = url_key(su)
@@ -4498,10 +4516,20 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
     say('cache_loaded', count=cached_before, enabled=bool(use_cache))
 
     say('discover_start')
+    set_active_platform(None)
     pages, imgs, crawl_meta, platform = discover_and_audit(
         target, max_pages, workers, (lambda st, **k: say(st, **k)),
         sitemap_uploads=sitemap_uploads, sitemap_inputs=sitemap_inputs, platform_hint=platform_hint)
     cat_products = crawl_meta.setdefault('cat_products', {})
+    # شوبيفاي: قائمة المنتجات الرسمية من /products.json (عددها ووصف كل منتج)
+    if platform == 'shopify':
+        try:
+            _prods = P_SHOPIFY.fetch_products(target, safe_get)
+        except Exception:
+            _prods = None
+        if _prods:
+            crawl_meta['shopify_count'] = len(_prods)
+            crawl_meta['shopify_desc'] = P_SHOPIFY.product_descriptions(_prods)
     sitemap_keys = crawl_meta.get('sitemap_keys', set())
     linked_keys = crawl_meta.get('linked_keys', set())
     collector = crawl_meta.get('collector')
@@ -4664,6 +4692,11 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
              and not is_product_subpage(r['الرابط'])]
     df = regrade_saved(regrade_lengths(dedupe_pages(pd.DataFrame(pages))), target)
     images_df = pd.DataFrame(imgs)
+    # شوبيفاي: نفس الصورة بأحجام مختلفة (photo_1600x وphoto_2000x) = صورة واحدة في نفس الصفحة
+    if platform == 'shopify' and not images_df.empty and 'رابط الصورة' in images_df.columns:
+        _pg = 'رابط الصفحة' if 'رابط الصفحة' in images_df.columns else None
+        images_df['_stem'] = images_df['رابط الصورة'].map(lambda u: urlparse(str(u)).netloc + '/' + image_stem(u))
+        images_df = images_df.drop_duplicates(subset=[c for c in (_pg, '_stem') if c]).drop(columns=['_stem'])
     if not images_df.empty:
         images_df = images_df[images_df['رابط الصفحة'].isin(df['الرابط'])].copy().reset_index(drop=True)
         # الحكم على وصف الصورة يُعاد من النص نفسه بمعايير الإصدار الحالي (حتى للصفحات المحفوظة)
@@ -4713,6 +4746,15 @@ def run_full_scan(target, max_pages=MAX_PAGES_DEFAULT, workers=4,
         if r.get('متاحة'):
             req_to_final[url_key(rq)] = url_key(r['الرابط'])
     crawl_meta['recon'] = reconcile_counts(df, col_.urls() if col_ is not None else [], target, req_to_final)
+    if crawl_meta.get('shopify_count'):          # الرقم الرسمي لعدد منتجات شوبيفاي
+        crawl_meta['recon']['store_total'] = crawl_meta['shopify_count']
+    if crawl_meta.get('shopify_desc') and '_pdesc' in df.columns:
+        descs = crawl_meta['shopify_desc']
+        for i, r in df[df['نوع الصفحة'] == T_PRODUCT].iterrows():
+            h = (url_segments(r['الرابط']) or [''])[-1].lower()
+            # وصف المنتج الكامل من شوبيفاي أدق من الوصف المختصر في الصفحة
+            if len(descs.get(h) or '') > len(str(r.get('_pdesc') or '')):
+                df.at[i, '_pdesc'] = descs[h]
     crawl_meta['cache_hits'] = _CACHE['hits']
     crawl_meta['cache_enabled'] = bool(use_cache)
     selfcheck = run_self_checks(df, images_df, coverage, platform, summary, crawl_meta, structured)
