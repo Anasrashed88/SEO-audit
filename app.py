@@ -915,13 +915,17 @@ if nav == "🔍 فحص متجر جديد":
             sel_services = pm2.multiselect("الخدمات المشمولة في عرض السعر والفواتير",
                                            list(SERVICE_LABELS), default=list(SERVICE_LABELS),
                                            format_func=lambda k: SERVICE_LABELS[k], key="price_services")
-            live_n = int(summary.get('live_pages', summary.get('total_pages', 0)) or 0)
-            pkg_def = package_for(live_n)
+            import phases as _ph
+            work_n = _ph.work_units(_ph.work_tables(build_filtered_exports(df, images_df, 'ar', platform)))
+            pkg_def = package_for(work_n)
             pkg_lbl = pkg_def['ar'] if lang == 'ar' else pkg_def['en']
             pkg_price = st.number_input(
-                f"سعر {pkg_def['ar']} ({live_n:,} صفحة)" + (" — حسب الطلب" if not pkg_def['price'] else ""),
+                f"سعر {pkg_def['ar']} (حجم العمل: {work_n:,} وحدة)" + (" — حسب الطلب" if not pkg_def['price'] else ""),
                 0.0, 1_000_000.0, float(pkg_def['price'] or 0.0), 10.0, key="pkg_price",
-                help="الباقات: حتى 100 صفحة 990، حتى 500 صفحة 1,990، حتى 1,500 صفحة 3,490، والأكبر حسب الطلب.")
+                help="حجم العمل = كل صفحة تحتاج عنواناً أو وصفاً (مرة واحدة) + كل صورة + كل رابط معطل. "
+                     "الباقات: حتى 100 وحدة 990، حتى 500 وحدة 1,990، حتى 1,500 وحدة 3,490، والأكثر حسب الطلب.")
+            pkg_articles = st.number_input("مقالات المدونة ضمن الباقة", 0, 200, int(pkg_def.get('articles') or 0), 1,
+                                           key="pkg_articles", help="تظهر في عرض السعر والفاتورة بالعدد فقط.")
             pc1, pc2, pc3, pc4 = st.columns(4)
             with pc1:
                 p_title = st.number_input("سعر عنوان الميتا + الرابط (ريال)",
@@ -945,7 +949,7 @@ if nav == "🔍 فحص متجر جديد":
                                      disabled=not use_disc)
             prices_now = {'meta_title': p_title, 'meta_desc': p_desc, 'image_alt': p_alt, 'broken_link_fix': p_broken}
             disc_now = (disc_pct / 100 if use_disc else 0.0)
-            pkg_now = ({'label': pkg_lbl, 'price': pkg_price}
+            pkg_now = ({'label': pkg_lbl, 'price': pkg_price, 'articles': pkg_articles}
                        if price_mode == "باقة شاملة" and pkg_price > 0 else None)
             if price_mode == "باقة شاملة" and not pkg_price:
                 st.warning("هذا المتجر أكبر من 1,500 صفحة: أدخل سعر الباقة يدوياً أعلاه.")
@@ -1123,7 +1127,9 @@ if nav == "🔍 فحص متجر جديد":
                                 if i == len(plist) - 1:     # آخر مرحلة تأخذ الباقي حتى يطابق المجموع سعر الباقة
                                     share = round(package_ph['price'] - sum(
                                         round(package_ph['price'] * r / ref_total, 0) for r in refs[:-1]), 0)
-                                pkg_i = {'label': package_ph['label'], 'price': share}
+                                # المقالات تظهر في فاتورة المرحلة الأولى فقط، حتى لا تتكرر
+                                pkg_i = {'label': package_ph['label'], 'price': share,
+                                         'articles': package_ph.get('articles', 0) if i == 0 else 0}
                             q_ph = build_quote(ph.phase_summary(pdata, platform), prices_ph, discount_rate=disc_ph,
                                                services=services_ph, package=pkg_i)
                             number = f"{order_no}-P{i + 1}" if n_real > 1 else f"{order_no}"
