@@ -1400,13 +1400,13 @@ if nav == "🔍 فحص متجر جديد":
                                     break
                                 v_ = sugg_ai.get(str(r_['الرابط'])) or {}
                                 txt_ = v_.get(fld) or v_.get('title', '')
-                                nm_key = str(r_.get('اسم المنتج المعروض') or r_['الرابط'])
+                                nm_key = ai.name_for(df, str(r_['الرابط']))
                                 if nm_key in seen_names or any(ai._same(txt_, o) for o in seen_txt):
                                     continue
                                 seen_names.add(nm_key)
                                 seen_txt.append(txt_)
-                                nm_ = str(r_.get('اسم المنتج المعروض') or '') or unquote(urlparse(str(r_['الرابط'])).path)
-                                rows_s.append((nm_ if nm_ != 'nan' else unquote(urlparse(str(r_['الرابط'])).path),
+                                nm_ = ai.name_for(df, str(r_['الرابط']))
+                                rows_s.append((nm_,
                                                '' if str(r_.get(cur_, '')) == 'nan' else str(r_.get(cur_, '')),
                                                v_.get(fld) or v_.get('title', '')))
                         if rows_s:
