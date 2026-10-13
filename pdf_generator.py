@@ -1288,20 +1288,21 @@ def volume_discount(units):
 
 # ---------- الباقات: سعر ثابت حسب حجم المتجر (عدد الصفحات التي تعمل) ----------
 PACKAGES = [
-    {'key': 'small', 'max_pages': 100, 'price': 990.0,
+    {'key': 'small', 'max_pages': 100, 'price': 990.0, 'articles': 5,
      'ar': 'باقة تهيئة المتجر الصغير', 'en': 'Small store optimisation package'},
-    {'key': 'medium', 'max_pages': 500, 'price': 1990.0,
+    {'key': 'medium', 'max_pages': 500, 'price': 1990.0, 'articles': 10,
      'ar': 'باقة تهيئة المتجر المتوسط', 'en': 'Medium store optimisation package'},
-    {'key': 'large', 'max_pages': 1500, 'price': 3490.0,
+    {'key': 'large', 'max_pages': 1500, 'price': 3490.0, 'articles': 15,
      'ar': 'باقة تهيئة المتجر الكبير', 'en': 'Large store optimisation package'},
 ]
-PACKAGE_CUSTOM = {'key': 'custom', 'max_pages': None, 'price': None,
+PACKAGE_CUSTOM = {'key': 'custom', 'max_pages': None, 'price': None, 'articles': 30,
                   'ar': 'باقة تهيئة المتجر الضخم', 'en': 'Enterprise store optimisation package'}
 SERVICE_KEYS = ('meta_title', 'meta_desc', 'image_alt', 'broken_link_fix')
 
 
 def package_for(pages):
-    """الباقة المناسبة لحجم المتجر. الأكبر من 1500 صفحة: «حسب الطلب» (السعر يُدخل يدوياً)."""
+    """الباقة المناسبة لحجم العمل (وحدات العمل: صفحات + صور + روابط تحتاج تحسيناً).
+    الأكبر من 1500 وحدة: «حسب الطلب» (السعر يُدخل يدوياً)."""
     for p in PACKAGES:
         if pages <= p['max_pages']:
             return dict(p)
@@ -1348,6 +1349,9 @@ def build_quote(summary, prices=None, discount_rate=0.0, services=None, package=
         pkg = {'label': package.get('label', ''), 'price': round(float(package['price']), 2)}
         for it in items:
             it['included'] = True
+        if int(package.get('articles') or 0) > 0:      # مقالات المدونة: ميزة الباقة، بالعدد فقط
+            items.append({'key': 'blog_articles', 'qty': int(package['articles']), 'unit': 0.0,
+                          'total': 0.0, 'included': True})
         subtotal = pkg['price']
     else:
         subtotal = reference
@@ -1377,6 +1381,7 @@ INVOICE_TXT = {
                        'من نتائج البحث',
         'image_alt': 'كتابة النصوص البديلة للصور',
         'image_alt_d': 'وصف دقيق لكل صورة يُظهرها في بحث صور جوجل',
+        'blog_articles': 'كتابة مقالات المدونة', 'blog_articles_d': '', 'unit_article': 'مقال',
         'broken_link_fix': 'معالجة الروابط التي لا تعمل',
         'broken_link_fix_d_zid': 'لكل رابط معطل: تحويل 301 إلى أقرب صفحة بديلة، وتصحيح الروابط '
                                  'الداخلية التي تقود إليه، مع التحقق من عمل كل تحويل',
@@ -1414,6 +1419,7 @@ INVOICE_TXT = {
         'image_alt': 'Image alt texts',
         'image_alt_d': 'A precise description per image so it appears in '
                        'Google Image search',
+        'blog_articles': 'Blog articles', 'blog_articles_d': '', 'unit_article': 'articles',
         'broken_link_fix': 'Broken link repair',
         'broken_link_fix_d_zid': 'For each broken URL: a 301 to the closest alternative page, '
                                  'internal links pointing to it corrected, and every redirect verified',
@@ -1641,7 +1647,7 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
     for idx, it in enumerate(quote['items']):
         name = T[it['key']]
         unit_lbl = {'image_alt': T['unit_img'], 'redirect_fix': T['unit_link'], 'broken_link_fix': T['unit_link'],
-                    'internal_link_fix': T['unit_link']}.get(it['key'], T['unit_page'])
+                    'internal_link_fix': T['unit_link'], 'blog_articles': T['unit_article']}.get(it['key'], T['unit_page'])
         pdf.set_font(FONT, "", 8.5)
         lines, cur = [], ""
         for word in T.get(it.get('desc_key') or '', T[it['key'] + '_d']).split():
@@ -1676,7 +1682,34 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
         pdf.set_text_color(*C_INK)
         pdf.set_xy(qty_x + (wq - qw) / 2, y + 2.6)
         pdf.cell(qw, 6.5, qtxt, 0, 0, 'C')
-        if it.get('included'):
+        if it.get('included') and it['key'] == 'blog_articles':
+            # هدية: شارة ذهبية فيها صندوق هدية مرسوم (لا رموز، فالخط لا يحتويها) وكلمة «هدية»
+            pdf.set_font(FONT, "", 8.5)
+            pdf.set_text_color(*C_MUTED)
+            pdf.set_xy(unit_x, y + 3.4)
+            pdf.cell(wu, 5, "-", 0, 0, 'C')
+            gold = (180, 120, 20)
+            lbl = fmt('هدية' if rtl else 'Gift')
+            pdf.set_font(FONT, B, 8.5)
+            pw = pdf.get_string_width(lbl) + 13
+            px = tot_x + (wt - pw) / 2
+            pdf.set_fill_color(253, 243, 220)
+            pdf.rect(px, y + 2.9, pw, 6, 'F', round_corners=True, corner_radius=3)
+            gx = (px + pw - 7.2) if rtl else (px + 2.4)       # الصندوق قبل الكلمة في اتجاه القراءة
+            gy = y + 4.1
+            pdf.set_draw_color(*gold)
+            pdf.set_line_width(0.3)
+            pdf.rect(gx, gy + 1.0, 4.4, 2.8)                     # جسم الصندوق
+            pdf.rect(gx - 0.3, gy + 0.2, 5.0, 0.9)               # الغطاء
+            pdf.line(gx + 2.2, gy + 0.2, gx + 2.2, gy + 3.8)     # الشريطة
+            pdf.line(gx + 2.2, gy + 0.2, gx + 1.1, gy - 0.6)     # العقدة
+            pdf.line(gx + 2.2, gy + 0.2, gx + 3.3, gy - 0.6)
+            pdf.set_line_width(0.2)
+            pdf.set_text_color(*gold)
+            tx_ = (px + 2) if rtl else (px + 8.5)
+            pdf.set_xy(tx_, y + 3.4)
+            pdf.cell(pw - 10.5, 5, lbl, 0, 0, 'C')
+        elif it.get('included'):
             pdf.set_font(FONT, "", 8.5)
             pdf.set_text_color(*C_MUTED)
             pdf.set_xy(unit_x, y + 3.4)
