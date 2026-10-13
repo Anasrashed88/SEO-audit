@@ -197,7 +197,7 @@ def phase_name(i, n, lang='ar'):
 
 
 # ---------- رسالة واتساب جاهزة ----------
-def whatsapp_message(client_name, store, phase, i, n, number, total, iban, bank, signer='أنس راشد'):
+def whatsapp_message(client_name, store, phase, i, n, number, total, iban, bank, signer='أنس راشد', currency='SAR'):
     c = phase_counts(phase)
     lines_ = []
     if c['titles']:
@@ -219,7 +219,7 @@ def whatsapp_message(client_name, store, phase, i, n, number, total, iban, bank,
 تشمل هذه {'المرحلة' if n > 1 else 'الفاتورة'}:
 {chr(10).join(lines_)}
 
-المبلغ المستحق: {total_txt} ريال
+المبلغ المستحق: {total_txt} {'دولار' if currency == 'USD' else 'ريال'}
 رقم الفاتورة: {number}
 
 بيانات التحويل:
