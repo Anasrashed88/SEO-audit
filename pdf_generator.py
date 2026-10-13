@@ -7,7 +7,10 @@ from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 
+from pathlib import Path
+
 from audit_engine import (
+    BASE_DIR,
     AR_FONT_NAME, FONT_PATH, FONT_BOLD_PATH, HAS_SHAPING, LOGO_PATH,
     RIYAL_PATH, PAGE_TYPE_LABEL, TITLE_MAX, TITLE_MIN_OPTIMAL, TITLE_MIN_OK,
     DESC_MAX, DESC_MIN_OPTIMAL, DESC_MIN_OK,
@@ -561,7 +564,7 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
             self.set_font(FONT, "", 8)
             self.set_text_color(*C_MUTED)
             self.set_x(M)
-            self.cell(W / 2, 8, "anasrashed.com", align="L" if rtl else "R")
+            self.cell(W / 2, 8, "anasrashed.com" if SETTINGS['show_contact'] else "", align="L" if rtl else "R")
             self.cell(W / 2, 8, fmt(T['page_of'].format(a=self.page_no())),
                       align="R" if rtl else "L")
 
@@ -891,7 +894,8 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
     pdf.set_text_color(203, 213, 225)
     pdf.cell(0, 5, fmt(T['prepared']), ln=True, align="C")
     pdf.set_text_color(94, 234, 212)
-    pdf.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+    if SETTINGS['show_contact']:
+        pdf.cell(0, 5, CONTACT_LINE, align="C")
     pdf.set_auto_page_break(True, margin=22)
 
     # ======================= النظرة العامة (رسوم بيانية) =======================
@@ -1443,6 +1447,10 @@ INVOICE_TXT = {
 
 
 FREELANCE_DOC = 'FL-486531330'
+# نسخة المنصات (Fiverr وUpwork): تمنع وسائل التواصل خارجها، فتُخفى منها كل الملفات
+SETTINGS = {'show_contact': True}
+CONTACT_LINE = "anasrashed.com   |   anas@anasrashed.com"
+USD_RATE = 3.75                       # الدولار = 3.75 ريال: الأسعار تُدخل بالريال وتُحوّل في الملفات
 PHASE_TXT = {
     'ar': {'no': 'رقم الفاتورة', 'doc': 'وثيقة عمل حر رقم: ' + FREELANCE_DOC, 'client': 'العميل', 'phone': 'الجوال', 'store': 'المتجر',
            'novat': 'مقدم الخدمة غير مسجل في ضريبة القيمة المضافة',
@@ -1463,7 +1471,26 @@ PHASE_TXT = {
 }
 
 
-def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
+def _usd_symbols():
+    """رمز الدولار من ملف المستودع: نقصّ الإطار حول الرمز، ونزيل الخلفية البيضاء، بنسختين داكنة وبيضاء."""
+    import re as _re
+    import tempfile
+    src = BASE_DIR / 'dollar-sign.svg'
+    if not src.exists():
+        return None, None
+    svg = src.read_text(encoding='utf-8')
+    svg = _re.sub(r'<rect[^>]*/?>(</rect>)?', '', svg)
+    svg = svg.replace('viewBox="0 0 96 96"', 'viewBox="38.4 28.4 19.2 39.2"').replace('width="96" height="96"',
+                                                                                     'width="19.2" height="39.2"')
+    out = []
+    for color in ('#64748b', '#ffffff'):
+        f = Path(tempfile.gettempdir()) / f'usd_{color[1:]}.svg'
+        f.write_text(_re.sub(r'fill="#[0-9A-Fa-f]{6}"', f'fill="{color}"', svg), encoding='utf-8')
+        out.append(str(f))
+    return out[0], out[1]
+
+
+def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None, currency='SAR'):
     """عرض سعر — أو فاتورة مرحلة إذا مُرّر phase:
     {'title', 'number', 'date', 'client_name', 'client_phone', 'phase_label'}"""
     """عرض سعر بصفحة واحدة: الهوية وبيانات التواصل أعلى، والمبالغ برمز الريال."""
@@ -1496,7 +1523,7 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
             self.ln(3)
             self.set_font(FONT, "", 9)
             self.set_text_color(*C_MUTED)
-            self.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+            self.cell(0, 5, CONTACT_LINE if SETTINGS['show_contact'] else "", align="C")
 
     pdf = _Invoice()
     if rtl:
@@ -1527,8 +1554,30 @@ def generate_invoice_pdf(domain, quote, lang='ar', store_name='', phase=None):
             sym_dark = str(RIYAL_PATH)
             sym_white = str(RIYAL_PATH)
 
+    usd = str(currency).upper() == 'USD'
+    usd_dark, usd_white = _usd_symbols() if usd else (None, None)
+
     def money(value, x, w, y, size=10, bold=False, color=C_MUTED, align='C', light=False):
-        """المبلغ مع رمز الريال: يسار الرقم في العربية، ويمينه في الإنجليزية."""
+        """المبلغ مع رمز الريال: يسار الرقم في العربية، ويمينه في الإنجليزية. الدولار: يسار الرقم دائماً."""
+        if usd and usd_dark:
+            v_ = value / USD_RATE
+            txt = f"{v_:,.0f}" if abs(v_ - round(v_)) < 0.005 or abs(v_) >= 100 else f"{v_:,.2f}"
+            pdf.set_font(FONT, B if bold else "", size)
+            pdf.set_text_color(*color)
+            sh = size * 0.36
+            sw = sh * 0.49
+            gap = 0.9
+            tw_ = pdf.get_string_width(txt)
+            total_ = tw_ + sw + gap
+            start_ = x + (w - total_) / 2 if align == 'C' else (x + w - total_ if align == 'R' else x)
+            lh = size * 0.5
+            try:
+                pdf.image(usd_white if light else usd_dark, x=start_, y=y + (lh - sh) / 2 + 0.2, h=sh, w=sw)
+            except Exception:
+                pass
+            pdf.set_xy(start_ + sw + gap, y)
+            pdf.cell(tw_, lh, txt, 0, 0, 'L')
+            return
         txt = f"{value:,.0f}"
         pdf.set_font(FONT, B if bold else "", size)
         pdf.set_text_color(*color)
@@ -1854,7 +1903,7 @@ def generate_sample_pdf(domain, sections, lang='ar', total_items=0):
             self.ln(3)
             self.set_font(FONT, "", 9)
             self.set_text_color(*C_MUTED)
-            self.cell(0, 5, "anasrashed.com   |   anas@anasrashed.com", align="C")
+            self.cell(0, 5, CONTACT_LINE if SETTINGS['show_contact'] else "", align="C")
 
     pdf = _Sample()
     if rtl:
