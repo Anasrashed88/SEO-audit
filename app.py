@@ -184,6 +184,12 @@ with st.sidebar:
         "منصة المتجر", ["تلقائي (موصى به)", "زد", "شوبيفاي", "سلة"], index=0,
         help="التلقائي يكتشف المنصة من صفحة المتجر. اختر المنصة يدوياً فقط إذا أخطأ الاكتشاف.")
     platform_hint = {"زد": "zid", "شوبيفاي": "shopify", "سلة": "salla"}.get(platform_choice)
+    marketplace_mode = st.checkbox(
+        "نسخة المنصات (Fiverr وUpwork)", value=False, key="marketplace_mode",
+        help="تُخفي الموقع والبريد من التقرير والعينة وعرض السعر والفاتورة، "
+             "لأن المنصات تمنع وسائل التواصل خارجها قبل بدء الطلب.")
+    import pdf_generator as _pg
+    _pg.SETTINGS['show_contact'] = not marketplace_mode
     use_cache = st.checkbox(
         "استكمال من الفحص السابق (آخر 24 ساعة)", value=True,
         help="كل صفحة تُفحص تُحفظ فوراً. عند إعادة فحص نفس المتجر تؤخذ الصفحات الناجحة "
@@ -926,6 +932,10 @@ if nav == "🔍 فحص متجر جديد":
                      "الباقات: حتى 100 وحدة 990، حتى 500 وحدة 1,990، حتى 1,500 وحدة 3,490، والأكثر حسب الطلب.")
             pkg_articles = st.number_input("مقالات المدونة ضمن الباقة", 0, 200, int(pkg_def.get('articles') or 0), 1,
                                            key="pkg_articles", help="تظهر في عرض السعر والفاتورة بالعدد فقط.")
+            cur_lbl = st.radio("العملة في عرض السعر والفاتورة", ["ريال سعودي", "دولار أمريكي"], horizontal=True,
+                               key="price_currency",
+                               help="الأسعار تُدخل بالريال دائماً، وتُحوّل للدولار في الملفات (الدولار = 3.75 ريال).")
+            currency_now = 'USD' if cur_lbl == "دولار أمريكي" else 'SAR'
             pc1, pc2, pc3, pc4 = st.columns(4)
             with pc1:
                 p_title = st.number_input("سعر عنوان الميتا + الرابط (ريال)",
@@ -957,7 +967,7 @@ if nav == "🔍 فحص متجر جديد":
                                 services=sel_services or None, package=pkg_now)
             # الإعدادات نفسها تُستخدم في تبويب المراحل والفواتير
             st.session_state.pricing = {'prices': prices_now, 'disc': disc_now, 'services': sel_services,
-                                        'package': pkg_now, 'pkg_label': pkg_lbl}
+                                        'package': pkg_now, 'pkg_label': pkg_lbl, 'currency': currency_now}
             if price_mode == "خدمات منفردة" and pkg_def['price'] and quote['total'] > pkg_def['price']:
                 st.info(f"💡 سعر الخدمات المختارة ({quote['total']:,.0f}) أعلى من {pkg_def['ar']} "
                         f"({pkg_def['price']:,.0f}) التي تشمل كل شيء. اعرض الباقة على العميل.")
@@ -969,7 +979,8 @@ if nav == "🔍 فحص متجر جديد":
             qc[2].metric("صور تحتاج وصفاً",
                          f"{summary.get('missing_alts', 0) + summary.get('weak_alts', 0)}")
             qc[3].metric("روابط تحتاج معالجة", f"{summary.get('broken_actionable', 0)}")
-            qc[4].metric("الإجمالي المستحق", f"{quote['total']:,.0f}",
+            qc[4].metric("الإجمالي المستحق", (f"${quote['total'] / 3.75:,.0f}" if currency_now == 'USD'
+                                              else f"{quote['total']:,.0f}"),
                          help=(f"القيمة بالتسعير الفردي: {quote['reference']:,.0f}" if quote.get('package') else None))
             if quote['discount']:
                 st.caption(f"شمل خصماً {int(quote['discount_rate'] * 100)}% "
@@ -979,7 +990,7 @@ if nav == "🔍 فحص متجر جديد":
                 st.caption("الأسعار غير شاملة ضريبة القيمة المضافة")
             try:
                 inv_bytes = generate_invoice_pdf(st.session_state.current_url,
-                                                 quote, lang)
+                                                 quote, lang, currency=currency_now)
             except Exception as e:
                 inv_bytes = None
                 st.error(f"تعذّر توليد الفاتورة: {e}")
@@ -1142,10 +1153,13 @@ if nav == "🔍 فحص متجر جديد":
                                 'total': q_ph['total'], 'number': number,
                                 'task': ph.task_file(pdata, i + 1, n_real),
                                 'invoice': generate_invoice_pdf(st.session_state.current_url, q_ph, ph_lang,
-                                                                phase=info),
+                                                                phase=info,
+                                                                currency=pricing_ph.get('currency', 'SAR')),
                                 'msg': ph.whatsapp_message(client_name, netloc_ph, pdata, i, n_real, number,
-                                                           q_ph['total'], generate_invoice_pdf.__globals__[
-                                                               'PAYMENT']['iban'], 'STC Bank')})
+                                                           (q_ph['total'] / 3.75 if pricing_ph.get('currency') == 'USD'
+                                                            else q_ph['total']), generate_invoice_pdf.__globals__[
+                                                               'PAYMENT']['iban'], 'STC Bank',
+                                                           currency=pricing_ph.get('currency', 'SAR'))})
                         st.session_state.ph_results = {'sig': sig, 'items': items_ph, 'order': order_no,
                                                        'netloc': netloc_ph}
                     except Exception as e:
