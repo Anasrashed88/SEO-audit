@@ -925,13 +925,20 @@ if nav == "🔍 فحص متجر جديد":
             work_n = _ph.work_units(_ph.work_tables(build_filtered_exports(df, images_df, 'ar', platform)))
             pkg_def = package_for(work_n)
             pkg_lbl = pkg_def['ar'] if lang == 'ar' else pkg_def['en']
-            pkg_price = st.number_input(
-                f"سعر {pkg_def['ar']} (حجم العمل: {work_n:,} وحدة)" + (" — حسب الطلب" if not pkg_def['price'] else ""),
-                0.0, 1_000_000.0, float(pkg_def['price'] or 0.0), 10.0, key="pkg_price",
-                help="حجم العمل = كل صفحة تحتاج عنواناً أو وصفاً (مرة واحدة) + كل صورة + كل رابط معطل. "
-                     "الباقات: حتى 100 وحدة 990، حتى 500 وحدة 1,990، حتى 1,500 وحدة 3,490، والأكثر حسب الطلب.")
-            pkg_articles = st.number_input("مقالات المدونة ضمن الباقة", 0, 200, int(pkg_def.get('articles') or 0), 1,
-                                           key="pkg_articles", help="تظهر في عرض السعر والفاتورة بالعدد فقط.")
+            over_limit = not pkg_def['price']       # أكثر من 1,500 وحدة: تسعير مفرد تلقائياً، بلا باقة
+            if over_limit:
+                pkg_price, pkg_articles = 0.0, 0
+                st.info(f"حجم العمل {work_n:,} وحدة، أي أكثر من 1,500: يُحسب **بالتسعير المفرد** تلقائياً "
+                        "(عنوان، ووصف، وصورة، ورابط، كلٌّ بسعره).")
+            else:
+                pkg_price = st.number_input(
+                    f"سعر {pkg_def['ar']} (حجم العمل: {work_n:,} وحدة)",
+                    0.0, 1_000_000.0, float(pkg_def['price']), 10.0, key="pkg_price",
+                    help="حجم العمل = كل صفحة تحتاج عنواناً أو وصفاً (مرة واحدة) + كل صورة + كل رابط معطل. "
+                         "الباقات: حتى 100 وحدة 990، حتى 500 وحدة 1,990، حتى 1,500 وحدة 3,490. "
+                         "والأكثر من 1,500 بالتسعير المفرد.")
+                pkg_articles = st.number_input("مقالات المدونة ضمن الباقة", 0, 200, int(pkg_def.get('articles') or 0), 1,
+                                               key="pkg_articles", help="تظهر في عرض السعر والفاتورة بالعدد فقط.")
             cur_lbl = st.radio("العملة في عرض السعر والفاتورة", ["ريال سعودي", "دولار أمريكي"], horizontal=True,
                                key="price_currency",
                                help="الأسعار تُدخل بالريال دائماً، وتُحوّل للدولار في الملفات (الدولار = 3.75 ريال).")
@@ -961,14 +968,12 @@ if nav == "🔍 فحص متجر جديد":
             disc_now = (disc_pct / 100 if use_disc else 0.0)
             pkg_now = ({'label': pkg_lbl, 'price': pkg_price, 'articles': pkg_articles}
                        if price_mode == "باقة شاملة" and pkg_price > 0 else None)
-            if price_mode == "باقة شاملة" and not pkg_price:
-                st.warning("هذا المتجر أكبر من 1,500 صفحة: أدخل سعر الباقة يدوياً أعلاه.")
             quote = build_quote(summary, prices_now, discount_rate=disc_now,
                                 services=sel_services or None, package=pkg_now)
             # الإعدادات نفسها تُستخدم في تبويب المراحل والفواتير
             st.session_state.pricing = {'prices': prices_now, 'disc': disc_now, 'services': sel_services,
                                         'package': pkg_now, 'pkg_label': pkg_lbl, 'currency': currency_now}
-            if price_mode == "خدمات منفردة" and pkg_def['price'] and quote['total'] > pkg_def['price']:
+            if price_mode == "خدمات منفردة" and not over_limit and quote['total'] > pkg_def['price']:
                 st.info(f"💡 سعر الخدمات المختارة ({quote['total']:,.0f}) أعلى من {pkg_def['ar']} "
                         f"({pkg_def['price']:,.0f}) التي تشمل كل شيء. اعرض الباقة على العميل.")
             qc = st.columns(5)
