@@ -44,6 +44,93 @@ def save_key(base_dir, key):
     key_path(base_dir).write_text((key or '').strip(), encoding='utf-8')
 
 
+# ---------------- Claude (Anthropic) ----------------
+CLAUDE_API = 'https://api.anthropic.com/v1/messages'
+CLAUDE_MODELS = ['claude-sonnet-5-5']      # Sonnet 5.5: جودة عالية للعربية والصور، ورد فوري
+CLAUDE_MAX_EDGE = 1568                      # أكبر ضلع للصورة: ما فوقه يرفع التكلفة دون فائدة
+
+
+def claude_key_path(base_dir):
+    return Path(base_dir) / '.claude_key'
+
+
+def load_claude_key(base_dir):
+    p = claude_key_path(base_dir)
+    return p.read_text(encoding='utf-8').strip() if p.exists() else ''
+
+
+def save_claude_key(base_dir, key):
+    claude_key_path(base_dir).write_text((key or '').strip(), encoding='utf-8')
+
+
+def is_claude(model):
+    return str(model or '').startswith('claude')
+
+
+def _key_for(model, key, base_dir):
+    """المفتاح المناسب للنموذج: Claude بمفتاحه، وGemini بمفتاحه."""
+    return load_claude_key(base_dir) if is_claude(model) else key
+
+
+def _generate_claude(key, model, prompt, session=None, extra_parts=None, system=None):
+    """طلب لـ Claude: القواعد في «system» مع التخزين المؤقت (تُقرأ من الذاكرة بسعر أقل في كل دفعة).
+    لا نرسل temperature: نماذج Claude الأحدث ترفضه."""
+    http = session or requests
+    content = [{'type': 'text', 'text': prompt}]
+    for p in extra_parts or []:
+        if 'text' in p:
+            content.append({'type': 'text', 'text': p['text']})
+        elif 'inline_data' in p:
+            content.append({'type': 'image', 'source': {'type': 'base64', 'media_type': p['inline_data']['mime_type'],
+                                                        'data': p['inline_data']['data']}})
+    body = {'model': model, 'max_tokens': 8000, 'messages': [{'role': 'user', 'content': content}]}
+    if system:
+        body['system'] = [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}]
+    headers = {'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'}
+    busy_waits = [5, 15, 30, 60]
+    for attempt in range(len(busy_waits) + 1):
+        try:
+            r = http.post(CLAUDE_API, json=body, headers=headers, timeout=180)
+        except requests.exceptions.RequestException:
+            if attempt < len(busy_waits):
+                time.sleep(busy_waits[attempt])
+                continue
+            raise QuotaExhausted('تعذّر الاتصال بخوادم Claude. تحقق من الإنترنت، ثم أكمل وسيُكمل من حيث توقف.')
+        code = r.status_code
+        if code == 429:
+            try:
+                delay = float((getattr(r, 'headers', {}) or {}).get('retry-after') or 30)
+            except Exception:
+                delay = 30.0
+            if delay > 70 or attempt >= 2:
+                raise QuotaExhausted('وصلت حد الطلبات في حساب Claude الآن. أكمل بعد قليل، وسيُكمل من حيث توقف.')
+            time.sleep(delay + 1)
+            continue
+        if code in (500, 502, 503, 504, 529):
+            if attempt < len(busy_waits):
+                time.sleep(busy_waits[attempt])
+                continue
+            raise QuotaExhausted('خوادم Claude مشغولة الآن (خطأ مؤقت منهم). حاول بعد دقائق، وسيُكمل من حيث توقف.')
+        if code in (401, 403):
+            raise ValueError('مفتاح Claude غير صحيح أو غير مفعّل.')
+        if code >= 400:
+            try:
+                msg = str((r.json().get('error') or {}).get('message') or '')[:160]
+            except Exception:
+                msg = ''
+            if 'credit' in msg.lower() or 'balance' in msg.lower():
+                raise QuotaExhausted('رصيد حساب Claude لا يكفي. اشحن الرصيد من console.anthropic.com، ثم أكمل.')
+            raise ValueError(f'رفض Claude الطلب ({code}){": " + msg if msg else ""}.')
+        data = r.json()
+        return ''.join(b.get('text', '') for b in data.get('content', []) if b.get('type') == 'text') or '[]'
+    return '[]'
+
+
+def test_claude_key(key, session=None):
+    _generate_claude(key, CLAUDE_MODELS[0], 'Reply with JSON only: {"ok": true}', session)
+    return CLAUDE_MODELS[0]
+
+
 # ---------------- اختيار النموذج ----------------
 _MODEL_CACHE = {}
 
@@ -83,7 +170,11 @@ def pick_model(key, session=None):
     return best
 
 
-def _generate(key, model, prompt, session=None, extra_parts=None):
+def _generate(key, model, prompt, session=None, extra_parts=None, system=None):
+    if is_claude(model):
+        return _generate_claude(key, model, prompt, session, extra_parts, system)
+    if system:
+        prompt = system + prompt              # Gemini: القواعد والبيانات في رسالة واحدة كما كانت
     http = session or requests
     body = {'contents': [{'role': 'user', 'parts': [{'text': prompt}] + list(extra_parts or [])}],
             'generationConfig': {'temperature': 0.5, 'responseMimeType': 'application/json'}}
@@ -370,9 +461,11 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
     seen_d = {v.get('description', '').strip() for v in sugg.values()}
     done, stopped = 0, None
 
-    def call(prompt):
+    key = _key_for(model, key, base_dir)
+
+    def call(system, prompt):
         _count_request(base_dir, model)
-        return _parse(_generate(key, model, prompt, session))
+        return _parse(_generate(key, model, prompt, session, system=system))
 
     # صفحات ثابتة تحتاج عنواناً فقط: لا حاجة للنموذج أصلاً
     for it in [x for x in todo if x.get('fixed_title') and set(x.get('need', need)) == {'title'}]:
@@ -385,7 +478,7 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
     for start in range(0, len(todo), BATCH):
         batch = todo[start:start + BATCH]
         try:
-            out = call(rules + '\n\nبيانات الصفحات:\n' + json.dumps([_item_payload(it) for it in batch],
+            out = call(rules, '\n\nبيانات الصفحات:\n' + json.dumps([_item_payload(it) for it in batch],
                                                                       ensure_ascii=False))
             retry = []
             for it in batch:
@@ -404,7 +497,7 @@ def generate(items, key, store_name, base_dir, store_url, model, need=('title', 
                         hint.append(f'الوصف طوله {len(d.get("description", ""))}؛ المطلوب بين {DESC_MIN} و{DESC_MAX}')
                     retry.append((it, tn + dn + hint))
             if retry:
-                out.update(call(rules + '\n\nأعد كتابة هذه الصفحات فقط، وتجنب المخالفات المذكورة لكل صفحة:\n' +
+                out.update(call(rules, '\n\nأعد كتابة هذه الصفحات فقط، وتجنب المخالفات المذكورة لكل صفحة:\n' +
                                 json.dumps([{**_item_payload(it), 'problems': notes} for it, notes in retry],
                                            ensure_ascii=False)))
         except QuotaExhausted as q:
@@ -544,7 +637,7 @@ def alt_rules():
 أعد JSON فقط بالشكل: [{{"id": "...", "alt": "..."}}]"""
 
 
-def _fetch_image(url, session=None):
+def _fetch_image(url, session=None, max_edge=None):
     """تحميل الصورة من المتجر لإرسالها للنموذج. يعيد (نوعها، محتواها بترميز base64) أو None."""
     import base64
     http = session or requests
@@ -559,6 +652,21 @@ def _fetch_image(url, session=None):
             mime = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}.get(ext, '')
         if mime not in IMG_TYPES or not data or len(data) > 7_000_000:
             return None
+        if max_edge:
+            try:
+                import io as _io
+                from PIL import Image as _Img
+                im = _Img.open(_io.BytesIO(data))
+                if max(im.size) > max_edge:
+                    im.thumbnail((max_edge, max_edge))
+                    buf = _io.BytesIO()
+                    fmt = 'PNG' if mime == 'image/png' else 'JPEG'
+                    (im if fmt == 'PNG' else im.convert('RGB')).save(buf, fmt, quality=88)
+                    data, mime = buf.getvalue(), ('image/png' if fmt == 'PNG' else 'image/jpeg')
+            except Exception:
+                pass
+            if len(data) > 3_700_000:          # حد Claude للصورة الواحدة
+                return None
         return mime, base64.b64encode(data).decode()
     except Exception:
         return None
@@ -611,7 +719,8 @@ def items_from_images(exports, df):
 def generate_alts(items, key, base_dir, store_url, model, regenerate=False, progress=None, session=None,
                   max_items=None, fetch=None):
     """يكتب النص البديل لكل صورة وهو يراها. يحفظ كل دفعة فور إنجازها، ويكمل من حيث توقف."""
-    fetch = fetch or (lambda u: _fetch_image(u, session))
+    fetch = fetch or (lambda u: _fetch_image(u, session, max_edge=CLAUDE_MAX_EDGE if is_claude(model) else None))
+    key = _key_for(model, key, base_dir)
     cache = load_cache(base_dir, store_url)
     locked = store_model(cache)
     if locked and locked != model and not regenerate:
@@ -646,7 +755,7 @@ def generate_alts(items, key, base_dir, store_url, model, regenerate=False, prog
         if sent:
             try:
                 _count_request(base_dir, model)
-                out = _parse(_generate(key, model, rules + '\n\nالصور (كل صورة بعد بياناتها):', session, parts))
+                out = _parse(_generate(key, model, '\n\nالصور (كل صورة بعد بياناتها):', session, parts, system=rules))
             except QuotaExhausted as q:
                 stopped = str(q)
                 break
