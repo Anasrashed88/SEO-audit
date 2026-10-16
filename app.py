@@ -1206,27 +1206,36 @@ if nav == "🔍 فحص متجر جديد":
             st.caption("يكتب Gemini عنواناً ووصفاً لكل صفحة تحتاجهما، من بيانات الصفحة فقط، ثم تتحقق الأداة "
                        "من كل اقتراح: الطول، والتكرار، وعدم اختراع أرقام. أنت تراجع وتعتمد.")
             api_key = ai.load_key(eng.BASE_DIR)
-            if not api_key:
-                st.info("أدخل مفتاح Gemini مرة واحدة. يُحفظ على جهازك فقط، ولا يُرفع إلى GitHub.")
-                kc1, kc2 = st.columns([3, 1])
-                new_key = kc1.text_input("مفتاح Gemini", type="password", key="gem_key_in")
-                if kc2.button("حفظ المفتاح", use_container_width=True) and new_key.strip():
-                    ai.save_key(eng.BASE_DIR, new_key)
-                    st.rerun()
+            claude_key = ai.load_claude_key(eng.BASE_DIR)
+            with st.expander("🔑 مفاتيح الذكاء الاصطناعي" + (" ✓" if (api_key or claude_key) else ""),
+                             expanded=not (api_key or claude_key)):
+                st.caption("تُحفظ على جهازك فقط، ولا تُرفع إلى GitHub. يكفي مفتاح واحد منهما.")
+                for prov, has_key, path_fn, save_fn, test_fn, kname in (
+                        ("Gemini", api_key, ai.key_path, ai.save_key, ai.test_key, "gem"),
+                        ("Claude", claude_key, ai.claude_key_path, ai.save_claude_key, ai.test_claude_key, "cl")):
+                    if not has_key:
+                        k1, k2 = st.columns([3, 1])
+                        nk = k1.text_input(f"مفتاح {prov}", type="password", key=f"{kname}_key_in")
+                        if k2.button(f"حفظ مفتاح {prov}", use_container_width=True, key=f"{kname}_save") and nk.strip():
+                            save_fn(eng.BASE_DIR, nk)
+                            st.session_state.pop('gem_models', None)
+                            st.rerun()
+                    else:
+                        k1, k2, k3 = st.columns([2, 1, 1])
+                        k1.success(f"مفتاح {prov} محفوظ ✓")
+                        if k2.button("اختبار", use_container_width=True, key=f"{kname}_test"):
+                            try:
+                                st.success(f"المفتاح يعمل. النموذج: {test_fn(has_key)}")
+                            except Exception as e:
+                                st.error(f"المفتاح لا يعمل: {e}")
+                            st.session_state.pop('gem_models', None)
+                        if k3.button("تغيير", use_container_width=True, key=f"{kname}_change"):
+                            path_fn(eng.BASE_DIR).unlink(missing_ok=True)
+                            st.session_state.pop('gem_models', None)
+                            st.rerun()
+            if not (api_key or claude_key):
+                st.info("أدخل مفتاح Gemini أو Claude أعلاه للبدء.")
             else:
-                kc1, kc2, kc3 = st.columns([2, 1, 1])
-                kc1.success("مفتاح Gemini محفوظ على جهازك ✓")
-                if kc2.button("اختبار المفتاح", use_container_width=True):
-                    try:
-                        st.session_state.gem_model = ai.test_key(api_key)
-                        st.success(f"المفتاح يعمل. النموذج المستخدم: {st.session_state.gem_model}")
-                    except Exception as e:
-                        st.error(f"المفتاح لا يعمل: {e}")
-                    st.session_state.pop('gem_models', None)
-                if kc3.button("تغيير المفتاح", use_container_width=True):
-                    ai.key_path(eng.BASE_DIR).unlink(missing_ok=True)
-                    st.rerun()
-
                 exports_ai = build_filtered_exports(df, images_df, 'ar', platform)
                 items_ai = ai.items_from_scan(df, exports_ai)
                 cache_ai = ai.load_cache(eng.BASE_DIR, st.session_state.current_url)
@@ -1235,18 +1244,21 @@ if nav == "🔍 فحص متجر جديد":
 
                 # النموذج: تختاره مرة، ويثبت لهذا المتجر حتى آخر اقتراح (لا تتفاوت الجودة)
                 if 'gem_models' not in st.session_state:
-                    try:
-                        st.session_state.gem_models = ai.list_models(api_key)
-                    except Exception as e:
-                        st.session_state.gem_models = []
-                        st.error(f"تعذّر جلب النماذج: {e}")
-                models_ai = st.session_state.gem_models or ([locked_ai] if locked_ai else [])
+                    st.session_state.gem_models = []
+                    if api_key:
+                        try:
+                            st.session_state.gem_models = ai.list_models(api_key)
+                        except Exception as e:
+                            st.error(f"تعذّر جلب نماذج Gemini: {e}")
+                # Claude أولاً إن وُجد مفتاحه (الأقوى في العربية والصور)، ثم نماذج Gemini
+                models_ai = ((ai.CLAUDE_MODELS if claude_key else []) + st.session_state.gem_models) \
+                    or ([locked_ai] if locked_ai else [])
                 if locked_ai and not st.session_state.get('ai_regen'):
                     model_ai = locked_ai
                     st.info(f"النموذج الثابت لهذا المتجر: **{locked_ai}**. يكمل به كل الاقتراحات حتى لا تتفاوت الجودة. "
                             "لتغييره: فعّل «إعادة توليد الكل من جديد» بالأسفل، فتظهر قائمة النماذج.")
                 elif models_ai:
-                    dm = ai.default_model(models_ai)
+                    dm = ai.CLAUDE_MODELS[0] if claude_key else ai.default_model(models_ai)
                     model_ai = st.selectbox("النموذج (يثبت لهذا المتجر من أول توليد)", models_ai,
                                             index=models_ai.index(dm) if dm in models_ai else 0, key="ai_model")
                 else:
