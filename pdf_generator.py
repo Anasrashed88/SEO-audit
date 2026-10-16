@@ -1236,6 +1236,16 @@ def generate_client_pdf(domain, score, stats, lang='ar'):
             pdf.set_xy((M + 4) if rtl else (M + 4 + d + 4), y + 3 + i * 5)
             pdf.cell(W - 22, 5, fmt(line), align=ALIGN)
         pdf.set_y(y + h + 1.8)
+    # ملاحظة التداخل: حتى لا يجمع التاجر البنود ويظن أن العدد أكبر من عرض السعر
+    if len(points) > 1:
+        note = ('قد تجد الصفحة نفسها في أكثر من بند، لأن فيها أكثر من مشكلة. وفي عرض السعر تُحسب مرة واحدة فقط.'
+                if rtl else 'You may see the same page under more than one item, because it has more than one issue. '
+                            'In the quote, each page is counted only once.')
+        pdf.set_font(FONT, "", 8.5)
+        pdf.set_text_color(*C_MUTED)
+        for line in pdf.wrap(note, W - 8, 8.5):
+            pdf.set_x(M + 4)
+            pdf.cell(W - 8, 4.6, fmt(line), ln=True, align=ALIGN)
     pdf.ln(4)
 
     lines = pdf.wrap(close, W - 16, 9.8)
