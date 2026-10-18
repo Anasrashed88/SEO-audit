@@ -249,10 +249,53 @@ def _test_salla(base_dir, store_key, session=None):
     return result
 
 
+SHOPIFY_API_VERSION = '2026-10'
+_SHOPIFY_TEST_QUERY = """{ shop { name primaryDomain { url } }
+  products(first: 5) { nodes { id title handle seo { title description }
+    media(first: 3) { nodes { alt } } } } }"""
+
+
+def _test_shopify(base_dir, store_key, session=None):
+    """شوبيفاي: واجهة GraphQL بمفتاح المتجر (X-Shopify-Access-Token)."""
+    http = session or requests
+    t, st = _tokens(base_dir, store_key)
+    shop = str(st.get('id') or '')
+    result = {'store': {'id': shop, 'name': st.get('name', ''), 'url': st.get('url', '')},
+              'products': [], 'product_fields': None, 'profile_status': None, 'products_status': None,
+              'tokens': _token_report(t), 'scheme': 'X-Shopify-Access-Token (شوبيفاي)', 'error_detail': '', 'attempts': {}}
+    r = http.post(f'https://{shop}/admin/api/{SHOPIFY_API_VERSION}/graphql.json',
+                  json={'query': _SHOPIFY_TEST_QUERY},
+                  headers={'X-Shopify-Access-Token': _clean(t.get('access_token')), 'Content-Type': 'application/json'},
+                  timeout=40)
+    result['profile_status'] = result['products_status'] = r.status_code
+    try:
+        body = r.json()
+    except Exception:
+        body = {}
+    data = body.get('data') or {}
+    sh = data.get('shop') or {}
+    if sh:
+        result['store'].update({'name': sh.get('name') or result['store']['name'],
+                                'url': (sh.get('primaryDomain') or {}).get('url') or result['store']['url']})
+    nodes = ((data.get('products') or {}).get('nodes')) or []
+    for n in nodes[:5]:
+        result['products'].append({'id': n.get('id'), 'name': n.get('title'), 'slug': n.get('handle')})
+    if nodes:
+        result['product_fields'] = _shape(nodes[0])
+    errs = body.get('errors')
+    if errs:
+        result['error_detail'] = str(errs[0].get('message') if isinstance(errs, list) and errs and isinstance(errs[0], dict)
+                                     else errs)[:160]
+    return result
+
+
 def test_connection(base_dir, store_key, session=None):
     try:
-        if json.loads((_tokens_dir(base_dir) / f'{store_key}.json').read_text(encoding='utf-8')).get('platform') == 'salla':
+        _plat = json.loads((_tokens_dir(base_dir) / f'{store_key}.json').read_text(encoding='utf-8')).get('platform')
+        if _plat == 'salla':
             return _test_salla(base_dir, store_key, session)
+        if _plat == 'shopify':
+            return _test_shopify(base_dir, store_key, session)
     except FileNotFoundError:
         raise ValueError('مفاتيح هذا المتجر غير موجودة على جهازك. اسحب المتاجر من جديد.')
     """يختبر الاتصال: يجرّب طرق إرسال المفاتيح، ثم اسم المتجر، وأول خمسة منتجات، وأسماء حقول المنتج."""
