@@ -10,7 +10,7 @@ for k, v in {'audit_df': res['df'], 'images_df': res['images_df'], 'summary': re
     at.session_state[k] = v
 at.run()
 print('app exceptions:', [str(x.value)[:150] for x in at.exception])
-print('downloads:', len([b for b in at.get('download_button')]))
+print('platform selector:', [x.label for x in at.selectbox if 'منصة' in x.label]); print('downloads:', len([b for b in at.get('download_button')]))
 import pdf_generator as g
 st = dict(res['summary']); st['platform_label'] = 'زد (Zid)'
 from audit_engine import build_broken_links

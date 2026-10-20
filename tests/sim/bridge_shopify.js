@@ -1,0 +1,31 @@
+const fs = require('fs'), crypto = require('crypto');
+const CID = '77763187de62989695309646e9deec82', SECRET = 'shpss_test_secret';
+const props = { CLIENT_ID: '8033', CLIENT_SECRET: 'x', PICKUP_KEY: 'PICKUP-KEY-LONG-ENOUGH', ['SHOPIFY_' + CID]: SECRET, SHOPIFY_otherapp: 'other-secret' };
+const cache = {};
+global.PropertiesService = { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; },
+  deleteProperty: k => { delete props[k]; }, getProperties: () => Object.assign({}, props) }) };
+global.CacheService = { getScriptCache: () => ({ get: k => cache[k] || null, put: (k, v) => { cache[k] = v; }, remove: k => { delete cache[k]; } }) };
+global.Utilities = { getUuid: () => 'state-uuid-1', computeHmacSha256Signature: (m, k) => Array.from(crypto.createHmac('sha256', k).update(m).digest()).map(b => b > 127 ? b - 256 : b) };
+let fetched = [];
+global.UrlFetchApp = { fetch: (url, o) => { fetched.push(url);
+  if (url.endsWith('/admin/oauth/access_token')) { const b = JSON.parse(o.payload); return { getResponseCode: () => (b.client_secret === SECRET ? 200 : 400), getContentText: () => JSON.stringify({ access_token: 'shpat_X', scope: 'read_products' }) }; }
+  return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ data: { shop: { name: 'Dev Store', primaryDomain: { url: 'https://dev.example.com' } } } }) }; } };
+global.HtmlService = { createHtmlOutput: h => ({ setTitle: () => h }) };
+global.ContentService = { MimeType: { JSON: 'json' }, createTextOutput: t => ({ setMimeType: () => JSON.parse(t) }) };
+global.ScriptApp = { getService: () => ({ getUrl: () => 'https://script.google.com/x/exec' }) };
+eval(fs.readFileSync('/mnt/user-data/outputs/zid_bridge.gs', 'utf8') + '\nglobal.doGet = doGet; global.doPost = doPost;');
+const sign = (params, key) => { const m = Object.keys(params).sort().map(k => k + '=' + params[k]).join('&'); return crypto.createHmac('sha256', key).update(m).digest('hex'); };
+const shop = 'anas-dev.myshopify.com';
+const open = { p: 'shopify', shop, timestamp: '1760000000', host: 'YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvYW5hcy1kZXY' };
+open.hmac = sign(Object.fromEntries(Object.entries(open)), SECRET);
+let out = doGet({ parameter: open });
+console.log('install → authorize link with our client id:', out.includes('/admin/oauth/authorize?client_id=' + CID) && out.includes('redirect_uri=' + encodeURIComponent('https://script.google.com/x/exec?p=shopify')));
+const forged = Object.assign({}, open, { hmac: 'deadbeef' });
+console.log('forged signature rejected:', doGet({ parameter: forged }).includes('تعذّر التحقق'));
+const cb = { p: 'shopify', shop, code: 'auth-code', state: 'stateuuid1', timestamp: '1760000001' };
+cb.hmac = sign(cb, SECRET);
+out = doGet({ parameter: cb });
+console.log('callback → connected:', out.includes('Store connected successfully'), '| saved:', !!props['shopify_' + shop], '| name:', JSON.parse(props['shopify_' + shop]).store.name);
+const list = doPost({ parameter: {}, postData: { contents: JSON.stringify({ key: 'PICKUP-KEY-LONG-ENOUGH', action: 'list' }) } });
+console.log('tool sees:', list.stores.map(s => s.platform + ':' + s.store.name).join(','));
+console.log('zid flow untouched:', doGet({ parameter: {} }).includes('ربط متجرك مع أنس راشد'));

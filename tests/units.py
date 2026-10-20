@@ -50,4 +50,54 @@ _bad = pd.DataFrame([{'رابط الصفحة': f'https://z.com/products/p{i}', '
 _ok = pd.DataFrame([{'رابط الصفحة': f'https://z.com/products/p{i}', 'رابط الصورة': f'https://m.z/{i}-{j}.jpg'} for i in range(20) for j in range(2)])
 check('كاشف قراءة القالب', len(e.template_reading_checks(_df, _bad)) >= 2 and not e.template_reading_checks(_df, _ok))
 check('إعلان المتجر «إجمالي N منتجات»', [e.extract_declared_count(e.make_soup(f'<p>{t}</p>')) for t in ('إجمالي 8 منتجات', 'اجمالي ٣٥ منتج', 'Total 120 products')] == [8, 35, 120])
+
+import io as _io
+_t = pd.DataFrame({'م': range(1, 1726), 'رابط الصورة': [f'https://m.z/{i}.jpg' for i in range(1725)]})
+import zipfile as _zf
+_d, _m, _n = x.table_payload('00_صور_بلا_وصف.csv', _t)
+_z = _zf.ZipFile(_io.BytesIO(_d))
+check('CSV: كل 500 صف في ملف داخل ZIP ولا يضيع صف (1725 = 500+500+500+225)', _n.endswith('.zip') and [len(pd.read_csv(_io.BytesIO(_z.read(f)))) for f in _z.namelist()] == [500, 500, 500, 225])
+check('ملف تحويلات زد يبقى Excel', x.table_payload('8_ملف_تحويلات_زد_للاستيراد.xlsx', _t.head(3))[2].endswith('.xlsx'))
+import pdf_generator as _g
+_st = {'fix_titles_urls': 48, 'fix_descs': 30, 'missing_alts': 81, 'weak_alts': 0, 'broken_actionable': 3, 'platform': 'zid'}
+_pq = _g.build_quote(_st, package={'label': 'ص', 'price': 990})
+check('التسعير: خدمة منفردة، وباقة بقيمة مرجعية، وحدود العينة', _g.build_quote(_st, services=['image_alt'])['total'] == 405
+      and _pq['total'] == 990 and _pq['reference'] == 1296 and [_g.sample_size(n) for n in (2, 10, 20, 3000)] == [2, 3, 5, 10]
+      and _g.package_for(62)['price'] == 990 and _g.package_for(3296)['price'] is None)
+
+_fx = pd.DataFrame([{'الرابط': 'https://m.s/pages/سياسة-الخصوصية', 'نوع الصفحة': 'info', 'متاحة': True, 'عنوان الميتا': t, 'حالة العنوان': 'short', 'جودة العنوان': q}
+                    for t, q in (('[-]', 'q_symbols'), ('سياسة الخصوصية', 'q_ok'))])
+check('الصفحات الثابتة: تُصلح فقط إن كان عنوانها بلا معنى، وعنوانها اسمها المعروف',
+      list(e.title_url_fix_mask(_fx)) == [True, False] and e.fixed_page_title('https://m.s/blogs', '', 'archive') == 'المدونة'
+      and e.fixed_page_title('https://m.s/pages/تواصل-معنا', '', 'info') == 'تواصل معنا' and e.fixed_page_title('https://m.s/products/x', '', 'product') == '')
+
+import ai_writer as _ai
+from urllib.parse import quote as _q, unquote as _uq
+_M = 'https://midhal-oud.store/products/'
+_pr = [('copy-of-copy-of-مبخرة-خشبية', 'مبخرة خشبية بنقش ذهبي'), ('بوكس-المها-1', 'بوكس فيروز'), ('بوكس-المها', 'بوكس المها'),
+       ('مبخرة-حائلية-لون-فضي-1', 'مبخرة حائلية خشبية'), ('6deef1ae', 'مجموعة لك ولها'), ('مبخره-خشبيه-صغيره', 'مبخرة خشبية صغيرة'), ('عطر-100-مل', 'عطر 100 مل')]
+_dfu = pd.DataFrame([{'الرابط': _M + _q(a), 'نوع الصفحة': 'product', 'متاحة': True, 'اسم المنتج المعروض': b} for a, b in _pr])
+_ch = _ai.url_changes(_dfu, {})
+_new = [_uq(u).split('/products/')[1] for u in _ch['الرابط الجديد']]
+check('الروابط: الحالات الواضحة فقط، والرابط الجديد عربي من العنوان',
+      len(_ch) == 4 and 'اسم منتج آخر' in ' '.join(_ch['سبب التغيير']) and all(not any(c.isascii() and c.isalpha() for c in n) for n in _new)
+      and _ai.zid_url_redirects(_ch)['التوجيه من'].iloc[0].startswith('/products/'))
+
+import tempfile as _tf
+_b = _tf.mkdtemp(); _U = 'https://m.s/products/a'
+_ai.save_cache(_b, 'https://m.s', {'__meta__': {'model': 'm', 'suffix': ' | م', 'suffix_mode': 'add'},
+    _U: {'title': 'عنوان', 'title_full': 'x', 'description': 'و' * 130, 'status': 'مطابق للقواعد', 'title_notes': '', 'desc_notes': ''}})
+_n = _ai.apply_edits(_b, 'https://m.s', 'titles', [(_U, 'عنوان قصير')])
+_c = _ai.load_cache(_b, 'https://m.s')[_U]
+check('التعديل اليدوي: يُحفظ ويُعاد فحصه ويُعلَّم معدّلاً', _n == 1 and _c['title'] == 'عنوان قصير' and 'طول العنوان' in _c['title_notes'] and _c.get('edited'))
+
+check('الصفحات الثابتة بالإنجليزية للصفحات الإنجليزية فقط',
+      e.fixed_page_title('https://s.com/policies/privacy-policy', '', 'info', 'en') == 'Privacy Policy'
+      and e.fixed_page_title('https://s.com/policies/privacy-policy', '', 'info', 'ar') == 'سياسة الخصوصية')
+e.set_active_platform('shopify')
+_shop_ok = (not e.is_crawlable('https://s.com/products/x.oembed', 's.com') and not e.is_crawlable('https://s.com/products/x&via=y', 's.com')
+            and e.is_crawlable('https://s.com/products/x', 's.com'))
+e.set_active_platform('zid')
+check('قواعد شوبيفاي لا تعمل إلا في شوبيفاي', _shop_ok and e.is_crawlable('https://s.com/products/x.oembed', 's.com'))
+e.set_active_platform(None)
 print('\nكل الاختبارات ناجحة' if not fails else f'\nفشل: {fails}'); sys.exit(1 if fails else 0)
